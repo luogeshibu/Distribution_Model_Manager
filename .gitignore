@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environment
+.venv/
+
+# Build output
+build/
+dist/
+release/
+*.spec
+*.egg-info/
+
+# Application runtime data
+workspace/
+
+# Local secrets / configuration
+.env
+.env.*
+!.env.example
+config.local.json
+
+# IDE / OS
+.idea/
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Archives / temporary files
+*.zip
+*.7z
+*.rar
+*.tmp
+*.tmp_model_manager
+*.bak
+*.backup

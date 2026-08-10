@@ -1,3 +1,7 @@
-oracledb>=2.0
 PySide6>=6.7
-pyinstaller>=6.0
+oracledb>=2.0
+cryptography>=42.0
+cffi>=1.16
+PyInstaller>=6.0
+pyinstaller-hooks-contrib>=2024.0
+pytest>=8.0

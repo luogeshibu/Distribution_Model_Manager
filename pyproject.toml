@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "distribution-model-manager"
+version = "3.0.10"
+description = "Distribution G-file model validation and safe association manager"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7",
+    "oracledb>=2.0",
+    "cryptography>=42.0",
+    "cffi>=1.16",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.0",
+]
+test = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+distribution-model-manager = "dmm.bootstrap:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dmm = [
+    "resources/*.png",
+    "resources/*.ico",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
