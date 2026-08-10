@@ -156,22 +156,33 @@ class OracleClient:
         return None
 
     def get_feeder_info(self, feeder_id: Any) -> Optional[Dict[str, Any]]:
+        """
+        Resolve dms_combined_device.FEEDER_ID through table 13500.
+
+        FEEDER_ID is a numeric foreign-key value in Oracle.  DBI may render a
+        human-readable value, but normal SQL returns the real numeric ID, so
+        the application resolves the referenced dms_feeder_device row itself.
+        """
         if feeder_id in (None, ""):
             return None
-        try:
-            table_name = self.get_table_name(13500)
-            # Current dms_feeder_device samples contain ID, CODE, NAME, ST_ID.
-            rows = self._query(
-                f"""
-                SELECT id, code, name, st_id
-                FROM {table_name}
-                WHERE id = :feeder_id
-                """,
-                {"feeder_id": int(feeder_id)},
-            )
-            return rows[0] if len(rows) == 1 else None
-        except Exception:
+
+        table_name = self.get_table_name(13500)
+        rows = self._query(
+            f"""
+            SELECT id, code, name, st_id, graph_name
+            FROM {table_name}
+            WHERE id = :feeder_id
+            """,
+            {"feeder_id": int(feeder_id)},
+        )
+
+        if len(rows) != 1:
             return None
+
+        row = dict(rows[0])
+        row["_table_id"] = 13500
+        row["_table_name"] = table_name
+        return row
 
     def get_station_info(self, station_id: Any) -> Optional[Dict[str, Any]]:
         if station_id in (None, ""):

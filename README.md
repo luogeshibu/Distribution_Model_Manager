@@ -1,175 +1,82 @@
-# 配网模型管理工具 v3.0.10
+# 配网模型管理工具 v3.0.13
 
-## 本版本的设备校验原则
+## 状态颜色
 
-### 1. 环网柜必须唯一
+| 状态 | 颜色 | 含义 |
+|---|---|---|
+| PASS | 绿色 | 校验正常 |
+| WARN | 黄色 | 未关联，但 RMU 唯一、CODE 唯一存在、馈线一致，可自动关联 |
+| FEEDER | 橙色 | 馈线不一致，禁止自动关联 |
+| BLOCKED | 蓝色 | 已有人工作出关联且当前 CODE/馈线检查通过，但 RMU 名称不唯一，只能人工保留/复核，禁止自动关联 |
+| FAIL | 红色 | 硬错误，例如 RMU 不存在、RMU 重复且设备未关联、CODE 不存在/重复、KeyID 无效 |
 
-先根据识别到的环网柜名称查询 `dms_combined_device`：
+HTML 报告和【帮助】模块都包含颜色说明。
 
-```text
-0 条    -> FAIL
-1 条    -> 继续设备校验
-> 1 条  -> FAIL
-```
+## 环网柜重复
 
-环网柜不唯一或不存在时，不再尝试根据设备数据库结果判定该 RMU 可关联。
-
-### 2. G 文件是设备校验的主数据
-
-只校验 G 文件里实际存在的：
+环网柜名称查询出多条记录时：
 
 ```text
-CBreakerDis
-ZhaiWaiJieDiDaoZha
-BusDis
+自动关联：始终禁止
 ```
 
-对于每一个 G 图元，得到“用于校验的 p_NameString”后，只检查对应设备表中：
+设备当前没有 KeyID：
+```text
+红色 FAIL
+环网柜存在多个，当前设备未关联，禁止自动关联
+```
+
+设备已经有 KeyID：
+```text
+继续反解当前 KeyID
+→ 读取当前数据库设备
+→ 检查当前 CODE 与用于校验的 p_NameString
+→ 检查当前设备 FEEDER_ID 与 G 文件馈线
+```
+
+如果馈线不一致：
+```text
+橙色 FEEDER
+```
+
+如果 CODE 和馈线都正确：
+```text
+蓝色 BLOCKED
+当前人工关联可保留/人工复核，但程序禁止自动关联或自动改写
+```
+
+## 环网柜唯一
+
+只校验 G 文件实际需要的 CODE：
 
 ```text
-CODE = 用于校验的 p_NameString
+CODE = 最终用于校验的 p_NameString
 ```
 
-结果：
+0 条：红色 FAIL，数据库不存在该设备。  
+1 条：继续检查馈线、当前 KeyID。  
+多条：红色 FAIL，CODE 重复。  
+
+数据库其它无关设备全部忽略。
+
+## 馈线
+
+馈线不一致不使用红色，而使用橙色 FEEDER。
+
+例如：
 
 ```text
-0 条    -> FAIL（红色）
-1 条    -> 数据库模型匹配成功
-> 1 条  -> FAIL（CODE 对应多条数据库设备）
+G文件 = JED-NTH-ABH-06.sln.pic.g
+G文件馈线 = ABH-06
+数据库环网柜/设备馈线 = JED NTH ABH 09
 ```
 
-数据库中与任何 G 图元 CODE 无关的其它设备记录：
+结果为橙色 FEEDER，并禁止自动关联。
+
+## 目录
 
 ```text
-忽略
-不阻断 RMU
-不进入设备明细
+源码运行：项目根目录/workspace/
+EXE运行：EXE同级/workspace/
+发布目录：release/
 ```
-
-例如数据库中有：
-
-```text
-NAME       CODE
-Q1
-Y1
-Y2
-TR1        Q1
-Y1-8723    Y1
-Y2-22333   Y2
-```
-
-如果 G 文件要求：
-
-```text
-Q1
-Y1
-Y2
-```
-
-则只使用 CODE 为 Q1/Y1/Y2 的后三条记录。
-前面 CODE 为空的 Q1/Y1/Y2 记录不参与本次 G 图元匹配，也不会因为它们存在而阻断 RMU。
-
-### 3. 名称来源逻辑不变
-
-仍支持：
-
-```text
-使用 XML p_NameString
-使用图上文字
-```
-
-图上文字模式：
-
-```text
-CBreakerDis            = 图上识别名称
-ZhaiWaiJieDiDaoZha     = 配对开关名称 + D
-BusDis                 = BUS
-```
-
-### 4. 未关联不是模型数据错误
-
-只要 G 图元名称能够唯一匹配数据库 CODE：
-
-```text
-状态 = PASS（绿色）
-```
-
-如果当前没有 KeyID：
-
-```text
-设备是否已关联模型 = NO
-是否需要回写       = YES
-处理建议           = 需要关联
-```
-
-如果当前 KeyID 已正确：
-
-```text
-状态 = PASS
-处理建议 = 模型已关联，无需关联
-```
-
-如果当前 KeyID 指向错误设备 / 表 / 域 / 环网柜：
-
-```text
-状态 = FAIL（红色）
-```
-
-### 5. 设备明细只显示 G 文件设备
-
-设备明细不会再生成：
-
-```text
-DATABASE_INVENTORY
-```
-
-类型的伪设备行。
-
-数据库相关错误通过当前 G 图元的 FAIL 原因和环网柜汇总的“关联阻断原因”体现。
-
-## 报告排序
-
-环网柜汇总：
-
-```text
-只按环网柜序号升序
-```
-
-设备明细：
-
-```text
-每个环网柜内部只按 G 图元类型分组：
-1. CBreakerDis
-2. ZhaiWaiJieDiDaoZha
-3. BusDis
-```
-
-同类内部保留原处理顺序。
-
-## Workspace
-
-源码：
-
-```text
-项目根目录/workspace/
-```
-
-EXE：
-
-```text
-EXE同级/workspace/
-```
-
-## 打包
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
-```
-
-发布目录：
-
-```text
-release/
-```
-
-`build_exe.ps1` 不会运行生成后的 EXE。

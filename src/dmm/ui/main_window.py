@@ -978,7 +978,7 @@ class MainWindow(QMainWindow):
             "• ZhaiWaiJieDiDaoZha：与 CBreakerDis 空间配对；用于校验的 p_NameString=开关名+D；CODE 必须与其一致，NAME 不参与判断。\n"
             "• BusDis：CODE 不得为空；CODE 必须等于当前用于校验的 p_NameString；图上文字模式固定为 BUS，NAME 不参与判断。\n"
             "• p_NameString 模式读取 XML p_NameString；图上文字模式不读取三类设备 XML p_NameString。\n"
-            "• 三类设备 G 图元数量必须和数据库 combined_id 下记录数完全一致，多一条或少一条都会阻断关联。\n"
+            "• 设备校验只检查 G 文件实际需要的 CODE；数据库中其它无关设备不参与校验。\n"
             "• 已有 KeyID 时继续校验当前设备 ID、表号、域号、combined_id 和 Expected KeyID；正确则无需重复关联，错误则禁止自动覆盖。"
         )
         policy_text.setWordWrap(True)
@@ -997,6 +997,19 @@ class MainWindow(QMainWindow):
         db_text.setWordWrap(True)
         db_layout.addWidget(db_text)
         layout.addWidget(db_rule)
+
+        colors = QGroupBox("状态颜色说明")
+        colors_layout = QVBoxLayout(colors)
+        colors_text = QLabel(
+            "绿色 PASS：校验正常。\n"
+            "黄色 WARN：设备未关联，但 RMU 唯一、CODE 存在且馈线一致，可以自动关联。\n"
+            "橙色 FEEDER：馈线不一致，禁止自动关联，但不使用红色硬错误颜色。\n"
+            "蓝色 BLOCKED：设备已经人工关联且当前 CODE/馈线检查通过，但 RMU 名称不唯一，只允许保留/人工复核，禁止自动关联。\n"
+            "红色 FAIL：硬错误，例如 RMU 不存在、RMU 重复且设备未关联、CODE 不存在/重复、KeyID 无法反解。"
+        )
+        colors_text.setWordWrap(True)
+        colors_layout.addWidget(colors_text)
+        layout.addWidget(colors)
 
         assoc = QGroupBox("模型关联与 G 文件回写")
         assoc_layout = QVBoxLayout(assoc)

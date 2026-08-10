@@ -12,6 +12,52 @@ All notable changes to Distribution Model Manager are documented here.
 
 
 
+
+
+## [3.0.13] - 2026-08-10
+
+### Added
+- Added independent visual states: PASS / WARN / FEEDER / BLOCKED / FAIL.
+- Added status-color legends to HTML reports and Help.
+- Duplicate RMUs now permit read-only inspection of existing manual KeyID links.
+
+### Changed
+- Feeder mismatch uses orange FEEDER instead of red FAIL.
+- Duplicate RMU remains a permanent automatic-association block.
+- Under duplicate RMUs, unlinked devices are red FAIL; linked devices are inspected for CODE/feeder consistency and become orange FEEDER or blue BLOCKED.
+- Unrelated database devices remain ignored.
+
+## [3.0.12] - 2026-08-10
+
+### Fixed
+- Fixed `NameError: g_file is not defined`; feeder extraction now uses the parsed G-file path.
+
+### Added
+- Added strict feeder consistency checks for every unique RMU.
+- Added feeder consistency checks for each uniquely CODE-matched database device.
+- Device details now show the exact matched database device plus G-file feeder and database-device feeder.
+
+### Changed
+- RMU name 0 rows or multiple rows remains a hard association block.
+- A unique RMU on the wrong feeder is now a hard association block.
+- A requested CODE with no database row reports that the device does not exist.
+- A requested CODE with multiple database rows reports a CODE duplication error.
+- Unrelated extra database devices remain ignored.
+
+## [3.0.11] - 2026-08-10
+
+### Added
+- Added G-file feeder hint extraction (`ABH-06` from `JED-NTH-ABH-06.sln.pic.g`).
+- Added separator-insensitive feeder comparison for `ABH-06`, `ABH_06`, and `ABH 06`.
+- Added explicit FEEDER_ID resolution through table 13500 / `dms_feeder_device`.
+- Added readable database feeder composition using station name + feeder NAME.
+- Added feeder validation columns to the RMU summary report.
+
+### Changed
+- Unlinked but database-matched G devices are WARN/yellow again, while remaining association-ready.
+- Feeder mismatch now blocks RMU association.
+- Device-detail report remains G-element-only.
+
 ## [3.0.10] - 2026-08-10
 
 ### Changed

@@ -19,21 +19,26 @@ DEVICE_FIELDS = [
     "selected_name_source", "selected_device_name", "paired_breaker_name",
     "table_id", "table_name", "configured_domain", "match_mode",
     "db_match_count", "db_device_id", "db_code", "db_name",
-    "db_feeder_id", "db_combined_id", "db_bv_id",
+    "g_file_feeder", "db_feeder_id", "db_feeder_name",
+    "device_feeder_match", "device_feeder_reason",
+    "db_combined_id", "db_bv_id",
     "expected_keyid", "expected_keyid_verified",
     "current_keyid", "current_device_id", "current_table_id", "current_domain",
     "current_table_name", "current_db_code", "current_db_name",
     "current_combined_id", "current_rmu_match",
     "model_linked", "model_link_correct", "model_link_status",
     "association_action", "writeback_needed",
-    "association_ready", "status", "reason",
+    "association_ready", "status", "severity", "reason",
 ]
 
 RMU_FIELDS = [
     "file_name", "frame_index", "frame_xml_id", "rmu_name",
-    "rmu_status", "rmu_reason", "rmu_db_count", "db_record_index",
-    "rmu_id", "code", "feeder_id", "graph_name",
-    "combined_type", "run_state", "device_count",
+    "rmu_status", "rmu_severity", "rmu_reason", "rmu_db_count", "db_record_index",
+    "rmu_id", "code", "feeder_id",
+    "file_feeder_hint", "feeder_table_id", "feeder_table_name",
+    "feeder_db_name", "database_feeder_name", "feeder_match",
+    "feeder_match_reason",
+    "graph_name", "combined_type", "run_state", "device_count",
     "linked_correct_count", "unlinked_count", "linked_wrong_count",
     "association_eligible", "association_block_reasons", "inventory_issues",
     "db_integrity_issues",
@@ -55,10 +60,14 @@ DEVICE_LABELS = {
     "configured_domain": "域号",
     "match_mode": "匹配规则",
     "db_match_count": "数据库匹配数",
-    "db_device_id": "设备ID",
-    "db_code": "设备CODE",
-    "db_name": "设备NAME",
-    "db_feeder_id": "馈线ID",
+    "db_device_id": "关联数据库设备ID",
+    "db_code": "关联设备CODE",
+    "db_name": "关联设备NAME",
+    "g_file_feeder": "G文件所属馈线",
+    "db_feeder_id": "数据库设备馈线ID",
+    "db_feeder_name": "数据库设备所属馈线",
+    "device_feeder_match": "设备馈线是否正确",
+    "device_feeder_reason": "设备馈线说明",
     "db_combined_id": "所属环网柜ID",
     "db_bv_id": "BV_ID",
     "expected_keyid": "期望KeyID",
@@ -79,6 +88,7 @@ DEVICE_LABELS = {
     "writeback_needed": "是否需要回写",
     "association_ready": "可进入关联流程",
     "status": "状态",
+    "severity": "状态类型",
     "reason": "说明",
 }
 
@@ -88,12 +98,20 @@ RMU_LABELS = {
     "frame_xml_id": "矩形框XML ID",
     "rmu_name": "环网柜名称",
     "rmu_status": "状态",
+    "rmu_severity": "状态类型",
     "rmu_reason": "说明",
     "rmu_db_count": "数据库记录数",
     "db_record_index": "数据库记录序号",
     "rmu_id": "环网柜ID",
     "code": "CODE",
     "feeder_id": "馈线ID",
+    "file_feeder_hint": "G文件馈线",
+    "feeder_table_id": "馈线表号",
+    "feeder_table_name": "馈线数据库表",
+    "feeder_db_name": "馈线NAME",
+    "database_feeder_name": "数据库馈线名称",
+    "feeder_match": "馈线匹配",
+    "feeder_match_reason": "馈线校验说明",
     "graph_name": "GRAPH_NAME",
     "combined_type": "COMBINED_TYPE",
     "run_state": "RUN_STATE",
@@ -116,6 +134,8 @@ def status_cls(status):
     return {
         "PASS": "pass",
         "WARN": "warn",
+        "FEEDER": "feeder",
+        "BLOCKED": "blocked",
         "FAIL": "fail",
         "INFO": "info",
     }.get(status, "")
@@ -202,8 +222,26 @@ def flatten_rmu_rows(reports):
                 "frame_xml_id": rmu.get("frame_xml_id", ""),
                 "rmu_name": rmu.get("rmu_name", ""),
                 "rmu_status": rmu.get("rmu_status", ""),
+                "rmu_severity": rmu.get("rmu_severity", ""),
                 "rmu_reason": rmu.get("rmu_reason", ""),
                 "rmu_db_count": rmu.get("rmu_db_count", 0),
+                "file_feeder_hint": rmu.get("file_feeder_hint", ""),
+                "database_feeder_name": rmu.get("database_feeder_name", ""),
+                "feeder_match": rmu.get("feeder_match", ""),
+                "feeder_match_reason": rmu.get("feeder_match_reason", ""),
+                "feeder_table_id": (
+                    (rmu.get("feeder") or {}).get("_table_id", 13500)
+                    if rmu.get("feeder") else 13500
+                ),
+                "feeder_table_name": (
+                    (rmu.get("feeder") or {}).get(
+                        "_table_name",
+                        "dms_feeder_device",
+                    )
+                ),
+                "feeder_db_name": (
+                    (rmu.get("feeder") or {}).get("name", "")
+                ),
                 "device_count": len([
                     d for d in rmu.get("device_rows", [])
                     if d.get("xml_id")
@@ -383,7 +421,7 @@ table{{border-collapse:collapse;width:100%;font-size:12px}}
 th{{background:var(--green-dark);color:white;position:sticky;top:0}}
 th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-space:nowrap}}
 .scroll{{overflow:auto;max-height:650px}}
-.pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}} .fail{{background:#FFF0F0}}
+.pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}} .feeder{{background:#FFE8CC}} .blocked{{background:#EAF3FF}} .fail{{background:#FFF0F0}}
 .meta{{color:#D7EEE5}}
 </style>
 </head>
@@ -402,13 +440,24 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
   </div>
 
   <div class="card">
+    <h2>状态颜色说明</h2>
+    <p>
+      <span style="background:#EAF8F2;padding:4px 10px">绿色 PASS：校验正常</span>
+      <span style="background:#FFF8DE;padding:4px 10px;margin-left:8px">黄色 WARN：未关联，但满足自动关联条件</span>
+      <span style="background:#FFE8CC;padding:4px 10px;margin-left:8px">橙色 FEEDER：馈线不一致，禁止自动关联</span>
+      <span style="background:#EAF3FF;padding:4px 10px;margin-left:8px">蓝色 BLOCKED：已有人工关联，但环网柜不唯一，禁止自动关联</span>
+      <span style="background:#FFF0F0;padding:4px 10px;margin-left:8px">红色 FAIL：硬错误</span>
+    </p>
+  </div>
+
+  <div class="card">
     <h2>环网柜汇总</h2>
     <p>数据库存在重复记录时，每一条环网柜 ID 均单独展示；环网柜本身不唯一时，该柜内已有模型关联一律不能判定为正确。</p>
     {rmu_table}
   </div>
 
   <div class="card">
-    <h2>设备明细</h2><p>设备明细仅展示 G 文件中的设备图元；逐个检查用于校验的 p_NameString 是否能在对应表中唯一匹配 CODE，并展示当前 KeyID、关联状态及是否需要回写。数据库中与 G 图元无关的其它记录不进入设备明细。</p>
+    <h2>设备明细</h2><p>设备明细仅展示 G 文件中的设备图元；每个图元显示其唯一匹配到的数据库设备、G文件所属馈线、数据库设备所属馈线、当前 KeyID 及是否需要回写。数据库中与 G 图元 CODE 无关的其它设备不参与校验，也不进入设备明细。</p>
     {device_table}
   </div>
 </main>
