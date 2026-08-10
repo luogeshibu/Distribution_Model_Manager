@@ -66,8 +66,13 @@ class JobWorker(QThread):
             else:
                 raise RuntimeError("模型关联回写必须基于已经确认的关联预览执行。")
 
+            report_context = {
+                "VALIDATE": ("validation", "validation_report"),
+                "PREVIEW_ASSOCIATION": ("preview", "association_preview_report"),
+            }.get(self.operation, ("result", "report"))
+
             self.progress.emit(96, "正在生成 HTML / CSV 报告……")
-            report_dir = self.run_dir / "report"
+            report_dir = self.run_dir / report_context[1]
             report_dir.mkdir(parents=True, exist_ok=True)
 
             html_path = report_dir / "report.html"
@@ -76,6 +81,8 @@ class JobWorker(QThread):
             csv_paths = export_csv_bundle(reports, csv_base)
 
             artifacts = {
+                "task_type": report_context[0],
+                "operation": self.operation,
                 "run_dir": str(self.run_dir),
                 "report_dir": str(report_dir),
                 "html": str(html_path),

@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         self.current_preview = None
         self.current_artifacts = {}
         self.current_report_dir = self.cfg.get("last_run_dir", "")
+        self.current_task_type = ""
         self.worker = None
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} - {APP_EDITION}")
@@ -679,15 +680,7 @@ class MainWindow(QMainWindow):
         for module_id, module in self.modules.items():
             self.module_combo.addItem(module.display_name, module_id)
         self.module_combo.currentIndexChanged.connect(self.on_module_changed)
-        grid.addWidget(self.module_combo, 0, 1)
-
-        grid.addWidget(QLabel("处理方式"), 0, 2)
-        self.operation_combo = NoWheelComboBox()
-        self.operation_combo.addItem("模型校验", "VALIDATE")
-        self.operation_combo.addItem("模型关联预览", "PREVIEW_ASSOCIATION")
-        self.operation_combo.addItem("执行模型关联", "APPLY_ASSOCIATION")
-        self.operation_combo.currentIndexChanged.connect(self.refresh_operation_state)
-        grid.addWidget(self.operation_combo, 0, 3)
+        grid.addWidget(self.module_combo, 0, 1, 1, 3)
 
         grid.addWidget(QLabel("G 文件 / 目录"), 1, 0)
         self.input_edit = QLineEdit(self.cfg.get("input_path", ""))
@@ -775,7 +768,7 @@ class MainWindow(QMainWindow):
         copy_log_btn = QPushButton("复制日志")
         clear_log_btn = QPushButton("清空日志")
 
-        self.open_html_btn = QPushButton("打开本次 HTML")
+        self.open_html_btn = QPushButton("打开 HTML")
         self.open_rmu_csv_btn = QPushButton("打开环网柜 CSV")
         self.open_device_csv_btn = QPushButton("打开设备 CSV")
         self.open_report_dir_btn = QPushButton("打开本次运行目录")
@@ -794,6 +787,7 @@ class MainWindow(QMainWindow):
             self.open_report_dir_btn,
         ):
             button.setEnabled(False)
+            button.setVisible(False)
 
         log_actions.addWidget(copy_log_btn)
         log_actions.addWidget(clear_log_btn)
@@ -818,9 +812,17 @@ class MainWindow(QMainWindow):
         actions = QHBoxLayout()
         actions.setSpacing(12)
 
-        self.run_btn = QPushButton("运行当前任务")
-        self.run_btn.setObjectName("primary")
-        self.run_btn.clicked.connect(self.start_job)
+        self.validate_btn = QPushButton("模型校验")
+        self.validate_btn.setObjectName("primary")
+        self.validate_btn.clicked.connect(
+            lambda: self.start_job("VALIDATE")
+        )
+
+        self.preview_btn = QPushButton("模型关联预览")
+        self.preview_btn.setObjectName("secondary")
+        self.preview_btn.clicked.connect(
+            lambda: self.start_job("PREVIEW_ASSOCIATION")
+        )
 
         self.apply_btn = QPushButton("执行模型关联")
         self.apply_btn.setObjectName("danger")
@@ -831,10 +833,16 @@ class MainWindow(QMainWindow):
         database_btn.setObjectName("secondary")
         database_btn.clicked.connect(lambda: self.nav.setCurrentRow(0))
 
-        for button in (self.run_btn, self.apply_btn, database_btn):
+        for button in (
+            self.validate_btn,
+            self.preview_btn,
+            self.apply_btn,
+            database_btn,
+        ):
             button.setFixedSize(168, 42)
 
-        actions.addWidget(self.run_btn)
+        actions.addWidget(self.validate_btn)
+        actions.addWidget(self.preview_btn)
         actions.addWidget(self.apply_btn)
         actions.addWidget(database_btn)
         actions.addStretch()
@@ -942,12 +950,12 @@ class MainWindow(QMainWindow):
         quick_layout = QVBoxLayout(quick)
         quick_text = QLabel(
             "1. 在【数据库】页面确认 Oracle 配置，可先点击‘测试数据库连接’。\n"
-            "2. 进入【模型工作区】，选择 RMU 环网柜模型和处理方式。\n"
-            "3. 选择单个 G 文件，或选择包含多个 G 文件的目录。\n"
-            "4. 选择环网柜名称所在方向。\n"
-            "5. 选择开关名称来源：p_NameString 或环网柜内图上文字。\n"
-            "6. 确认 13502 / 13514 / 13506 的表号、域号后运行。\n"
-            "7. 任务完成后 HTML / CSV 会自动生成；可在模型工作区直接打开本次报告。"
+            "2. 进入【模型工作区】，选择 RMU 环网柜模型和 G 文件/目录。\n"
+            "3. 配置环网柜名称方向、开关名称来源以及表号/域号。\n"
+            "4. 点击底部【模型校验】执行独立校验，并生成校验 HTML / CSV。\n"
+            "5. 需要关联时先点击【模型关联预览】，确认预览结果后【执行模型关联】才会启用。\n"
+            "6. 执行模型关联只修改 Workspace 中的安全副本，原始 G 文件不变。\n"
+            "7. 关联完成后程序会重新校验安全副本，并生成与模型校验同规格的最终 HTML / CSV 报告。"
         )
         quick_text.setWordWrap(True)
         quick_layout.addWidget(quick_text)
@@ -958,7 +966,7 @@ class MainWindow(QMainWindow):
         rmu_naming_text = QLabel(
             "• 环网柜仍然通过矩形框 + 三类目标设备图元自动识别。\n"
             "• 环网柜名称按照用户勾选的方向读取：上方 / 下方 / 左侧 / 右侧。\n"
-            "• 同一方向可能存在白色、橙色、绿色等多个 Text；程序会读取候选文字，但只要存在绿色名称，就优先选择距离当前环网柜最近的绿色 Text。\n"
+            "• 同一方向只有一个名称时直接取最近名称，不判断颜色；只有存在多个名称时才使用绿色文字消歧。\n"
             "• 绿色依据 G 文件属性判断：lc=0,255,0 或 lcc=#00ff00；实际名称读取 Text 的 ts 属性。\n"
             "• 绿色名称不受旧的 120 坐标单位搜索距离限制，因此名称离环网柜较远也可以识别。\n"
             "• 如果所选方向没有绿色名称，才回退到普通名称识别规则。\n"
@@ -1085,12 +1093,6 @@ class MainWindow(QMainWindow):
         if module_index >= 0:
             self.module_combo.setCurrentIndex(module_index)
 
-        # Restore selected operation where possible.
-        operation = self.cfg.get("operation", "VALIDATE")
-        operation_index = self.operation_combo.findData(operation)
-        if operation_index >= 0:
-            self.operation_combo.setCurrentIndex(operation_index)
-
         self.on_module_changed(self.module_combo.currentIndex())
 
     # ------------------------------------------------------------
@@ -1105,32 +1107,77 @@ class MainWindow(QMainWindow):
 
     def refresh_operation_state(self):
         module_id = self.module_combo.currentData()
-        operation = self.operation_combo.currentData()
-
         if not module_id:
             return
 
         module = self.modules[module_id]
+        self.validate_btn.setEnabled(module.supports("VALIDATE"))
+        self.preview_btn.setEnabled(module.supports("PREVIEW_ASSOCIATION"))
 
-        if operation == "APPLY_ASSOCIATION":
-            self.run_btn.setEnabled(False)
-            self.apply_btn.setEnabled(self.current_preview is not None)
-            self.workspace_status.setText("执行模型关联前，必须先完成并确认模型关联预览。")
-            apply_status_style(self.workspace_status, False)
-            return
+        has_preview = bool(
+            self.current_preview
+            and self.current_preview.get("changes_by_file")
+        )
+        self.apply_btn.setEnabled(
+            module.supports("APPLY_ASSOCIATION") and has_preview
+        )
 
-        supported = module.supports(operation)
-        self.run_btn.setEnabled(supported)
-        self.apply_btn.setEnabled(False)
-
-        if supported:
-            self.workspace_status.setText("执行前需要进行 Oracle 预检查。")
-        else:
-            self.workspace_status.setText(
-                f"{module.display_name}：当前版本暂未开放“{self.operation_combo.currentText()}”。"
-            )
-
+        self.workspace_status.setText("请选择下方具体任务按钮执行。")
         apply_status_style(self.workspace_status, False)
+
+    def _set_task_buttons_enabled(self, enabled: bool):
+        module_id = self.module_combo.currentData()
+        module = self.modules.get(module_id) if module_id else None
+
+        self.validate_btn.setEnabled(
+            bool(enabled and module and module.supports("VALIDATE"))
+        )
+        self.preview_btn.setEnabled(
+            bool(enabled and module and module.supports("PREVIEW_ASSOCIATION"))
+        )
+
+        if not enabled:
+            self.apply_btn.setEnabled(False)
+        else:
+            self.refresh_operation_state()
+
+    def _update_artifact_buttons(self, task_type=""):
+        """Only show result buttons for artifacts that really exist."""
+        labels = {
+            "validation": (
+                "打开校验 HTML",
+                "打开校验环网柜 CSV",
+                "打开校验设备 CSV",
+            ),
+            "preview": (
+                "打开预览 HTML",
+                "打开预览环网柜 CSV",
+                "打开预览设备 CSV",
+            ),
+            "association": (
+                "打开关联结果 HTML",
+                "打开关联结果环网柜 CSV",
+                "打开关联结果设备 CSV",
+            ),
+        }
+        html_text, rmu_text, device_text = labels.get(
+            task_type,
+            ("打开 HTML", "打开环网柜 CSV", "打开设备 CSV"),
+        )
+        self.open_html_btn.setText(html_text)
+        self.open_rmu_csv_btn.setText(rmu_text)
+        self.open_device_csv_btn.setText(device_text)
+
+        for key, button in (
+            ("html", self.open_html_btn),
+            ("rmu_csv", self.open_rmu_csv_btn),
+            ("device_csv", self.open_device_csv_btn),
+            ("run_dir", self.open_report_dir_btn),
+        ):
+            value = self.current_artifacts.get(key, "")
+            exists = bool(value and Path(value).exists())
+            button.setEnabled(exists)
+            button.setVisible(exists)
 
     # ------------------------------------------------------------
     # Logging
@@ -1349,16 +1396,20 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------
     # Run model job
     # ------------------------------------------------------------
-    def start_job(self):
+    def start_job(self, operation):
         try:
             module_id = self.module_combo.currentData()
-            operation = self.operation_combo.currentData()
             module = self.modules[module_id]
+            operation_labels = {
+                "VALIDATE": "模型校验",
+                "PREVIEW_ASSOCIATION": "模型关联预览",
+            }
+            operation_label = operation_labels.get(operation, operation)
 
             if not module.supports(operation):
                 raise ValueError(
                     f"{module.display_name} 当前版本暂未开放“"
-                    f"{self.operation_combo.currentText()}”。"
+                    f"{operation_label}”。"
                 )
 
             settings = self.module_widgets[module_id].collect_settings()
@@ -1408,7 +1459,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
             return
 
-        self.run_btn.setEnabled(False)
+        self._set_task_buttons_enabled(False)
         self.current_preview = None
         self.apply_btn.setEnabled(False)
         self.log_edit.clear()
@@ -1416,16 +1467,22 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_message.setText("任务准备中……")
         self.current_artifacts = {}
-        for button in (self.open_html_btn, self.open_rmu_csv_btn, self.open_device_csv_btn, self.open_report_dir_btn):
+        self.current_task_type = ""
+        for button in (
+            self.open_html_btn,
+            self.open_rmu_csv_btn,
+            self.open_device_csv_btn,
+            self.open_report_dir_btn,
+        ):
             button.setEnabled(False)
+            button.setVisible(False)
 
         self.workspace_status.show()
         self.workspace_status.setText("正在进行 Oracle 数据库预检查……")
         apply_status_style(self.workspace_status, False)
 
         self.log(
-            f"\n开始执行：{module.display_name} / "
-            f"{self.operation_combo.currentText()}"
+            f"\n开始执行：{module.display_name} / {operation_label}"
         )
 
         self.worker = JobWorker(
@@ -1463,11 +1520,14 @@ class MainWindow(QMainWindow):
         preview_data,
         artifacts,
     ):
-        self.run_btn.setEnabled(True)
-        self.current_report_dir = str(Path(report_dir) / "report")
+        self._set_task_buttons_enabled(True)
+        self.current_report_dir = str(
+            (artifacts or {}).get("report_dir", report_dir)
+        )
         self.current_rules = dict(rules)
         self.current_preview = preview_data
         self.current_artifacts = dict(artifacts or {})
+        self.current_task_type = self.current_artifacts.get("task_type", "")
 
         if self.current_preview and self.current_preview.get("changes_by_file"):
             change_count = sum(len(v) for v in self.current_preview["changes_by_file"].values())
@@ -1477,40 +1537,48 @@ class MainWindow(QMainWindow):
             self.apply_btn.setEnabled(False)
 
         self.progress_bar.setValue(100)
-        self.progress_message.setText("任务执行完成，HTML / CSV 已自动生成")
+        self.progress_message.setText(
+            "模型校验完成，报告已生成"
+            if self.current_task_type == "validation"
+            else "模型关联预览完成，预览报告已生成"
+        )
         self.workspace_status.setText("任务执行完成")
         apply_status_style(self.workspace_status, True)
         QTimer.singleShot(3500, self.workspace_status.hide)
 
-        for key, button in (
-            ("html", self.open_html_btn),
-            ("rmu_csv", self.open_rmu_csv_btn),
-            ("device_csv", self.open_device_csv_btn),
-            ("run_dir", self.open_report_dir_btn),
-        ):
-            path = self.current_artifacts.get(key, "")
-            button.setEnabled(bool(path and Path(path).exists()))
+        self._update_artifact_buttons(self.current_task_type)
 
         self.log(f"任务完成。本次运行目录：{report_dir}")
         self.log(f"HTML：{self.current_artifacts.get('html', '')}")
         self.log(f"环网柜 CSV：{self.current_artifacts.get('rmu_csv', '')}")
         self.log(f"设备 CSV：{self.current_artifacts.get('device_csv', '')}")
 
-        # 保存完整的本次 Console 日志到同一个报告目录。
+        # 保存完整的本次 Console 日志到当前任务的实际报告目录。
         try:
-            log_path = Path(report_dir) / "console.log"
-            log_path.write_text(self.log_edit.toPlainText(), encoding="utf-8")
+            actual_report_dir = Path(
+                self.current_artifacts.get("report_dir", report_dir)
+            )
+            actual_report_dir.mkdir(parents=True, exist_ok=True)
+            log_path = actual_report_dir / "console.log"
+            log_path.write_text(
+                self.log_edit.toPlainText(),
+                encoding="utf-8",
+            )
             self.current_artifacts["console_log"] = str(log_path)
         except Exception as exc:
             self.log(f"保存 console.log 失败：{exc}")
 
         self.statusBar().showMessage(
-            "模型任务已完成，报告已自动生成。",
+            (
+                "模型校验完成，校验报告已生成。"
+                if self.current_task_type == "validation"
+                else "模型关联预览完成，预览报告已生成。"
+            ),
             5000,
         )
 
     def on_job_failed(self, text):
-        self.run_btn.setEnabled(True)
+        self._set_task_buttons_enabled(True)
         self.progress_message.setText("任务执行失败")
         self.workspace_status.show()
         self.workspace_status.setText("任务执行失败")
@@ -1529,37 +1597,53 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------
     def apply_association(self):
         if not self.current_preview or not self.current_preview.get("changes_by_file"):
-            QMessageBox.information(self, "模型关联回写", "当前没有可执行的关联预览，请先运行“模型关联预览”。")
+            QMessageBox.information(
+                self,
+                "模型关联",
+                "当前没有可执行的关联预览，请先点击下方“模型关联预览”。",
+            )
             return
 
-        change_count = sum(len(v) for v in self.current_preview["changes_by_file"].values())
+        change_count = sum(
+            len(v) for v in self.current_preview["changes_by_file"].values()
+        )
         skipped_count = len(self.current_preview.get("skipped_rmus", []))
         message = (
-            f"本次将回写 {change_count} 个设备图元。\n"
+            f"本次将关联 {change_count} 个设备图元。\n"
             f"因校验不通过而跳过的 RMU：{skipped_count} 个。\n\n"
-            "原始 G 文件不会被修改。程序会复制全部选中 G 文件到 Workspace/g_output，再只修改副本：\n"
-            "app=6500000, voltype=0, p_ReportType=1, keyid=Expected KeyID；\n"
-            "CBreakerDis / ZhaiWaiJieDiDaoZha state=41；BusDis state=15。\n\n"
+            "原始 G 文件不会被修改。程序会复制全部选中 G 文件到 "
+            "Workspace/g_output，再只修改安全副本。\n"
+            "关联完成后，程序会立即重新校验这些安全副本，并生成与模型校验"
+            "同规格的 HTML / CSV 最终报告。\n\n"
             "是否确认执行？"
         )
         reply = QMessageBox.question(
-            self, "确认模型关联回写", message,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            self,
+            "确认执行模型关联",
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
 
+        db = None
         try:
+            self._set_task_buttons_enabled(False)
             self.progress_bar.setValue(5)
-            self.progress_message.setText("正在准备模型关联回写……")
+            self.progress_message.setText("正在准备模型关联……")
+
             module_id = self.module_combo.currentData()
             module = self.modules[module_id]
             settings = self.module_widgets[module_id].collect_settings()
             files = self.resolve_files(self.input_edit.text().strip())
 
-            self.log("\n开始执行模型关联回写：先重新验证 Oracle 数据库连接。")
+            self.log("\n开始执行模型关联：重新验证 Oracle 数据库连接。")
             db = OracleClient(self.current_db_config())
             self.log(db.test_connection())
+
+            self.progress_bar.setValue(15)
+            self.progress_message.setText("正在写入安全 G 文件副本……")
             result_bundle = module.apply_association(
                 db,
                 files,
@@ -1568,23 +1652,146 @@ class MainWindow(QMainWindow):
                 self.log,
                 output_g_dir=Path(self.current_run_dir) / "g_output",
             )
-            db.close()
 
             total = int(result_bundle.get("applied_count", 0))
             output_dir = result_bundle.get("output_g_dir", "")
-            self.current_preview = None
-            self.apply_btn.setEnabled(False)
-            self.progress_bar.setValue(100)
-            self.progress_message.setText("模型关联回写完成")
-            QMessageBox.information(
-                self, "模型关联完成",
-                f"模型关联处理完成，共修改 {total} 个设备图元。\n\n原始 G 文件未修改。\n处理后的 G 文件目录：\n{output_dir}"
+            copied_files = [
+                Path(p)
+                for p in result_bundle.get("copied_files", [])
+                if Path(p).exists()
+            ]
+
+            if not copied_files:
+                raise RuntimeError(
+                    "模型关联已执行，但没有找到可用于最终校验的 G 文件安全副本。"
+                )
+
+            self.progress_bar.setValue(65)
+            self.progress_message.setText(
+                "关联完成，正在重新校验安全副本……"
             )
-            self.log(f"模型关联处理完成：共修改 {total} 个设备图元；原始 G 文件未修改；输出目录={output_dir}")
+            self.log(
+                "模型关联写入完成，开始对 g_output 中的安全副本执行最终模型校验。"
+            )
+
+            def final_progress(percent, message=""):
+                # module.validate gives roughly 5~95; map it into 65~92
+                mapped = 65 + int(max(0, min(100, int(percent))) * 0.27)
+                self.progress_bar.setValue(min(mapped, 92))
+                if message:
+                    self.progress_message.setText(
+                        f"最终校验：{message}"
+                    )
+                QApplication.processEvents()
+
+            reports, final_summary, final_rules = module.validate(
+                db,
+                copied_files,
+                settings,
+                self.log,
+                final_progress,
+            )
+
+            self.progress_bar.setValue(94)
+            self.progress_message.setText(
+                "正在生成模型关联完成报告……"
+            )
+
+            report_dir = (
+                Path(self.current_run_dir) / "association_result_report"
+            )
+            report_dir.mkdir(parents=True, exist_ok=True)
+
+            html_path = report_dir / "report.html"
+            csv_base = report_dir / "report.csv"
+            export_html_bundle(reports, html_path, final_rules)
+            csv_paths = export_csv_bundle(
+                reports,
+                csv_base,
+            )
+
+            self.current_artifacts = {
+                "task_type": "association",
+                "operation": "APPLY_ASSOCIATION",
+                "run_dir": str(self.current_run_dir),
+                "report_dir": str(report_dir),
+                "html": str(html_path),
+                "rmu_csv": (
+                    str(csv_paths[0]) if len(csv_paths) > 0 else ""
+                ),
+                "device_csv": (
+                    str(csv_paths[1]) if len(csv_paths) > 1 else ""
+                ),
+                "g_output_dir": str(output_dir),
+            }
+            self.current_report_dir = str(report_dir)
+            self.current_task_type = "association"
+            self.current_rules = dict(final_rules)
+            self.current_preview = None
+
+            # Save complete console log beside final association report.
+            try:
+                log_path = report_dir / "console.log"
+                log_path.write_text(
+                    self.log_edit.toPlainText(),
+                    encoding="utf-8",
+                )
+                self.current_artifacts["console_log"] = str(log_path)
+            except Exception as exc:
+                self.log(f"保存关联完成 console.log 失败：{exc}")
+
+            self.cfg["last_run_dir"] = str(self.current_run_dir)
+            save_settings(self.cfg)
+
+            self.progress_bar.setValue(100)
+            self.progress_message.setText(
+                "模型关联完成，最终 HTML / CSV 报告已生成"
+            )
+            self.workspace_status.show()
+            self.workspace_status.setText(
+                "模型关联完成，最终报告已生成"
+            )
+            apply_status_style(self.workspace_status, True)
+            QTimer.singleShot(3500, self.workspace_status.hide)
+
+            self._set_task_buttons_enabled(True)
+            self.apply_btn.setEnabled(False)
+            self._update_artifact_buttons("association")
+
+            self.log(
+                f"模型关联完成：修改设备图元={total}；"
+                f"原始 G 文件未修改；输出目录={output_dir}"
+            )
+            self.log(f"关联完成 HTML：{html_path}")
+            if len(csv_paths) > 0:
+                self.log(f"关联完成环网柜 CSV：{csv_paths[0]}")
+            if len(csv_paths) > 1:
+                self.log(f"关联完成设备 CSV：{csv_paths[1]}")
+
+            QMessageBox.information(
+                self,
+                "模型关联完成",
+                f"模型关联处理完成，共修改 {total} 个设备图元。\n\n"
+                f"原始 G 文件未修改。\n"
+                f"处理后的 G 文件：\n{output_dir}\n\n"
+                f"最终校验报告：\n{html_path}",
+            )
+
         except Exception as exc:
-            self.progress_message.setText("模型关联回写失败")
-            self.log(f"模型关联回写失败：{exc}")
-            QMessageBox.critical(self, "模型关联回写失败", str(exc))
+            self.progress_message.setText("模型关联失败")
+            self.workspace_status.show()
+            self.workspace_status.setText("模型关联失败")
+            apply_status_style(self.workspace_status, False)
+            self.log(f"模型关联失败：{exc}")
+            self._set_task_buttons_enabled(True)
+            QMessageBox.critical(
+                self,
+                "模型关联失败",
+                str(exc),
+            )
+        finally:
+            if db:
+                db.close()
 
     # ------------------------------------------------------------
     # Console / generated artifacts

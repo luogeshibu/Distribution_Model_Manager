@@ -16,6 +16,28 @@ All notable changes to Distribution Model Manager are documented here.
 
 
 
+
+## [3.0.20] - 2026-08-10
+
+### UI
+- Removed the model-operation combo box from the top task form.
+- Added explicit bottom action buttons: Model Validation, Association Preview, Execute Association.
+- Replaced ambiguous "Run Current Task" behavior with explicit task actions.
+- Report buttons now use task-specific labels and are hidden when their files do not exist.
+
+### Reporting
+- Validation reports are stored under `validation_report`.
+- Association-preview reports are stored under `association_preview_report`.
+- After association write-back, the generated G-file copies are revalidated and a full final report is written to `association_result_report`.
+- Final association report uses the same RMU/device report structure as model validation.
+
+### Safety
+- Original G files remain unchanged.
+- Association write-back still targets only copies under Workspace `g_output`.
+
+### Assets
+- Rebuilt `app_logo.png` and `app_logo.ico` with transparent outer corners around the green rounded contour.
+
 ## [3.0.19] - 2026-08-10
 
 ### Fixed
