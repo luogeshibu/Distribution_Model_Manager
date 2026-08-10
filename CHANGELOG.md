@@ -17,6 +17,33 @@ All notable changes to Distribution Model Manager are documented here.
 
 
 
+
+
+## [3.0.22] - 2026-08-10
+
+### Fixed
+- RMU NAME lookup now treats `dms_combined_device.NAME` as a native string field.
+- Replaced `TRIM(TO_CHAR(name))` with `TRIM(name)` for RMU lookup.
+- RMU names are never converted to integers.
+
+### Changed
+- RMU recognition now supports common engineering names containing letters,
+  digits, hyphens, underscores and dots, up to 128 characters.
+- Added regression coverage for names such as `RMU-42646`, `ABC_123`,
+  `JED-RMU-01` and numeric-only names.
+
+## [3.0.21] - 2026-08-10
+
+### Changed
+- Feeder mismatch is now warning-only and no longer blocks automatic model association.
+- RMU feeder mismatch and device feeder mismatch use orange `FEEDER` status.
+- Duplicate/missing RMU still produces a red RMU-summary error.
+- Duplicate/missing RMU blocks automatic association only for unlinked G elements.
+- Existing manual KeyIDs are still inspected when the RMU name is duplicated/missing.
+- Existing manual links validate logical CODE/p_NameString and actual RMU ownership.
+- Existing KeyID pointing to another RMU remains a hard `RMU_LINK` error.
+- Duplicate-RMU device rows with a valid existing manual link can be PASS/FEEDER rather than being forced into BLOCKED.
+
 ## [3.0.20] - 2026-08-10
 
 ### UI

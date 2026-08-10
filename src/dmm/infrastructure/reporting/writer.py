@@ -504,16 +504,16 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
     <p>
       <span style="background:#EAF8F2;padding:4px 10px">绿色 PASS：校验正常</span>
       <span style="background:#FFF8DE;padding:4px 10px;margin-left:8px">黄色 WARN：未关联，但满足自动关联条件</span>
-      <span style="background:#FFE8CC;padding:4px 10px;margin-left:8px">橙色 FEEDER：馈线不一致，禁止自动关联</span>
-      <span style="background:#F0E7FF;padding:4px 10px;margin-left:8px">紫色 RMU_LINK：当前KeyID关联到了其他环网柜</span>
-      <span style="background:#EAF3FF;padding:4px 10px;margin-left:8px">蓝色 BLOCKED：已有人工关联，但环网柜不唯一，禁止自动关联</span>
+      <span style="background:#FFE8CC;padding:4px 10px;margin-left:8px">橙色 FEEDER：馈线不一致或馈线信息异常，仅告警，不阻断模型关联</span>
+      <span style="background:#F0E7FF;padding:4px 10px;margin-left:8px">紫色 RMU_LINK：当前KeyID关联到了其他环网柜，属于硬错误并阻断自动处理</span>
+      <span style="background:#EAF3FF;padding:4px 10px;margin-left:8px">蓝色 BLOCKED：保留用于其它人工阻断场景；RMU重复且未关联的设备现在直接使用红色 FAIL</span>
       <span style="background:#FFF0F0;padding:4px 10px;margin-left:8px">红色 FAIL：硬错误</span>
     </p>
   </div>
 
   <div class="card">
     <h2>环网柜汇总</h2>
-    <p>环网柜汇总严格按照 G 文件环网柜序号排列，每个环网柜只展示一行。数据库中该名称必须唯一：找到 1 条时显示唯一环网柜 ID；找到多条时不展开多个 ID，直接报错并提示找到的数量，禁止关联；未找到时同样报错。设备明细始终以 G 文件实际设备图元为准。</p>
+    <p>环网柜汇总严格按照 G 文件环网柜序号排列，每个环网柜只展示一行。数据库中该名称必须唯一：0条或多条时环网柜汇总直接报错。若设备尚未关联，则禁止自动关联；若设备已有人工KeyID，仍继续检查CODE/p_NameString、当前模型所属环网柜及馈线。馈线异常只告警，不作为自动关联阻断条件。设备明细始终以 G 文件实际设备图元为准。</p>
     {rmu_table}
   </div>
 

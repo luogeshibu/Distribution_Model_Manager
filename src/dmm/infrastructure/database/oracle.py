@@ -137,14 +137,31 @@ class OracleClient:
         return row
 
     def get_rmu_records(self, rmu_name: str) -> List[Dict[str, Any]]:
-        # User-defined first-stage RMU rule.
+        """
+        Resolve RMU records by the business NAME field.
+
+        RMU NAME is a string identifier, not a numeric identifier.  Valid
+        examples include:
+            42646
+            RMU-42646
+            ABC_123
+            JED-RMU-01
+
+        Therefore the application must never convert RMU names to int and must
+        never depend on TO_CHAR(name).  Oracle performs an exact trimmed string
+        comparison against dms_combined_device.NAME.
+        """
+        lookup_name = str(rmu_name or "").strip()
+        if not lookup_name:
+            return []
+
         return self._query(
             """
             SELECT *
             FROM dms_combined_device
-            WHERE TRIM(TO_CHAR(name)) = :rmu_name
+            WHERE TRIM(name) = :rmu_name
             """,
-            {"rmu_name": str(rmu_name).strip()},
+            {"rmu_name": lookup_name},
         )
 
     def get_devices_by_combined_id(self, table_id: int, combined_id: int) -> Tuple[str, List[Dict[str, Any]]]:

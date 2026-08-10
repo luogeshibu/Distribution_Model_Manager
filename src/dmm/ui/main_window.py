@@ -970,7 +970,7 @@ class MainWindow(QMainWindow):
             "• 绿色依据 G 文件属性判断：lc=0,255,0 或 lcc=#00ff00；实际名称读取 Text 的 ts 属性。\n"
             "• 绿色名称不受旧的 120 坐标单位搜索距离限制，因此名称离环网柜较远也可以识别。\n"
             "• 如果所选方向没有绿色名称，才回退到普通名称识别规则。\n"
-            "• 支持纯数字名称，也支持 AK-900841、AK-500252、AK_500252 等工程名称。"
+            "• 环网柜名称始终按字符串处理，支持 42646、RMU-42646、ABC_123、JED-RMU-01、ABC.01 等常见工程名称，不会强制转换成数字。"
         )
         rmu_naming_text.setWordWrap(True)
         rmu_naming_layout.addWidget(rmu_naming_text)
@@ -1000,11 +1000,11 @@ class MainWindow(QMainWindow):
             "• CBreakerDis：CODE 不得为空；CODE 必须等于当前用于校验的 p_NameString，NAME 不参与判断。\n"
             "• ZhaiWaiJieDiDaoZha：与 CBreakerDis 空间配对；用于校验的 p_NameString=开关名+D；CODE 必须与其一致，NAME 不参与判断。\n"
             "• BusDis：CODE 不得为空；CODE 必须等于当前用于校验的 p_NameString；图上文字模式固定为 BUS，NAME 不参与判断。\n"
-            "• p_NameString 模式读取 XML p_NameString；图上文字模式不读取三类设备 XML p_NameString。\n"
-            "• 设备校验只检查 G 文件实际需要的 CODE；数据库中其它无关设备不参与校验。\n"
-            "• 已有 KeyID 时继续校验当前设备 ID、表号、域号、combined_id 和 Expected KeyID。\n"
-            "• 当前设备的 combined_id 会继续反查 dms_combined_device，比较实际环网柜名称与当前 G 图环网柜名称。\n"
-            "• 即使馈线一致，只要当前 KeyID 实际属于其它环网柜，也使用紫色 RMU_LINK 标记并禁止自动覆盖。"
+            "• 环网柜数据库记录为 0 条或多条时，环网柜汇总直接 FAIL。若 G 设备未关联，禁止自动关联。\n"
+            "• 环网柜数据库记录为 0 条或多条，但 G 设备已经有人为 KeyID 时，不丢弃该模型：继续反解当前设备并校验 CODE/p_NameString 和实际所属环网柜。\n"
+            "• 已有关联模型如果实际属于其它环网柜，使用紫色 RMU_LINK 标记，属于硬错误，禁止自动覆盖。\n"
+            "• 环网柜馈线或设备馈线不一致只使用橙色 FEEDER 告警，不再作为自动关联的强制阻断条件。\n"
+            "• 唯一 RMU 下已有 KeyID 时，仍继续校验当前设备 ID、表号、域号、combined_id 和 Expected KeyID。"
         )
         policy_text.setWordWrap(True)
         policy_layout.addWidget(policy_text)
@@ -1027,12 +1027,12 @@ class MainWindow(QMainWindow):
         colors = QGroupBox("状态颜色说明")
         colors_layout = QVBoxLayout(colors)
         colors_text = QLabel(
-            "绿色 PASS：校验正常。\n"
-            "黄色 WARN：设备未关联，但 RMU 唯一、CODE 存在且馈线一致，可以自动关联。\n"
-            "橙色 FEEDER：馈线不一致，禁止自动关联，但不使用红色硬错误颜色。\n"
-            "紫色 RMU_LINK：当前 KeyID 反解后的设备属于其他环网柜；即使馈线相同也属于模型关联错误。\n"
-            "蓝色 BLOCKED：设备已经人工关联且当前 CODE/馈线检查通过，但 RMU 名称不唯一，只允许保留/人工复核，禁止自动关联。\n"
-            "红色 FAIL：硬错误，例如 RMU 不存在、RMU 重复且设备未关联、CODE 不存在/重复、KeyID 无法反解。"
+            "绿色 PASS：设备模型校验正常；已有人工关联且 CODE、环网柜归属均正确时也可显示绿色。\n"
+            "黄色 WARN：设备尚未关联，但除馈线告警外满足自动关联条件。\n"
+            "橙色 FEEDER：环网柜或设备馈线不一致/馈线信息异常，仅告警，不阻断模型关联。\n"
+            "紫色 RMU_LINK：当前 KeyID 反解后的设备属于其他环网柜；这是硬错误，禁止自动覆盖。\n"
+            "红色 FAIL：硬错误，例如 RMU 0条/多条且设备未关联、CODE 与 p_NameString 对不上、CODE不存在/重复、KeyID无法反解。\n"
+            "注意：RMU 0条或多条时，环网柜汇总仍然是红色 FAIL；但已有人为 KeyID 的设备会继续检查，不因馈线问题直接判定模型错误。"
         )
         colors_text.setWordWrap(True)
         colors_layout.addWidget(colors_text)
@@ -1047,7 +1047,7 @@ class MainWindow(QMainWindow):
             "app=6500000, voltype=0, p_ReportType=1, state=41, keyid=Expected KeyID\n\n"
             "BusDis 回写：\n"
             "app=6500000, voltype=0, p_ReportType=1, state=15, keyid=Expected KeyID\n\n"
-            "模型关联不会自动修改 p_NameString。名称来源只用于判断数据库设备和计算正确 KeyID。"
+            "模型关联不会自动修改 p_NameString。自动关联不以馈线一致为前置条件，但目标数据库设备必须通过 CODE/p_NameString 校验并属于当前唯一环网柜。已有人工 KeyID 还会反查实际所属环网柜。"
         )
         assoc_text.setWordWrap(True)
         assoc_layout.addWidget(assoc_text)
@@ -1056,11 +1056,11 @@ class MainWindow(QMainWindow):
         reports = QGroupBox("报告说明")
         reports_layout = QVBoxLayout(reports)
         reports_text = QLabel(
-            "•【环网柜汇总】显示所有识别到的 RMU。数据库有重复 RMU 时，每个 RMU ID 都单独显示。\n"
-            "•【设备明细】显示最终用于校验的 p_NameString、名称来源、数据库设备、Expected KeyID、当前 KeyID 和状态。\n"
-            "• 当选择图上文字模式时，报告中的 p_NameString 表示‘用于校验的逻辑 p_NameString’，"
-            "不是 G XML 中原来的 p_NameString 属性。\n"
-            "• HTML / CSV 只有点击导出按钮才生成；内部历史默认保留 10 天。"
+            "•【环网柜汇总】严格按 G 文件环网柜序号排列，每个 G 环网柜只显示一行；数据库 0 条或多条直接 FAIL，不展开多个 ID。\n"
+            "•【设备明细】只显示 G 文件实际存在的设备图元，并展示逻辑 p_NameString、数据库 CODE、当前 KeyID、实际所属环网柜和馈线告警。\n"
+            "• RMU 数据库记录异常时，已有人为 KeyID 的设备仍继续校验；未关联设备则直接阻断自动关联。\n"
+            "• 当选择图上文字模式时，报告中的 p_NameString 表示用于校验的逻辑 p_NameString，不是 XML 原属性。\n"
+            "• 每次模型校验、关联预览和关联完成都会自动生成对应 HTML / CSV；Workspace 历史按软件保留策略自动清理。"
         )
         reports_text.setWordWrap(True)
         reports_layout.addWidget(reports_text)
