@@ -111,10 +111,14 @@ class RmuValidator:
         self.log = log or (lambda msg: None)
 
     def _resolve_rmu_name(self, parsed, frame: RmuFrame, positions: Sequence[str]):
-        candidates = self.parser.find_label_candidates(parsed, frame, positions)
-        frame.label_candidates = candidates
+        all_candidates = self.parser.find_label_candidates(
+            parsed,
+            frame,
+            positions,
+        )
+        frame.label_candidates = all_candidates
 
-        if not candidates:
+        if not all_candidates:
             return {
                 "status": "FAIL",
                 "reason": "RMU_NAME_NOT_FOUND",
@@ -122,72 +126,107 @@ class RmuValidator:
                 "selected": None,
             }
 
-        by_text = defaultdict(list)
-        for c in candidates:
-            by_text[c.text].append(c)
+        # --------------------------------------------------------------
+        # RMU name selection rule
+        # --------------------------------------------------------------
+        # 1. Candidate ownership has already been resolved by GParser:
+        #    one Text can belong to only one nearest RMU frame.
+        #
+        # 2. If this RMU has ONLY ONE candidate in the selected direction,
+        #    use it directly, regardless of color.
+        #
+        # 3. If this RMU has MULTIPLE candidates:
+        #       - if green candidates exist -> choose nearest green;
+        #       - otherwise -> choose nearest candidate regardless of color.
+        #
+        # Green is therefore only a disambiguation rule for "multiple names",
+        # not a global priority rule.
+        # --------------------------------------------------------------
+        ordered = sorted(
+            all_candidates,
+            key=lambda c: (
+                c.score,
+                c.obj.xml_index,
+                c.text,
+            ),
+        )
+
+        if len(ordered) == 1:
+            chosen = ordered[0]
+            selection_reason = "SINGLE_NEAREST_LABEL"
+        else:
+            green_candidates = [c for c in ordered if c.is_green]
+            if green_candidates:
+                chosen = min(
+                    green_candidates,
+                    key=lambda c: (
+                        c.score,
+                        c.obj.xml_index,
+                        c.text,
+                    ),
+                )
+                selection_reason = "MULTIPLE_LABELS_GREEN_PRIORITY"
+            else:
+                chosen = ordered[0]
+                selection_reason = "MULTIPLE_LABELS_NEAREST_FALLBACK"
 
         candidate_rows = []
-        unique_db_candidates = []
-        duplicate_db_candidates = []
+        selected_row = None
 
-        for text, items in sorted(by_text.items(), key=lambda kv: min(x.score for x in kv[1])):
-            records = self.db.get_rmu_records(text)
+        for c in all_candidates:
+            records = self.db.get_rmu_records(c.text)
             row = {
-                "name": text,
-                "directions": ",".join(sorted(set(x.direction for x in items))),
-                "best_score": min(x.score for x in items),
+                "name": c.text,
+                "directions": c.direction,
+                "best_score": c.score,
+                "distance": c.gap,
+                "color": c.color,
+                "is_green": "YES" if c.is_green else "NO",
+                "xml_id": c.obj.xml_id,
                 "db_count": len(records),
                 "db_records": records,
+                "selected_by_rule": "YES" if c is chosen else "NO",
+                "selection_reason": (
+                    selection_reason if c is chosen else ""
+                ),
             }
             candidate_rows.append(row)
-            if len(records) == 1:
-                unique_db_candidates.append(row)
-            elif len(records) > 1:
-                duplicate_db_candidates.append(row)
 
-        best = candidate_rows[0]
-        if best["db_count"] > 1:
-            return {
-                "status": "FAIL",
-                "reason": "RMU_DUPLICATE_IN_DATABASE",
-                "candidate_rows": candidate_rows,
-                "selected": best,
-            }
+            if c is chosen:
+                selected_row = row
 
-        if len(unique_db_candidates) == 1:
+        records = self.db.get_rmu_records(chosen.text)
+
+        if len(records) == 1:
             return {
                 "status": "PASS",
-                "reason": "RMU_CONFIRMED",
+                "reason": (
+                    "RMU_CONFIRMED_SINGLE_LABEL"
+                    if len(ordered) == 1
+                    else (
+                        "RMU_CONFIRMED_GREEN_LABEL"
+                        if chosen.is_green
+                        else "RMU_CONFIRMED_NEAREST_LABEL"
+                    )
+                ),
                 "candidate_rows": candidate_rows,
-                "selected": unique_db_candidates[0],
+                "selected": selected_row,
             }
 
-        if len(unique_db_candidates) > 1:
-            return {
-                "status": "FAIL",
-                "reason": "RMU_NAME_AMBIGUOUS",
-                "candidate_rows": candidate_rows,
-                "selected": None,
-            }
-
-        if duplicate_db_candidates:
+        if len(records) > 1:
             return {
                 "status": "FAIL",
                 "reason": "RMU_DUPLICATE_IN_DATABASE",
                 "candidate_rows": candidate_rows,
-                "selected": duplicate_db_candidates[0],
+                "selected": selected_row,
             }
 
         return {
             "status": "FAIL",
             "reason": "RMU_NOT_FOUND_IN_DATABASE",
             "candidate_rows": candidate_rows,
-            "selected": None,
+            "selected": selected_row,
         }
-
-    @staticmethod
-    def _make_expected_keyid(device_id: int, domain: int) -> int:
-        return int(device_id) + int(domain) * KEYID_STEP
 
     @staticmethod
     def _default_device_row(rmu_name, rmu_id, elem, rule, db_set):
@@ -226,7 +265,9 @@ class RmuValidator:
             "current_db_code": "",
             "current_db_name": "",
             "current_combined_id": "",
+            "current_rmu_name": "",
             "current_rmu_match": "",
+            "current_rmu_name_match": "",
             "model_linked": "YES" if elem.keyid else "NO",
             "model_link_correct": "",
             "model_link_status": "",
@@ -262,6 +303,35 @@ class RmuValidator:
         row["severity"] = "MANUAL_DUPLICATE_BLOCK"
         row["reason"] = reason
         row["association_ready"] = "NO"
+
+    @staticmethod
+    def _set_rmu_link_issue(row, reason):
+        row["status"] = "RMU_LINK"
+        row["severity"] = "RMU_LINK_MISMATCH"
+        row["reason"] = reason
+        row["association_ready"] = "NO"
+
+    @staticmethod
+    def _make_expected_keyid(device_id, domain):
+        """
+        Build D5000 KeyID from database device ID and domain/column number.
+
+        D5000 encoding used by this project:
+            KeyID = DeviceID + (Domain << 32)
+
+        Examples:
+            domain = 0  -> KeyID == DeviceID
+            domain = 40 -> DeviceID + 40 * 2^32
+        """
+        device_id = int(device_id)
+        domain = int(domain)
+
+        if device_id < 0:
+            raise ValueError(f"Invalid device_id: {device_id}")
+        if domain < 0:
+            raise ValueError(f"Invalid domain: {domain}")
+
+        return device_id + (domain << 32)
 
     def _verify_expected_keyid(self, row, device_id, rule):
         expected = self._make_expected_keyid(device_id, int(rule["domain"]))
@@ -350,12 +420,31 @@ class RmuValidator:
                 row["current_combined_id"] = current_record.get("combined_id", "")
 
             current_combined_id = int_or_none(row.get("current_combined_id"))
+
+            current_rmu = None
+            if current_combined_id is not None:
+                try:
+                    current_rmu = self.db.get_rmu_by_id(current_combined_id)
+                except Exception as exc:
+                    row["current_rmu_lookup_error"] = str(exc)
+
+            current_rmu_name = norm((current_rmu or {}).get("name"))
+            row["current_rmu_name"] = current_rmu_name
+
             rmu_match = (
                 current_combined_id is not None
                 and rmu_id is not None
                 and current_combined_id == int(rmu_id)
             )
             row["current_rmu_match"] = "YES" if rmu_match else "NO"
+
+            expected_rmu_name = norm(row.get("rmu_name"))
+            rmu_name_match = (
+                bool(expected_rmu_name)
+                and bool(current_rmu_name)
+                and expected_rmu_name == current_rmu_name
+            )
+            row["current_rmu_name_match"] = "YES" if rmu_name_match else "NO"
 
         except Exception as exc:
             row["model_link_correct"] = "NO"
@@ -391,12 +480,32 @@ class RmuValidator:
                 f"KEYID不匹配(current={current_keyid}, expected={row['expected_keyid']})"
             )
 
+        # Current KeyID points to another RMU. This has its own purple
+        # category because feeder may still be completely correct.
+        if (
+            row.get("current_rmu_match") != "YES"
+            or row.get("current_rmu_name_match") != "YES"
+        ):
+            row["model_link_correct"] = "NO"
+            row["model_link_status"] = "已关联，但关联到了其他环网柜"
+            row["association_action"] = "禁止自动关联，请检查现有模型"
+            self._set_rmu_link_issue(
+                row,
+                "CURRENT_MODEL_RMU_MISMATCH: "
+                f"当前图形环网柜={row.get('rmu_name') or '-'}；"
+                f"当前KeyID设备所属环网柜={row.get('current_rmu_name') or '-'}；"
+                f"当前combined_id={row.get('current_combined_id') or '-'}；"
+                f"期望combined_id={rmu_id or '-'}"
+            )
+            return
+
         if not reasons:
             row["model_link_correct"] = "YES"
             row["model_link_status"] = "模型已关联且正确"
             row["association_action"] = "模型已关联，无需关联"
             row["association_ready"] = "YES"
             row["status"] = "PASS"
+            row["severity"] = "PASS"
             row["reason"] = "MODEL_ALREADY_LINKED_CORRECT"
             return
 
@@ -459,6 +568,39 @@ class RmuValidator:
             row["current_db_code"] = norm(rec.get("code"))
             row["current_db_name"] = norm(rec.get("name"))
             row["current_combined_id"] = rec.get("combined_id", "")
+
+            current_combined_id = int_or_none(row.get("current_combined_id"))
+            current_rmu = None
+            if current_combined_id is not None:
+                try:
+                    current_rmu = self.db.get_rmu_by_id(current_combined_id)
+                except Exception:
+                    current_rmu = None
+
+            current_rmu_name = norm((current_rmu or {}).get("name"))
+            row["current_rmu_name"] = current_rmu_name
+
+            expected_rmu_name = norm(row.get("rmu_name"))
+            if expected_rmu_name and current_rmu_name:
+                row["current_rmu_name_match"] = (
+                    "YES" if expected_rmu_name == current_rmu_name else "NO"
+                )
+
+            if (
+                expected_rmu_name
+                and current_rmu_name
+                and expected_rmu_name != current_rmu_name
+            ):
+                row["model_link_status"] = "已人工关联，但关联到了其他环网柜"
+                row["association_action"] = "人工复核；禁止自动关联"
+                self._set_rmu_link_issue(
+                    row,
+                    "CURRENT_MODEL_RMU_MISMATCH: "
+                    f"当前图形环网柜={expected_rmu_name}；"
+                    f"当前KeyID设备所属环网柜={current_rmu_name}；"
+                    f"当前combined_id={current_combined_id or '-'}"
+                )
+                return
 
             # Also expose the manually-linked database device in the normal DB
             # columns so the report clearly shows what the G element points to.

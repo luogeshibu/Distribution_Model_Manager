@@ -3,8 +3,8 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectRoot
 
-$BuildScriptVersion = "3.0.13"
-$AppName = "Distribution_Model_Manager_v3.0.13"
+$BuildScriptVersion = "3.0.19"
+$AppName = "Distribution_Model_Manager_v3.0.19"
 
 $VenvDir = Join-Path $ProjectRoot ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"

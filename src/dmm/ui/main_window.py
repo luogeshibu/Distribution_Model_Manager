@@ -953,6 +953,21 @@ class MainWindow(QMainWindow):
         quick_layout.addWidget(quick_text)
         layout.addWidget(quick)
 
+        rmu_naming = QGroupBox("环网柜名称识别规则")
+        rmu_naming_layout = QVBoxLayout(rmu_naming)
+        rmu_naming_text = QLabel(
+            "• 环网柜仍然通过矩形框 + 三类目标设备图元自动识别。\n"
+            "• 环网柜名称按照用户勾选的方向读取：上方 / 下方 / 左侧 / 右侧。\n"
+            "• 同一方向可能存在白色、橙色、绿色等多个 Text；程序会读取候选文字，但只要存在绿色名称，就优先选择距离当前环网柜最近的绿色 Text。\n"
+            "• 绿色依据 G 文件属性判断：lc=0,255,0 或 lcc=#00ff00；实际名称读取 Text 的 ts 属性。\n"
+            "• 绿色名称不受旧的 120 坐标单位搜索距离限制，因此名称离环网柜较远也可以识别。\n"
+            "• 如果所选方向没有绿色名称，才回退到普通名称识别规则。\n"
+            "• 支持纯数字名称，也支持 AK-900841、AK-500252、AK_500252 等工程名称。"
+        )
+        rmu_naming_text.setWordWrap(True)
+        rmu_naming_layout.addWidget(rmu_naming_text)
+        layout.addWidget(rmu_naming)
+
         naming = QGroupBox("设备名称判断规则")
         naming_layout = QVBoxLayout(naming)
         naming_text = QLabel(
@@ -979,7 +994,9 @@ class MainWindow(QMainWindow):
             "• BusDis：CODE 不得为空；CODE 必须等于当前用于校验的 p_NameString；图上文字模式固定为 BUS，NAME 不参与判断。\n"
             "• p_NameString 模式读取 XML p_NameString；图上文字模式不读取三类设备 XML p_NameString。\n"
             "• 设备校验只检查 G 文件实际需要的 CODE；数据库中其它无关设备不参与校验。\n"
-            "• 已有 KeyID 时继续校验当前设备 ID、表号、域号、combined_id 和 Expected KeyID；正确则无需重复关联，错误则禁止自动覆盖。"
+            "• 已有 KeyID 时继续校验当前设备 ID、表号、域号、combined_id 和 Expected KeyID。\n"
+            "• 当前设备的 combined_id 会继续反查 dms_combined_device，比较实际环网柜名称与当前 G 图环网柜名称。\n"
+            "• 即使馈线一致，只要当前 KeyID 实际属于其它环网柜，也使用紫色 RMU_LINK 标记并禁止自动覆盖。"
         )
         policy_text.setWordWrap(True)
         policy_layout.addWidget(policy_text)
@@ -991,8 +1008,9 @@ class MainWindow(QMainWindow):
             "• 13502 / CBreakerDis：CODE 不得为空，且 CODE 必须等于当前用于校验的 p_NameString；NAME 不参与判断。\n"
             "• 13514 / ZhaiWaiJieDiDaoZha：CODE 不得为空，且 CODE 必须等于当前用于校验的 p_NameString（开关名称+D）；NAME 不参与判断。\n"
             "• 13506 / BusDis：CODE 不得为空，且 CODE 必须等于当前用于校验的 p_NameString；图上文字模式固定为 BUS；NAME 不参与判断。\n"
-            "• 同一 RMU 中三类 G 图元数量必须和数据库 combined_id 下的记录数完全一致。\n"
-            "• 数据库多设备、少设备、CODE 重复、CODE 为空等问题都会阻止该 RMU 进入模型关联。"
+            "• 设备校验以 G 文件实际存在的图元为准，只查询这些图元最终需要的 CODE。\n"
+            "• 数据库中与 G 图元 CODE 无关的其它设备记录忽略，不参与数量比较。\n"
+            "• G 图元需要的 CODE 不存在，或同一 CODE 匹配到多条记录时，才作为设备模型错误并阻止关联。"
         )
         db_text.setWordWrap(True)
         db_layout.addWidget(db_text)
@@ -1004,6 +1022,7 @@ class MainWindow(QMainWindow):
             "绿色 PASS：校验正常。\n"
             "黄色 WARN：设备未关联，但 RMU 唯一、CODE 存在且馈线一致，可以自动关联。\n"
             "橙色 FEEDER：馈线不一致，禁止自动关联，但不使用红色硬错误颜色。\n"
+            "紫色 RMU_LINK：当前 KeyID 反解后的设备属于其他环网柜；即使馈线相同也属于模型关联错误。\n"
             "蓝色 BLOCKED：设备已经人工关联且当前 CODE/馈线检查通过，但 RMU 名称不唯一，只允许保留/人工复核，禁止自动关联。\n"
             "红色 FAIL：硬错误，例如 RMU 不存在、RMU 重复且设备未关联、CODE 不存在/重复、KeyID 无法反解。"
         )

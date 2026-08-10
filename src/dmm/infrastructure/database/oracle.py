@@ -110,6 +110,32 @@ class OracleClient:
         self._table_name_cache[table_id] = name
         return name
 
+    def get_rmu_by_id(self, rmu_id: Any) -> Optional[Dict[str, Any]]:
+        """
+        Resolve dms_combined_device by ID (table 13501).
+
+        Used when validating an already-written KeyID:
+        KeyID -> device -> combined_id -> dms_combined_device -> RMU NAME.
+        """
+        if rmu_id in (None, ""):
+            return None
+
+        rows = self._query(
+            """
+            SELECT id, code, name, feeder_id, graph_name, combined_type, run_state
+            FROM dms_combined_device
+            WHERE id = :rmu_id
+            """,
+            {"rmu_id": int(rmu_id)},
+        )
+        if len(rows) != 1:
+            return None
+
+        row = dict(rows[0])
+        row["_table_id"] = 13501
+        row["_table_name"] = "dms_combined_device"
+        return row
+
     def get_rmu_records(self, rmu_name: str) -> List[Dict[str, Any]]:
         # User-defined first-stage RMU rule.
         return self._query(

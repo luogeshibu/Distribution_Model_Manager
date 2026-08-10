@@ -25,7 +25,8 @@ DEVICE_FIELDS = [
     "expected_keyid", "expected_keyid_verified",
     "current_keyid", "current_device_id", "current_table_id", "current_domain",
     "current_table_name", "current_db_code", "current_db_name",
-    "current_combined_id", "current_rmu_match",
+    "current_combined_id", "current_rmu_name",
+    "current_rmu_match", "current_rmu_name_match",
     "model_linked", "model_link_correct", "model_link_status",
     "association_action", "writeback_needed",
     "association_ready", "status", "severity", "reason",
@@ -33,14 +34,15 @@ DEVICE_FIELDS = [
 
 RMU_FIELDS = [
     "file_name", "frame_index", "frame_xml_id", "rmu_name",
-    "rmu_status", "rmu_severity", "rmu_reason", "rmu_db_count", "db_record_index",
-    "rmu_id", "code", "feeder_id",
+    "rmu_status", "rmu_severity", "rmu_reason",
+    "rmu_db_count", "rmu_id", "code", "feeder_id",
     "file_feeder_hint", "feeder_table_id", "feeder_table_name",
-    "feeder_db_name", "database_feeder_name", "feeder_match",
-    "feeder_match_reason",
-    "graph_name", "combined_type", "run_state", "device_count",
-    "linked_correct_count", "unlinked_count", "linked_wrong_count",
-    "association_eligible", "association_block_reasons", "inventory_issues",
+    "feeder_db_name", "database_feeder_name",
+    "feeder_match", "feeder_match_reason",
+    "graph_name", "combined_type", "run_state",
+    "device_count", "linked_correct_count", "unlinked_count",
+    "linked_wrong_count", "association_eligible",
+    "association_block_reasons", "inventory_issues",
     "db_integrity_issues",
 ]
 
@@ -80,7 +82,9 @@ DEVICE_LABELS = {
     "current_db_code": "当前模型设备CODE",
     "current_db_name": "当前模型设备NAME",
     "current_combined_id": "当前模型所属环网柜ID",
+    "current_rmu_name": "当前模型所属环网柜名称",
     "current_rmu_match": "当前模型环网柜ID是否正确",
+    "current_rmu_name_match": "当前模型环网柜名称是否正确",
     "model_linked": "设备是否已关联模型",
     "model_link_correct": "当前模型是否正确",
     "model_link_status": "当前模型状态",
@@ -101,7 +105,6 @@ RMU_LABELS = {
     "rmu_severity": "状态类型",
     "rmu_reason": "说明",
     "rmu_db_count": "数据库记录数",
-    "db_record_index": "数据库记录序号",
     "rmu_id": "环网柜ID",
     "code": "CODE",
     "feeder_id": "馈线ID",
@@ -135,6 +138,7 @@ def status_cls(status):
         "PASS": "pass",
         "WARN": "warn",
         "FEEDER": "feeder",
+        "RMU_LINK": "rmu-link",
         "BLOCKED": "blocked",
         "FAIL": "fail",
         "INFO": "info",
@@ -203,32 +207,79 @@ def sort_devices_within_rmu(device_rows):
 
 
 def flatten_rmu_rows(reports):
+    """
+    RMU summary rules (v3.0.19)
+    --------------------------
+    1. One G-file RMU frame -> exactly one summary row.
+    2. Rows are always sorted by G-file RMU sequence/frame_index.
+    3. Oracle dms_combined_device result count is reported in that one row:
+       - 0 rows  -> RMU_NOT_FOUND_IN_DATABASE
+       - 1 row   -> normal validation; show the unique RMU ID
+       - >1 rows -> RMU_DUPLICATE_IN_DATABASE, but DO NOT expand every DB ID.
+                    Leave RMU ID blank and tell the user how many RMUs were found.
+    4. Device detail remains G-element based and is handled separately.
+    """
     rows = []
 
-    # Preserve report / G-file order.
     for report in reports:
         file_name = report.get("file_name", "")
-
-        # Within a G file, RMUs are ordered ONLY by frame_index.
         rmu_results = sort_rmu_results_by_sequence(
             report.get("rmu_results", [])
         )
 
         for rmu in rmu_results:
             records = list(rmu.get("rmu_records") or [])
-            base = {
+            db_count = len(records)
+
+            # Only one database record is considered safe/usable.
+            unique_record = records[0] if db_count == 1 else {}
+
+            status = rmu.get("rmu_status", "")
+            severity = rmu.get("rmu_severity", "")
+            reason = rmu.get("rmu_reason", "")
+            block_reasons = list(rmu.get("association_block_reasons", []))
+
+            if db_count > 1:
+                status = "FAIL"
+                severity = "ERROR"
+                reason = (
+                    f"RMU_DUPLICATE_IN_DATABASE: 数据库中找到 {db_count} 个同名环网柜，"
+                    "请检查数据库模型和单线图中的该环网柜。"
+                )
+                duplicate_block = (
+                    f"数据库中找到 {db_count} 个同名环网柜；环网柜必须唯一，"
+                    "禁止自动关联，请检查数据库模型和单线图中的该环网柜。"
+                )
+                if duplicate_block not in block_reasons:
+                    block_reasons.append(duplicate_block)
+
+            elif db_count == 0:
+                status = "FAIL"
+                severity = "ERROR"
+                if not reason or reason == "RMU_NOT_FOUND_IN_DATABASE":
+                    reason = (
+                        "RMU_NOT_FOUND_IN_DATABASE: 数据库中未找到该环网柜，"
+                        "请检查数据库模型和单线图中的环网柜名称。"
+                    )
+
+            row = {
                 "file_name": file_name,
                 "frame_index": rmu.get("frame_index", ""),
                 "frame_xml_id": rmu.get("frame_xml_id", ""),
                 "rmu_name": rmu.get("rmu_name", ""),
-                "rmu_status": rmu.get("rmu_status", ""),
-                "rmu_severity": rmu.get("rmu_severity", ""),
-                "rmu_reason": rmu.get("rmu_reason", ""),
-                "rmu_db_count": rmu.get("rmu_db_count", 0),
+                "rmu_status": status,
+                "rmu_severity": severity,
+                "rmu_reason": reason,
+                "rmu_db_count": db_count,
+                # Duplicate RMU: intentionally DO NOT list multiple IDs.
+                "rmu_id": unique_record.get("id", "") if db_count == 1 else "",
+                "code": unique_record.get("code", "") if db_count == 1 else "",
+                "feeder_id": (
+                    unique_record.get("feeder_id", "")
+                    if db_count == 1
+                    else ""
+                ),
                 "file_feeder_hint": rmu.get("file_feeder_hint", ""),
-                "database_feeder_name": rmu.get("database_feeder_name", ""),
-                "feeder_match": rmu.get("feeder_match", ""),
-                "feeder_match_reason": rmu.get("feeder_match_reason", ""),
                 "feeder_table_id": (
                     (rmu.get("feeder") or {}).get("_table_id", 13500)
                     if rmu.get("feeder") else 13500
@@ -242,17 +293,45 @@ def flatten_rmu_rows(reports):
                 "feeder_db_name": (
                     (rmu.get("feeder") or {}).get("name", "")
                 ),
+                "database_feeder_name": rmu.get(
+                    "database_feeder_name", ""
+                ),
+                "feeder_match": rmu.get("feeder_match", ""),
+                "feeder_match_reason": rmu.get(
+                    "feeder_match_reason", ""
+                ),
+                "graph_name": (
+                    unique_record.get("graph_name", "")
+                    if db_count == 1
+                    else ""
+                ),
+                "combined_type": (
+                    unique_record.get("combined_type", "")
+                    if db_count == 1
+                    else ""
+                ),
+                "run_state": (
+                    unique_record.get("run_state", "")
+                    if db_count == 1
+                    else ""
+                ),
                 "device_count": len([
                     d for d in rmu.get("device_rows", [])
                     if d.get("xml_id")
                 ]),
-                "linked_correct_count": rmu.get("linked_correct_count", 0),
-                "unlinked_count": rmu.get("unlinked_count", 0),
-                "linked_wrong_count": rmu.get("linked_wrong_count", 0),
-                "association_eligible": "YES" if rmu.get("association_eligible") else "NO",
-                "association_block_reasons": "; ".join(
-                    rmu.get("association_block_reasons", [])
+                "linked_correct_count": rmu.get(
+                    "linked_correct_count", 0
                 ),
+                "unlinked_count": rmu.get("unlinked_count", 0),
+                "linked_wrong_count": rmu.get(
+                    "linked_wrong_count", 0
+                ),
+                "association_eligible": (
+                    "YES"
+                    if rmu.get("association_eligible") and db_count == 1
+                    else "NO"
+                ),
+                "association_block_reasons": "; ".join(block_reasons),
                 "inventory_issues": "; ".join(
                     rmu.get("inventory_issues", [])
                 ),
@@ -260,35 +339,16 @@ def flatten_rmu_rows(reports):
                     rmu.get("db_integrity_issues", [])
                 ),
             }
+            rows.append(row)
 
-            # Preserve database record order within the same RMU.
-            if records:
-                for idx, rec in enumerate(records, start=1):
-                    row = dict(base)
-                    row.update({
-                        "db_record_index": idx,
-                        "rmu_id": rec.get("id", ""),
-                        "code": rec.get("code", ""),
-                        "feeder_id": rec.get("feeder_id", ""),
-                        "graph_name": rec.get("graph_name", ""),
-                        "combined_type": rec.get("combined_type", ""),
-                        "run_state": rec.get("run_state", ""),
-                    })
-                    rows.append(row)
-            else:
-                row = dict(base)
-                row.update({
-                    "db_record_index": "",
-                    "rmu_id": rmu.get("rmu_id", ""),
-                    "code": "",
-                    "feeder_id": rmu.get("feeder_id", ""),
-                    "graph_name": rmu.get("graph_name_db", ""),
-                    "combined_type": "",
-                    "run_state": "",
-                })
-                rows.append(row)
-
-    return rows
+    # Final sort across all files: file name then numeric RMU sequence.
+    return sorted(
+        rows,
+        key=lambda r: (
+            str(r.get("file_name", "")),
+            _numeric_sequence(r.get("frame_index", "")),
+        ),
+    )
 
 
 def flatten_device_rows(reports):
@@ -421,7 +481,7 @@ table{{border-collapse:collapse;width:100%;font-size:12px}}
 th{{background:var(--green-dark);color:white;position:sticky;top:0}}
 th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-space:nowrap}}
 .scroll{{overflow:auto;max-height:650px}}
-.pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}} .feeder{{background:#FFE8CC}} .blocked{{background:#EAF3FF}} .fail{{background:#FFF0F0}}
+.pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}} .feeder{{background:#FFE8CC}} .rmu-link{{background:#F0E7FF}} .blocked{{background:#EAF3FF}} .fail{{background:#FFF0F0}}
 .meta{{color:#D7EEE5}}
 </style>
 </head>
@@ -445,6 +505,7 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
       <span style="background:#EAF8F2;padding:4px 10px">绿色 PASS：校验正常</span>
       <span style="background:#FFF8DE;padding:4px 10px;margin-left:8px">黄色 WARN：未关联，但满足自动关联条件</span>
       <span style="background:#FFE8CC;padding:4px 10px;margin-left:8px">橙色 FEEDER：馈线不一致，禁止自动关联</span>
+      <span style="background:#F0E7FF;padding:4px 10px;margin-left:8px">紫色 RMU_LINK：当前KeyID关联到了其他环网柜</span>
       <span style="background:#EAF3FF;padding:4px 10px;margin-left:8px">蓝色 BLOCKED：已有人工关联，但环网柜不唯一，禁止自动关联</span>
       <span style="background:#FFF0F0;padding:4px 10px;margin-left:8px">红色 FAIL：硬错误</span>
     </p>
@@ -452,7 +513,7 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
 
   <div class="card">
     <h2>环网柜汇总</h2>
-    <p>数据库存在重复记录时，每一条环网柜 ID 均单独展示；环网柜本身不唯一时，该柜内已有模型关联一律不能判定为正确。</p>
+    <p>环网柜汇总严格按照 G 文件环网柜序号排列，每个环网柜只展示一行。数据库中该名称必须唯一：找到 1 条时显示唯一环网柜 ID；找到多条时不展开多个 ID，直接报错并提示找到的数量，禁止关联；未找到时同样报错。设备明细始终以 G 文件实际设备图元为准。</p>
     {rmu_table}
   </div>
 

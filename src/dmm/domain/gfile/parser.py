@@ -84,6 +84,9 @@ class LabelCandidate:
     direction: str
     score: float
     obj: GObject
+    is_green: bool = False
+    color: str = ""
+    gap: float = 0.0
 
 
 @dataclass
@@ -98,6 +101,39 @@ class ParsedG:
     root: ET.Element
     layer: ET.Element
     objects: List[GObject]
+
+
+def _normalized_color_value(value: str) -> str:
+    return (value or "").strip().lower().replace(" ", "")
+
+
+def _text_primary_color(obj: GObject) -> str:
+    """
+    D5000 Text objects in the supplied G files expose their visible text color
+    primarily through `lc` / `lcc`.
+
+    Examples from the project files:
+        lc="0,255,0"  / lcc="#00ff00" -> green
+        lc="255,255,255"               -> white
+        lc="255,170,0"                 -> orange
+
+    `fc` is intentionally not used as the primary discriminator because it is
+    often green even when the visible text itself is not green.
+    """
+    lc = _normalized_color_value(obj.attrs.get("lc", ""))
+    lcc = _normalized_color_value(obj.attrs.get("lcc", ""))
+    if lc:
+        return lc
+    return lcc
+
+
+def _is_green_text(obj: GObject) -> bool:
+    lc = _normalized_color_value(obj.attrs.get("lc", ""))
+    lcc = _normalized_color_value(obj.attrs.get("lcc", ""))
+    return (
+        lc in {"0,255,0", "0,255,0,255"}
+        or lcc in {"#00ff00", "#ff00ff00", "#00ff00ff"}
+    )
 
 
 class GParser:
@@ -196,14 +232,79 @@ class GParser:
         frame: RmuFrame,
         positions: Sequence[str],
     ) -> List[LabelCandidate]:
+        """
+        Find RMU-name candidates owned by the current RMU frame.
+
+        Critical ownership rule
+        -----------------------
+        A Text object may geometrically appear above/below more than one RMU
+        when rows of RMUs are vertically aligned.  The same text must NEVER be
+        reused by multiple RMU frames.
+
+        Therefore each candidate Text is first assigned to the nearest
+        compatible RMU frame in the selected direction.  Only the owner frame
+        can use that Text.
+
+        Color rule
+        ----------
+        - Green Text is allowed to be far from its owner RMU.
+        - Non-green Text keeps the legacy max-distance guard.
+        - After ownership filtering, green candidates are preferred by the
+          validator; if this RMU owns no green candidate, the nearest ordinary
+          label can be used.
+
+        This fixes the case where one green "15953" above frame 2000120 was
+        incorrectly reused by lower frame 2000155, whose own nearest label is
+        "8723".
+        """
         result: List[LabelCandidate] = []
-        r = frame.frame.box
+        current_box = frame.frame.box
         tol = self.overlap_tolerance
         maxd = self.max_distance
+
+        # All valid RMU frames are needed to decide ownership of a Text.
+        all_frames = self.find_rmu_frames(parsed)
+
+        def relation(r: Box, b: Box, direction: str, is_green: bool):
+            direction = direction.lower()
+            score = None
+            gap = None
+
+            if direction == "top":
+                ok_axis = r.left - tol <= b.cx <= r.right + tol
+                gap = r.top - b.bottom
+                if ok_axis and gap >= -tol and (is_green or gap <= maxd):
+                    score = abs(gap) + abs(b.cx - r.cx) * 0.08
+
+            elif direction == "bottom":
+                ok_axis = r.left - tol <= b.cx <= r.right + tol
+                gap = b.top - r.bottom
+                if ok_axis and gap >= -tol and (is_green or gap <= maxd):
+                    score = abs(gap) + abs(b.cx - r.cx) * 0.08
+
+            elif direction == "left":
+                ok_axis = r.top - tol <= b.cy <= r.bottom + tol
+                gap = r.left - b.right
+                if ok_axis and gap >= -tol and (is_green or gap <= maxd):
+                    score = abs(gap) + abs(b.cy - r.cy) * 0.08
+
+            elif direction == "right":
+                ok_axis = r.top - tol <= b.cy <= r.bottom + tol
+                gap = b.left - r.right
+                if ok_axis and gap >= -tol and (is_green or gap <= maxd):
+                    score = abs(gap) + abs(b.cy - r.cy) * 0.08
+
+            return score, gap
+
+        current_frame_key = (
+            frame.frame.xml_index,
+            frame.frame.xml_id,
+        )
 
         for obj in parsed.objects:
             if obj.tag.lower() not in ("text", "dtext"):
                 continue
+
             text = self._text_value(obj)
             if not text or not self.label_re.fullmatch(text):
                 continue
@@ -214,43 +315,85 @@ class GParser:
             if b.h <= 0:
                 b = Box(b.x, b.y, max(b.w, 1.0), 1.0)
 
+            is_green = _is_green_text(obj)
+            color = _text_primary_color(obj)
+
             for direction in positions:
                 direction = direction.lower()
-                score = None
 
-                if direction == "top":
-                    ok_axis = r.left - tol <= b.cx <= r.right + tol
-                    gap = r.top - b.bottom
-                    if ok_axis and -tol <= gap <= maxd:
-                        score = abs(gap) + abs(b.cx - r.cx) * 0.08
+                current_score, current_gap = relation(
+                    current_box,
+                    b,
+                    direction,
+                    is_green,
+                )
+                if current_score is None:
+                    continue
 
-                elif direction == "bottom":
-                    ok_axis = r.left - tol <= b.cx <= r.right + tol
-                    gap = b.top - r.bottom
-                    if ok_axis and -tol <= gap <= maxd:
-                        score = abs(gap) + abs(b.cx - r.cx) * 0.08
+                # Determine the ONE nearest RMU that owns this text for the
+                # current direction.
+                owners = []
+                for candidate_frame in all_frames:
+                    score, gap = relation(
+                        candidate_frame.frame.box,
+                        b,
+                        direction,
+                        is_green,
+                    )
+                    if score is None:
+                        continue
 
-                elif direction == "left":
-                    ok_axis = r.top - tol <= b.cy <= r.bottom + tol
-                    gap = r.left - b.right
-                    if ok_axis and -tol <= gap <= maxd:
-                        score = abs(gap) + abs(b.cy - r.cy) * 0.08
+                    owners.append(
+                        (
+                            score,
+                            abs(gap or 0.0),
+                            candidate_frame.frame.xml_index,
+                            candidate_frame.frame.xml_id,
+                        )
+                    )
 
-                elif direction == "right":
-                    ok_axis = r.top - tol <= b.cy <= r.bottom + tol
-                    gap = b.left - r.right
-                    if ok_axis and -tol <= gap <= maxd:
-                        score = abs(gap) + abs(b.cy - r.cy) * 0.08
+                if not owners:
+                    continue
 
-                if score is not None:
-                    result.append(LabelCandidate(text=text, direction=direction, score=score, obj=obj))
+                owner = min(owners)
+                owner_key = (owner[2], owner[3])
+
+                if owner_key != current_frame_key:
+                    # This text belongs to another, nearer RMU frame.
+                    continue
+
+                result.append(
+                    LabelCandidate(
+                        text=text,
+                        direction=direction,
+                        score=current_score,
+                        obj=obj,
+                        is_green=is_green,
+                        color=color,
+                        gap=float(current_gap or 0.0),
+                    )
+                )
 
         uniq = {}
         for c in result:
-            key = (c.text, c.direction, c.obj.xml_id, c.obj.xml_index)
+            key = (
+                c.text,
+                c.direction,
+                c.obj.xml_id,
+                c.obj.xml_index,
+            )
             if key not in uniq or c.score < uniq[key].score:
                 uniq[key] = c
-        return sorted(uniq.values(), key=lambda c: (c.score, c.text, c.direction))
+
+        return sorted(
+            uniq.values(),
+            key=lambda c: (
+                0 if c.is_green else 1,
+                c.score,
+                c.text,
+                c.direction,
+            ),
+        )
 
     def find_target_objects_in_frame(
         self,

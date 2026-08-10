@@ -14,6 +14,74 @@ All notable changes to Distribution Model Manager are documented here.
 
 
 
+
+
+## [3.0.19] - 2026-08-10
+
+### Fixed
+- Fixed `RMU_NOT_FOUND_IN_DATABASE` rows being appended after all database-matched RMUs.
+- RMU summary now always sorts strictly by G-file RMU sequence.
+
+### Changed
+- RMU summary is one row per G RMU frame.
+- Duplicate Oracle RMU records no longer expand into multiple summary rows.
+- Duplicate RMUs show only the database match count and a blocking error; multiple IDs are intentionally hidden.
+- Removed duplicate report columns: first-frame XML ID, G match count, duplicate G RMU sequence, G frame XML IDs, and database record sequence.
+- Device detail remains G-element based.
+
+## [3.0.18] - 2026-08-10
+
+### Changed
+- RMU label color is now used only when one RMU owns multiple candidate names.
+- A single candidate label is always selected directly, regardless of color.
+- For multiple candidates: nearest green wins; if no green exists, nearest label wins.
+- Text ownership remains one-to-one with the nearest RMU frame.
+
+## [3.0.17] - 2026-08-10
+
+### Fixed
+- Fixed a green RMU label being reused by multiple vertically aligned RMU frames.
+- Each candidate Text now belongs to exactly one nearest RMU frame.
+- Fixed the reported duplicate `15953` caused by label ownership, not by Oracle.
+
+### Changed
+- RMU summary is now database-record based: one `dms_combined_device.ID`
+  produces one summary row.
+- Device details remain G-element based.
+- If several G frames point to the same database RMU ID, their frame
+  indices/XML IDs are aggregated on the single database summary row.
+
+## [3.0.16] - 2026-08-10
+
+### Fixed
+- Restored the missing `RmuValidator._make_expected_keyid()` method.
+- KeyID generation now explicitly uses `DeviceID + (Domain << 32)`.
+- Fixed the runtime crash encountered during CBreakerDis validation.
+
+### Added
+- Added KeyID encoding regression tests for Domain 0 and Domain 40.
+- Added a validator private-method integrity test that detects undefined
+  `self._xxx()` method calls before release.
+
+### Architecture
+- Kept `src/dmm` intentionally. `dmm` is the Python package namespace for
+  Distribution Model Manager, not a second application.
+
+## [3.0.15] - 2026-08-10
+
+### Added
+- Added color-aware RMU label recognition from G-file Text lc/lcc attributes.
+- Green RMU labels can be found across long directional distances.
+- Added nearest-green selection when multiple labels exist above/beside an RMU.
+- Added support for engineering RMU names such as AK-900841 instead of numeric-only labels.
+- Added current-KeyID RMU-name verification via device combined_id -> dms_combined_device.
+- Added purple RMU_LINK status for links that point to another RMU even on the same feeder.
+- Added current linked RMU name/ID fields to device details.
+
+### Changed
+- Non-green RMU labels retain the legacy search-distance limit as a safe fallback.
+- Existing-link correctness now validates RMU identity independently from feeder identity.
+
 ## [3.0.13] - 2026-08-10
 
 ### Added
