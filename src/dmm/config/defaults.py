@@ -21,7 +21,7 @@ DEFAULT_DEVICE_RULES = {
     },
     "BusDis": {
         "table_id": 13506,
-        "domain": 0,
+        "domain": 1,
         "match_mode": "CODE_EQUALS_PNAME",
         "description": "母线",
     },

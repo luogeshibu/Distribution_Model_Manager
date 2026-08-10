@@ -32,7 +32,7 @@ EXE 运行时 `workspace` 位于 EXE 所在目录。
 
 - CBreakerDis：CODE 不得为空；CODE 必须等于当前用于校验的 p_NameString；NAME 不参与判断。
 - ZhaiWaiJieDiDaoZha：逻辑 p_NameString=开关名+D；CODE 必须一致。
-- BusDis：CODE 必须等于用于校验的 p_NameString；图上文字模式固定 BUS。
+- BusDis：表号 13506（dms_bs_device），默认域号 1；CODE 必须等于用于校验的 p_NameString；图上文字模式固定 BUS。
 - 三类设备 G 图元数量必须和数据库 combined_id 下记录数完全一致。
 - 已有关联 KeyID 时继续核对当前 Device ID、Table ID、Domain、combined_id、Expected KeyID。
 - 已正确关联：无需重复关联。

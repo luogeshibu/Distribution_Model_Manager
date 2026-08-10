@@ -31,6 +31,25 @@ def load_settings() -> dict:
     if not str(settings.get("db", {}).get("password", "")).strip():
         settings["db"]["password"] = DEFAULT_SETTINGS["db"]["password"]
 
+    # v3.0.23 data-rule migration:
+    # BusDis / dms_bs_device uses Table ID 13506 and Domain 1.
+    # Older versions stored Domain 0 in workspace/config.json.  Migrate that
+    # legacy value automatically so an upgrade does not silently keep using
+    # the incorrect KeyID rule.
+    device_rules = settings.get("device_rules")
+    if isinstance(device_rules, dict):
+        bus_rule = device_rules.get("BusDis")
+        if isinstance(bus_rule, dict):
+            try:
+                table_id = int(bus_rule.get("table_id", 13506))
+                domain = int(bus_rule.get("domain", 1))
+            except (TypeError, ValueError):
+                table_id = 13506
+                domain = 1
+
+            if table_id == 13506 and domain == 0:
+                bus_rule["domain"] = 1
+
     return settings
 
 

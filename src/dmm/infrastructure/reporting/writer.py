@@ -482,6 +482,10 @@ th{{background:var(--green-dark);color:white;position:sticky;top:0}}
 th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-space:nowrap}}
 .scroll{{overflow:auto;max-height:650px}}
 .pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}} .feeder{{background:#FFE8CC}} .rmu-link{{background:#F0E7FF}} .blocked{{background:#EAF3FF}} .fail{{background:#FFF0F0}}
+.status-list{{display:flex;flex-direction:column;gap:8px;max-width:1100px}}
+.status-item{{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:14px;padding:9px 12px;border-radius:6px;border:1px solid var(--border)}}
+.status-item strong{{white-space:nowrap}}
+.status-item span{{line-height:1.55}}
 .meta{{color:#D7EEE5}}
 </style>
 </head>
@@ -501,14 +505,32 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
 
   <div class="card">
     <h2>状态颜色说明</h2>
-    <p>
-      <span style="background:#EAF8F2;padding:4px 10px">绿色 PASS：校验正常</span>
-      <span style="background:#FFF8DE;padding:4px 10px;margin-left:8px">黄色 WARN：未关联，但满足自动关联条件</span>
-      <span style="background:#FFE8CC;padding:4px 10px;margin-left:8px">橙色 FEEDER：馈线不一致或馈线信息异常，仅告警，不阻断模型关联</span>
-      <span style="background:#F0E7FF;padding:4px 10px;margin-left:8px">紫色 RMU_LINK：当前KeyID关联到了其他环网柜，属于硬错误并阻断自动处理</span>
-      <span style="background:#EAF3FF;padding:4px 10px;margin-left:8px">蓝色 BLOCKED：保留用于其它人工阻断场景；RMU重复且未关联的设备现在直接使用红色 FAIL</span>
-      <span style="background:#FFF0F0;padding:4px 10px;margin-left:8px">红色 FAIL：硬错误</span>
-    </p>
+    <div class="status-list">
+      <div class="status-item pass">
+        <strong>绿色 PASS</strong>
+        <span>校验正常；已有模型关联正确时也使用该状态。</span>
+      </div>
+      <div class="status-item warn">
+        <strong>黄色 WARN</strong>
+        <span>设备尚未关联，但满足自动关联条件。</span>
+      </div>
+      <div class="status-item feeder">
+        <strong>橙色 FEEDER</strong>
+        <span>环网柜或设备馈线不一致、馈线信息异常；仅告警，不作为模型关联强制阻断条件。</span>
+      </div>
+      <div class="status-item rmu-link">
+        <strong>紫色 RMU_LINK</strong>
+        <span>当前 KeyID 实际关联到了其他环网柜；属于硬错误，并阻断自动处理。</span>
+      </div>
+      <div class="status-item blocked">
+        <strong>蓝色 BLOCKED</strong>
+        <span>保留用于其它需要人工确认的阻断场景。</span>
+      </div>
+      <div class="status-item fail">
+        <strong>红色 FAIL</strong>
+        <span>硬错误，例如 RMU 记录异常且设备未关联、CODE/p_NameString 不一致、CODE 不存在或 KeyID 无法反解。</span>
+      </div>
+    </div>
   </div>
 
   <div class="card">

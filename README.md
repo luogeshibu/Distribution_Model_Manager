@@ -1,4 +1,61 @@
-# 配网模型管理工具 v3.0.22
+# 配网模型管理工具 v3.0.23
+
+## BusDis 默认域号修正
+
+BusDis 的数据库模型信息修正为：
+
+```text
+G图元类型：BusDis
+数据库表：dms_bs_device
+Table ID：13506
+Domain：1
+```
+
+因此 BusDis 的 Expected KeyID 计算为：
+
+```text
+KeyID = DeviceID + (1 << 32)
+      = DeviceID + 4294967296
+```
+
+例如：
+
+```text
+DeviceID = 3801601035454119950
+
+Expected KeyID
+= 3801601035454119950 + 4294967296
+= 3801601039749087246
+```
+
+本版本同时处理旧配置迁移：
+
+```text
+历史 workspace/config.json
+BusDis / Table 13506 / Domain 0
+            ↓
+启动 v3.0.23
+            ↓
+自动迁移为 Domain 1
+```
+
+这样升级后不会因为旧配置仍保留 0 而继续计算错误的 KeyID。
+
+## 状态颜色说明布局
+
+HTML 报告中的“状态颜色说明”已从横向一行改成纵向列表，每个状态单独一行：
+
+```text
+绿色 PASS
+黄色 WARN
+橙色 FEEDER
+紫色 RMU_LINK
+蓝色 BLOCKED
+红色 FAIL
+```
+
+状态名称和说明分列展示，便于阅读。
+
 
 ## RMU 名称按字符串处理
 

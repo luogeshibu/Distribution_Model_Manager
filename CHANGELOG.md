@@ -19,6 +19,21 @@ All notable changes to Distribution Model Manager are documented here.
 
 
 
+
+## [3.0.23] - 2026-08-10
+
+### Fixed
+- Corrected BusDis default domain from `0` to `1`.
+- BusDis now uses Table ID `13506`, table `dms_bs_device`, Domain `1`.
+- BusDis Expected KeyID therefore uses `DeviceID + (1 << 32)`.
+
+### Migration
+- Legacy saved configuration `BusDis / 13506 / Domain 0` is automatically migrated to Domain `1` on startup.
+
+### Reporting
+- Changed the HTML status-color legend from one horizontal row to a vertical list.
+- Each status now has its own row with a dedicated label and explanation.
+
 ## [3.0.22] - 2026-08-10
 
 ### Fixed
