@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-import re
 from typing import Any, Dict, List, Sequence
 
 from dmm.domain.gfile.parser import GParser, RmuFrame, GObject
@@ -23,76 +22,6 @@ def int_or_none(v):
         return int(v)
     except (TypeError, ValueError):
         return None
-
-
-def normalize_feeder_text(value) -> str:
-    """
-    Normalize feeder text so these compare equally:
-
-        ABH-06
-        ABH_06
-        ABH 06
-        abh-06
-    """
-    value = norm(value).upper()
-    value = re.sub(r"[-_\s]+", " ", value)
-    return value.strip()
-
-
-def feeder_hint_from_g_filename(file_name: str) -> str:
-    """
-    Extract the feeder hint from the G filename.
-
-    Examples:
-        JED-NTH-ABH-06.sln.pic.g -> ABH-06
-        JED-NTH-ABH_06.sln.pic.g -> ABH-06
-
-    The last two logical tokens are used because the database display name can
-    be longer (for example: JED NTH ABH 06), while the G file identifies the
-    feeder with the suffix ABH-06.
-    """
-    name = Path(file_name).name
-
-    for suffix in (".sln.pic.g", ".pic.g", ".sln.g", ".g"):
-        if name.lower().endswith(suffix):
-            name = name[:-len(suffix)]
-            break
-
-    tokens = [
-        token
-        for token in re.split(r"[-_\s]+", name)
-        if token
-    ]
-
-    if len(tokens) >= 2:
-        return f"{tokens[-2]}-{tokens[-1]}"
-
-    return name
-
-
-def compose_database_feeder_name(feeder, station) -> str:
-    """
-    Build the readable feeder name that DBI usually renders for FEEDER_ID.
-
-    Example:
-        station.name = JED NTH ABH
-        feeder.name  = 06
-        -> JED NTH ABH 06
-    """
-    feeder = feeder or {}
-    station = station or {}
-
-    station_name = norm(station.get("name"))
-    feeder_name = (
-        norm(feeder.get("name"))
-        or norm(feeder.get("code"))
-        or norm(feeder.get("graph_name"))
-    )
-
-    return " ".join(
-        part for part in (station_name, feeder_name)
-        if part
-    ).strip()
 
 
 class RmuValidator:
@@ -248,11 +177,6 @@ class RmuValidator:
             "db_device_id": "",
             "db_code": "",
             "db_name": "",
-            "g_file_feeder": "",
-            "db_feeder_id": "",
-            "db_feeder_name": "",
-            "device_feeder_match": "",
-            "device_feeder_reason": "",
             "db_combined_id": "",
             "db_bv_id": "",
             "expected_keyid": "",
@@ -289,20 +213,6 @@ class RmuValidator:
         row["severity"] = "ERROR"
         row["reason"] = reason
         row["association_ready"] = "NO"
-
-    @staticmethod
-    def _set_feeder_issue(row, reason):
-        """
-        Feeder mismatch is a warning-only condition.
-
-        It must remain visible in the report, but it must NOT disable model
-        association by itself.  Hard blockers are handled separately:
-        RMU missing/duplicate (for unlinked elements), CODE mismatch/not found,
-        invalid KeyID, or an existing KeyID pointing to another RMU.
-        """
-        row["status"] = "FEEDER"
-        row["severity"] = "FEEDER_MISMATCH"
-        row["reason"] = reason
 
     @staticmethod
     def _set_manual_duplicate_block(row, reason):
@@ -363,41 +273,143 @@ class RmuValidator:
             self._set_fail(row, f"EXPECTED_KEYID_VERIFY_ERROR: {exc}")
             return False
 
+    def _validate_expected_device_ownership(self, row, dev, rmu_id):
+        """
+        Hard rule: the database device selected by CODE must belong to the
+        current UNIQUE RMU.
+
+        Even though normal database rows are queried by combined_id first, this
+        explicit check makes RMU ownership a non-bypassable validation rule.
+        """
+        expected_rmu_id = int_or_none(rmu_id)
+        actual_rmu_id = int_or_none(dev.get("combined_id"))
+
+        if expected_rmu_id is None:
+            self._set_fail(row, "EXPECTED_RMU_ID_INVALID")
+            return False
+
+        if actual_rmu_id is None:
+            self._set_fail(
+                row,
+                "DEVICE_RMU_ID_EMPTY: "
+                f"CODE={row.get('db_code') or row.get('selected_device_name') or '-'}"
+            )
+            return False
+
+        if actual_rmu_id != expected_rmu_id:
+            row["model_link_correct"] = "NO"
+            row["association_action"] = "禁止自动关联，请检查数据库设备归属"
+            self._set_rmu_link_issue(
+                row,
+                "DATABASE_DEVICE_RMU_MISMATCH: "
+                f"CODE={row.get('db_code') or '-'}；"
+                f"设备combined_id={actual_rmu_id}；"
+                f"当前环网柜ID={expected_rmu_id}"
+            )
+            return False
+
+        return True
+
+    def _validate_one_to_one_device_mapping(self, rmu_result):
+        """
+        Hard one-to-one rule inside one G-file RMU.
+
+        - one logical p_NameString may correspond to only one G target row;
+        - one database device ID may be consumed by only one G target row;
+        - missing database device is allowed to exist as a data-quality
+          condition, but the corresponding G row remains FAIL and therefore
+          blocks automatic association;
+        - unrelated extra database rows are ignored.
+        """
+        rows = [
+            row for row in rmu_result.get("device_rows", [])
+            if row.get("xml_id")
+        ]
+
+        by_logical_name = defaultdict(list)
+        by_device_id = defaultdict(list)
+
+        for row in rows:
+            logical_name = norm(row.get("p_name_string"))
+            if logical_name:
+                by_logical_name[logical_name].append(row)
+
+            device_id = int_or_none(row.get("db_device_id"))
+            if device_id is not None:
+                by_device_id[device_id].append(row)
+
+        for logical_name, mapped_rows in by_logical_name.items():
+            if len(mapped_rows) <= 1:
+                continue
+
+            xml_ids = ",".join(
+                str(row.get("xml_id") or "-")
+                for row in mapped_rows
+            )
+            issue = (
+                "G_PNAME_NOT_ONE_TO_ONE: "
+                f"p_NameString={logical_name} 在同一环网柜内被多个G图元使用；"
+                f"XML_ID={xml_ids}"
+            )
+            rmu_result["inventory_issues"].append(issue)
+            rmu_result.setdefault("device_block_reasons", []).append(issue)
+
+            for row in mapped_rows:
+                row["model_link_correct"] = "NO"
+                row["association_ready"] = "NO"
+                row["writeback_needed"] = "NO"
+                self._set_fail(row, issue)
+
+        for device_id, mapped_rows in by_device_id.items():
+            if len(mapped_rows) <= 1:
+                continue
+
+            xml_ids = ",".join(
+                str(row.get("xml_id") or "-")
+                for row in mapped_rows
+            )
+            codes = ",".join(
+                str(row.get("db_code") or "-")
+                for row in mapped_rows
+            )
+            issue = (
+                "DATABASE_DEVICE_NOT_ONE_TO_ONE: "
+                f"同一个数据库设备ID={device_id} 被多个G图元占用；"
+                f"CODE={codes}；XML_ID={xml_ids}"
+            )
+            rmu_result["db_integrity_issues"].append(issue)
+            rmu_result.setdefault("device_block_reasons", []).append(issue)
+
+            for row in mapped_rows:
+                row["model_link_correct"] = "NO"
+                row["association_ready"] = "NO"
+                row["writeback_needed"] = "NO"
+                self._set_fail(row, issue)
+
     def _evaluate_current_model(self, row, elem, device_id, rule, rmu_id):
         """
         Evaluate an existing KeyID for a UNIQUE RMU.
 
-        Association blockers:
-        - invalid/unresolvable KeyID;
-        - current KeyID points to another device/table/domain;
-        - current KeyID points to another RMU;
-        - current KeyID is not the Expected KeyID.
+        Feeder is intentionally NOT checked.
 
-        Feeder mismatch is warning-only and never blocks automatic association.
+        Hard validation rules:
+        - expected database device must already be uniquely resolved by CODE;
+        - logical p_NameString/CODE validation must already have passed;
+        - invalid/unresolvable KeyID is an error;
+        - existing KeyID must resolve to the expected device/table/domain;
+        - existing KeyID must belong to the current RMU;
+        - existing KeyID must equal Expected KeyID.
         """
-        feeder_warning = row.get("device_feeder_match") == "NO"
-        feeder_reason = row.get("device_feeder_reason", "")
-
         if not elem.keyid:
             row["model_linked"] = "NO"
             row["model_link_correct"] = ""
             row["model_link_status"] = "未关联"
-            row["association_action"] = (
-                "需要关联；馈线存在告警但不阻断"
-                if feeder_warning
-                else "需要关联"
-            )
+            row["association_action"] = "需要关联"
             row["writeback_needed"] = "YES"
             row["association_ready"] = "YES"
-
-            if feeder_warning:
-                row["status"] = "FEEDER"
-                row["severity"] = "FEEDER_MISMATCH"
-                row["reason"] = feeder_reason or "DEVICE_FEEDER_WARNING"
-            else:
-                row["status"] = "WARN"
-                row["severity"] = "UNLINKED"
-                row["reason"] = "MODEL_NOT_LINKED"
+            row["status"] = "WARN"
+            row["severity"] = "UNLINKED"
+            row["reason"] = "MODEL_NOT_LINKED"
             return
 
         row["model_linked"] = "YES"
@@ -482,7 +494,6 @@ class RmuValidator:
             )
             return
 
-        # RMU ownership is the most important hard-link check.
         if (
             row.get("current_rmu_match") != "YES"
             or row.get("current_rmu_name_match") != "YES"
@@ -496,8 +507,7 @@ class RmuValidator:
                 f"当前图形环网柜={row.get('rmu_name') or '-'}；"
                 f"当前KeyID设备所属环网柜={row.get('current_rmu_name') or '-'}；"
                 f"当前combined_id={row.get('current_combined_id') or '-'}；"
-                f"期望combined_id={rmu_id or '-'}；"
-                f"馈线检查={row.get('device_feeder_reason') or '-'}"
+                f"期望combined_id={rmu_id or '-'}"
             )
             return
 
@@ -538,26 +548,12 @@ class RmuValidator:
             return
 
         row["model_link_correct"] = "YES"
-        row["model_link_status"] = (
-            "模型已关联且正确；馈线存在告警"
-            if feeder_warning
-            else "模型已关联且正确"
-        )
-        row["association_action"] = (
-            "模型已关联，无需关联；馈线仅告警"
-            if feeder_warning
-            else "模型已关联，无需关联"
-        )
+        row["model_link_status"] = "模型已关联且正确"
+        row["association_action"] = "模型已关联，无需关联"
         row["association_ready"] = "YES"
-
-        if feeder_warning:
-            row["status"] = "FEEDER"
-            row["severity"] = "FEEDER_MISMATCH"
-            row["reason"] = feeder_reason or "DEVICE_FEEDER_WARNING"
-        else:
-            row["status"] = "PASS"
-            row["severity"] = "PASS"
-            row["reason"] = "MODEL_ALREADY_LINKED_CORRECT"
+        row["status"] = "PASS"
+        row["severity"] = "PASS"
+        row["reason"] = "MODEL_ALREADY_LINKED_CORRECT"
 
 
     def _inspect_current_link_without_unique_rmu(
@@ -577,7 +573,6 @@ class RmuValidator:
         - current linked CODE must equal the logical p_NameString;
         - current linked device must belong to an RMU whose NAME equals the
           current G-file RMU name;
-        - feeder mismatch is warning-only;
         - a correct existing manual link is allowed to remain even though the
           RMU database name itself is duplicated.
         """
@@ -639,7 +634,6 @@ class RmuValidator:
             row["db_device_id"] = rec.get("id", did)
             row["db_code"] = norm(rec.get("code"))
             row["db_name"] = norm(rec.get("name"))
-            row["db_feeder_id"] = rec.get("feeder_id", "")
             row["db_combined_id"] = rec.get("combined_id", "")
             row["db_bv_id"] = rec.get("bv_id", "")
 
@@ -671,9 +665,6 @@ class RmuValidator:
             # There is no unique expected RMU ID in this branch.
             row["current_rmu_match"] = "N/A"
 
-            # Feeder is checked for reporting only.
-            self._validate_device_feeder(row)
-
             # Existing model belongs to another RMU -> hard error.
             if row.get("current_rmu_name_match") != "YES":
                 row["model_link_status"] = (
@@ -687,8 +678,7 @@ class RmuValidator:
                     "CURRENT_MODEL_RMU_MISMATCH: "
                     f"当前图形环网柜={expected_rmu_name or '-'}；"
                     f"当前KeyID设备所属环网柜={current_rmu_name or '-'}；"
-                    f"当前combined_id={current_combined_id or '-'}；"
-                    f"馈线检查={row.get('device_feeder_reason') or '-'}"
+                    f"当前combined_id={current_combined_id or '-'}"
                 )
                 return
 
@@ -720,36 +710,153 @@ class RmuValidator:
             )
             return
 
+        # Even for an existing manual KeyID, CODE must remain unique inside
+        # the actual RMU that owns the linked database device.
+        current_combined_id = int_or_none(row.get("current_combined_id"))
+        current_table_id = int_or_none(row.get("current_table_id"))
+        current_device_id = int_or_none(row.get("current_device_id"))
+
+        if current_combined_id is None or current_table_id is None:
+            self._set_fail(
+                row,
+                "CURRENT_LINK_RMU_OR_TABLE_INVALID"
+            )
+            return
+
+        try:
+            _, owner_rows = self.db.get_devices_by_combined_id(
+                current_table_id,
+                current_combined_id,
+            )
+        except Exception as exc:
+            self._set_fail(
+                row,
+                f"CURRENT_LINK_CODE_UNIQUENESS_QUERY_FAILED: {exc}"
+            )
+            return
+
+        same_code_rows = self._find_by_code(owner_rows, expected_code)
+        row["db_match_count"] = len(same_code_rows)
+
+        if len(same_code_rows) == 0:
+            self._set_fail(
+                row,
+                f"CURRENT_LINK_CODE_NOT_FOUND_IN_OWNER_RMU: CODE={expected_code}"
+            )
+            return
+
+        if len(same_code_rows) > 1:
+            self._set_fail(
+                row,
+                "CURRENT_LINK_CODE_DUPLICATE_IN_OWNER_RMU: "
+                f"CODE={expected_code}; COUNT={len(same_code_rows)}"
+            )
+            return
+
+        unique_device_id = int_or_none(same_code_rows[0].get("id"))
+        if (
+            unique_device_id is None
+            or current_device_id is None
+            or unique_device_id != current_device_id
+        ):
+            self._set_fail(
+                row,
+                "CURRENT_LINK_DEVICE_NOT_UNIQUE_CODE_TARGET: "
+                f"CODE={expected_code}; "
+                f"KeyID_DEVICE={current_device_id or '-'}; "
+                f"UNIQUE_CODE_DEVICE={unique_device_id or '-'}"
+            )
+            return
+
         # Manual link itself is correct by current business rules.
         row["model_link_correct"] = "YES"
         row["association_ready"] = "YES"
+        row["model_link_status"] = (
+            "已人工关联，CODE与环网柜归属校验通过"
+        )
+        row["association_action"] = (
+            "保留人工关联；RMU数据库记录异常需人工复核"
+        )
+        row["status"] = "PASS"
+        row["severity"] = "PASS"
+        row["reason"] = (
+            f"{rmu_reason}: EXISTING_MANUAL_LINK_VALID"
+        )
 
-        if row.get("device_feeder_match") == "NO":
-            row["model_link_status"] = (
-                "已人工关联，CODE与环网柜归属正确；馈线存在告警"
-            )
-            row["association_action"] = (
-                "保留人工关联；馈线仅告警；RMU数据库记录异常需人工复核"
-            )
-            row["status"] = "FEEDER"
-            row["severity"] = "FEEDER_MISMATCH"
-            row["reason"] = (
-                row.get("device_feeder_reason")
-                or f"{rmu_reason}: FEEDER_WARNING"
-            )
-        else:
-            row["model_link_status"] = (
-                "已人工关联，CODE与环网柜归属校验通过"
-            )
-            row["association_action"] = (
-                "保留人工关联；RMU数据库记录异常需人工复核"
-            )
-            row["status"] = "PASS"
-            row["severity"] = "PASS"
-            row["reason"] = (
-                f"{rmu_reason}: EXISTING_MANUAL_LINK_VALID"
-            )
 
+    def _validate_nonunique_rmu_existing_links(self, rmu_result):
+        """
+        Additional consistency rule for a non-unique RMU name.
+
+        The RMU summary still fails because the RMU name is not unique.
+        However, if G elements already contain manual KeyIDs, inspect the
+        existing model rather than discarding it.
+
+        All successfully resolved existing KeyIDs inside this G RMU must point
+        to ONE AND THE SAME actual dms_combined_device record.  Having the same
+        RMU NAME is not enough: if some devices point to duplicate RMU ID A and
+        others point to duplicate RMU ID B, the existing model is inconsistent.
+
+        Feeder information is deliberately not involved.
+        """
+        linked_rows = [
+            row for row in rmu_result.get("device_rows", [])
+            if row.get("model_linked") == "YES"
+        ]
+        if not linked_rows:
+            return
+
+        resolved_rows = []
+        current_rmu_ids = set()
+
+        for row in linked_rows:
+            current_id = int_or_none(row.get("current_combined_id"))
+            current_name = norm(row.get("current_rmu_name"))
+            if current_id is not None:
+                current_rmu_ids.add(current_id)
+                resolved_rows.append(row)
+
+            # Per-row validation already detects a different RMU name. Keep
+            # that hard error; this method adds the cross-device ID check.
+            expected_name = norm(rmu_result.get("rmu_name"))
+            if current_name and expected_name and current_name != expected_name:
+                row["model_link_correct"] = "NO"
+                row["association_ready"] = "NO"
+                row["model_link_status"] = "已关联，但关联到了其他环网柜"
+                row["association_action"] = "禁止自动关联，请检查现有模型"
+                self._set_rmu_link_issue(
+                    row,
+                    "CURRENT_MODEL_RMU_NAME_MISMATCH: "
+                    f"当前图形环网柜={expected_name}；"
+                    f"当前KeyID设备所属环网柜={current_name}；"
+                    f"当前combined_id={current_id or '-'}"
+                )
+
+        if len(current_rmu_ids) <= 1:
+            return
+
+        ids_text = ",".join(str(value) for value in sorted(current_rmu_ids))
+        issue = (
+            "NONUNIQUE_RMU_EXISTING_LINKS_SPAN_MULTIPLE_RMUS: "
+            f"同一G图环网柜内已关联设备实际来自多个环网柜ID：{ids_text}"
+        )
+        rmu_result["db_integrity_issues"].append(issue)
+        rmu_result["association_block_reasons"].append(issue)
+
+        for row in resolved_rows:
+            row["model_link_correct"] = "NO"
+            row["association_ready"] = "NO"
+            row["writeback_needed"] = "NO"
+            row["model_link_status"] = (
+                "已关联，但同一环网柜内设备来自多个数据库环网柜"
+            )
+            row["association_action"] = "禁止自动处理，请检查已有模型关联"
+            self._set_rmu_link_issue(
+                row,
+                "CURRENT_MODEL_RMU_ID_INCONSISTENT: "
+                f"当前图形环网柜={rmu_result.get('rmu_name') or '-'}；"
+                f"本环网柜已关联设备涉及多个combined_id={ids_text}"
+            )
 
     def _append_unresolved_rmu_device_rows(
         self,
@@ -810,9 +917,6 @@ class RmuValidator:
                 elem,
                 rule,
                 {"table_name": ""},
-            )
-            row["g_file_feeder"] = rmu_result.get(
-                "file_feeder_hint", ""
             )
             return row
 
@@ -906,76 +1010,9 @@ class RmuValidator:
             "db_device_id": dev.get("id", ""),
             "db_code": norm(dev.get("code")),
             "db_name": norm(dev.get("name")),
-            "db_feeder_id": dev.get("feeder_id", ""),
             "db_combined_id": dev.get("combined_id", ""),
             "db_bv_id": dev.get("bv_id", ""),
         })
-
-    def _validate_device_feeder(self, row):
-        """
-        Compare the matched database device's feeder with the G-file feeder.
-
-        v3.0.21 policy:
-        - feeder mismatch / missing feeder / feeder lookup failure is WARNING;
-        - it is reported in orange (FEEDER);
-        - it does NOT stop CODE / p_NameString validation;
-        - it does NOT stop automatic model association;
-        - RMU ownership is still a hard condition and is checked separately.
-        """
-        file_feeder = norm(row.get("g_file_feeder"))
-        feeder_id = row.get("db_feeder_id")
-
-        if feeder_id in (None, ""):
-            row["device_feeder_match"] = "NO"
-            row["device_feeder_reason"] = "DEVICE_FEEDER_ID_EMPTY"
-            self._set_feeder_issue(row, row["device_feeder_reason"])
-            return True
-
-        try:
-            feeder = self.db.get_feeder_info(feeder_id)
-        except Exception as exc:
-            row["device_feeder_match"] = "NO"
-            row["device_feeder_reason"] = (
-                f"DEVICE_FEEDER_LOOKUP_ERROR: {exc}"
-            )
-            self._set_feeder_issue(row, row["device_feeder_reason"])
-            return True
-
-        if not feeder:
-            row["device_feeder_match"] = "NO"
-            row["device_feeder_reason"] = (
-                f"DEVICE_FEEDER_NOT_FOUND: feeder_id={feeder_id}, table=13500"
-            )
-            self._set_feeder_issue(row, row["device_feeder_reason"])
-            return True
-
-        station = None
-        if feeder.get("st_id") not in (None, ""):
-            try:
-                station = self.db.get_station_info(feeder.get("st_id"))
-            except Exception:
-                station = None
-
-        db_feeder_name = compose_database_feeder_name(feeder, station)
-        row["db_feeder_name"] = db_feeder_name
-
-        file_key = normalize_feeder_text(file_feeder)
-        db_key = normalize_feeder_text(db_feeder_name)
-
-        if file_key and db_key and file_key in db_key:
-            row["device_feeder_match"] = "YES"
-            row["device_feeder_reason"] = "DEVICE_FEEDER_MATCHED"
-            return True
-
-        row["device_feeder_match"] = "NO"
-        row["device_feeder_reason"] = (
-            f"DEVICE_FEEDER_MISMATCH: G文件馈线={file_feeder or '-'}, "
-            f"数据库设备馈线={db_feeder_name or '-'}, "
-            f"FEEDER_ID={feeder_id}"
-        )
-        self._set_feeder_issue(row, row["device_feeder_reason"])
-        return True
-
 
     def _validate_breaker(self, row, elem, db_set, rule, selected_name, graphical_name):
         row["graphical_name"] = graphical_name
@@ -1006,7 +1043,6 @@ class RmuValidator:
 
         dev = matches[0]
         self._fill_db_fields(row, dev)
-        self._validate_device_feeder(row)
         code = norm(dev.get("code"))
 
         if not code:
@@ -1022,6 +1058,13 @@ class RmuValidator:
         device_id = int_or_none(dev.get("id"))
         if device_id is None:
             self._set_fail(row, "DEVICE_ID_INVALID")
+            return
+
+        if not self._validate_expected_device_ownership(
+            row,
+            dev,
+            row.get("rmu_id"),
+        ):
             return
 
         if not self._verify_expected_keyid(row, device_id, rule):
@@ -1059,7 +1102,6 @@ class RmuValidator:
 
         dev = matches[0]
         self._fill_db_fields(row, dev)
-        self._validate_device_feeder(row)
         code = norm(dev.get("code"))
         if not code:
             self._set_fail(row, "DB_CODE_EMPTY")
@@ -1077,6 +1119,13 @@ class RmuValidator:
         device_id = int_or_none(dev.get("id"))
         if device_id is None:
             self._set_fail(row, "DEVICE_ID_INVALID")
+            return
+
+        if not self._validate_expected_device_ownership(
+            row,
+            dev,
+            row.get("rmu_id"),
+        ):
             return
         if not self._verify_expected_keyid(row, device_id, rule):
             return
@@ -1110,7 +1159,6 @@ class RmuValidator:
 
         dev = matches[0]
         self._fill_db_fields(row, dev)
-        self._validate_device_feeder(row)
         code = norm(dev.get("code"))
         if not code:
             self._set_fail(row, "DB_CODE_EMPTY")
@@ -1122,6 +1170,13 @@ class RmuValidator:
         device_id = int_or_none(dev.get("id"))
         if device_id is None:
             self._set_fail(row, "DEVICE_ID_INVALID")
+            return
+
+        if not self._validate_expected_device_ownership(
+            row,
+            dev,
+            row.get("rmu_id"),
+        ):
             return
         if not self._verify_expected_keyid(row, device_id, rule):
             return
@@ -1157,19 +1212,16 @@ class RmuValidator:
                 "rmu_db_count": 0,
                 "rmu_records": [],
                 "rmu_ids": [],
-                "feeder": None,
-                "station": None,
-                "file_feeder_hint": feeder_hint_from_g_filename(parsed.path.name),
-                "database_feeder_name": "",
-                "feeder_match": "",
-                "feeder_match_reason": "",
                 "device_rows": [],
                 "db_inventory": {},
                 "g_inventory": {},
                 "inventory_issues": [],
                 "db_integrity_issues": [],
                 "association_eligible": False,
+                # RMU-level blockers only. Device-level failures must NEVER
+                # disable association of other valid devices in a unique RMU.
                 "association_block_reasons": [],
+                "device_block_reasons": [],
                 "label_candidates": [],
             }
 
@@ -1217,86 +1269,44 @@ class RmuValidator:
                     rmu_result,
                     resolved["reason"],
                 )
+                self._validate_nonunique_rmu_existing_links(rmu_result)
+                self._validate_one_to_one_device_mapping(rmu_result)
+
+                # RMU identity itself is 0/multiple: whole-RMU automatic
+                # association is forbidden, even if some manual KeyIDs are
+                # individually correct.
+                rmu_result["association_eligible"] = False
+
+                # Keep statistics meaningful even when RMU identity is
+                # non-unique. Device rows may still contain valid/invalid
+                # manually linked models that were inspected above.
+                g_rows = [
+                    row for row in rmu_result["device_rows"]
+                    if row.get("xml_id")
+                ]
+                rmu_result["linked_correct_count"] = sum(
+                    1 for row in g_rows
+                    if row.get("model_link_correct") == "YES"
+                )
+                rmu_result["unlinked_count"] = sum(
+                    1 for row in g_rows
+                    if row.get("model_linked") == "NO"
+                )
+                rmu_result["linked_wrong_count"] = sum(
+                    1 for row in g_rows
+                    if (
+                        row.get("model_linked") == "YES"
+                        and row.get("model_link_correct") == "NO"
+                    )
+                )
+
                 report["rmu_results"].append(rmu_result)
                 continue
 
             rmu_record = selected["db_records"][0]
             rmu_id = int_or_none(rmu_record.get("id"))
-            feeder_id = rmu_record.get("feeder_id")
             rmu_result["rmu_id"] = rmu_id
             rmu_result["rmu_ids"] = [rmu_id] if rmu_id is not None else []
-            rmu_result["feeder_id"] = feeder_id
-            rmu_result["graph_name_db"] = norm(rmu_record.get("graph_name"))
-
-            # Resolve the numeric FEEDER_ID through table 13500
-            # (dms_feeder_device), then compose the same type of readable name
-            # DBI displays from station + feeder information.
-            file_feeder_hint = rmu_result["file_feeder_hint"]
-
-            if feeder_id in (None, ""):
-                rmu_result["feeder_match"] = "NO"
-                rmu_result["feeder_match_reason"] = "RMU_FEEDER_ID_EMPTY"
-            else:
-                try:
-                    feeder = self.db.get_feeder_info(feeder_id)
-                except Exception as exc:
-                    feeder = None
-                    rmu_result["feeder_match_reason"] = (
-                        f"FEEDER_LOOKUP_ERROR: {exc}"
-                    )
-
-                rmu_result["feeder"] = feeder
-
-                station = None
-                if feeder and feeder.get("st_id") not in (None, ""):
-                    try:
-                        station = self.db.get_station_info(feeder.get("st_id"))
-                    except Exception:
-                        station = None
-
-                rmu_result["station"] = station
-                database_feeder_name = compose_database_feeder_name(
-                    feeder,
-                    station,
-                )
-                rmu_result["database_feeder_name"] = database_feeder_name
-
-                file_key = normalize_feeder_text(file_feeder_hint)
-                db_key = normalize_feeder_text(database_feeder_name)
-
-                # Primary comparison: ABH-06 / ABH_06 / ABH 06 must be
-                # contained in the readable DB feeder display.
-                if file_key and db_key and file_key in db_key:
-                    rmu_result["feeder_match"] = "YES"
-                    rmu_result["feeder_match_reason"] = "FEEDER_MATCHED"
-                else:
-                    rmu_result["feeder_match"] = "NO"
-
-                    if not feeder:
-                        reason = (
-                            f"FEEDER_NOT_FOUND: feeder_id={feeder_id}, "
-                            "table=13500"
-                        )
-                    elif not database_feeder_name:
-                        reason = (
-                            f"FEEDER_NAME_EMPTY: feeder_id={feeder_id}, "
-                            "table=13500"
-                        )
-                    else:
-                        reason = (
-                            f"FEEDER_NAME_MISMATCH: "
-                            f"file={file_feeder_hint}, "
-                            f"database={database_feeder_name}"
-                        )
-
-                    rmu_result["feeder_match_reason"] = reason
-
-            # Feeder mismatch is warning-only in v3.0.21.
-            # Continue CODE/p_NameString and model-link validation normally.
-            if rmu_result.get("feeder_match") != "YES":
-                rmu_result["rmu_status"] = "FEEDER"
-                rmu_result["rmu_severity"] = "FEEDER_MISMATCH"
-                rmu_result["rmu_reason"] = "RMU_FEEDER_MISMATCH"
 
             # Query all configured DB device sets for the RMU.
             db_sets = {}
@@ -1332,7 +1342,7 @@ class RmuValidator:
                         "count": 0,
                         "error": str(exc),
                     }
-                    rmu_result["association_block_reasons"].append(
+                    rmu_result["device_block_reasons"].append(
                         f"DEVICE_TABLE_QUERY_FAILED:{tag}"
                     )
 
@@ -1380,7 +1390,6 @@ class RmuValidator:
                 rule = self.device_rules[elem.tag]
                 db_set = db_sets[elem.tag]
                 row = self._default_device_row(rmu_result["rmu_name"], rmu_id, elem, rule, db_set)
-                row["g_file_feeder"] = rmu_result["file_feeder_hint"]
                 graphical_name = norm(graph_names.get(elem.xml_id, {}).get("name"))
                 selected_name = breaker_names.get(elem.xml_id, "")
                 if self.breaker_name_source == "GRAPHICAL_TEXT":
@@ -1402,7 +1411,6 @@ class RmuValidator:
                 rule = self.device_rules[elem.tag]
                 db_set = db_sets[elem.tag]
                 row = self._default_device_row(rmu_result["rmu_name"], rmu_id, elem, rule, db_set)
-                row["g_file_feeder"] = rmu_result["file_feeder_hint"]
                 br_id = ground_to_breaker.get(elem.xml_id, "")
                 breaker_name = breaker_names.get(br_id, "")
                 self._validate_ground(row, elem, db_set, rule, breaker_name)
@@ -1413,9 +1421,13 @@ class RmuValidator:
                 rule = self.device_rules[elem.tag]
                 db_set = db_sets[elem.tag]
                 row = self._default_device_row(rmu_result["rmu_name"], rmu_id, elem, rule, db_set)
-                row["g_file_feeder"] = rmu_result["file_feeder_hint"]
                 self._validate_bus(row, elem, db_set, rule)
                 rmu_result["device_rows"].append(row)
+
+            # Enforce hard one-to-one mapping after all G target rows have
+            # been resolved. This catches duplicate logical p_NameString values
+            # or multiple G elements consuming the same database device.
+            self._validate_one_to_one_device_mapping(rmu_result)
 
             # Database rows that are not requested by any G element are
             # intentionally ignored and are not emitted into device details.
@@ -1465,19 +1477,19 @@ class RmuValidator:
                 if r.get("model_linked") == "YES" and r.get("model_link_correct") == "NO"
             )
 
-            # RMU association can proceed only when every target has a valid DB
-            # model and its existing G link is either correct or absent.
+            # Device-level failures are collected separately. They block only
+            # the affected G elements, never other valid devices in this
+            # UNIQUE RMU.
             row_blocks = [
                 r for r in g_rows
                 if r.get("association_ready") != "YES"
             ]
-            if row_blocks:
-                for r in row_blocks:
-                    rmu_result["association_block_reasons"].append(
-                        f"{r.get('object_type')}:{r.get('xml_id')}:{r.get('reason')}"
-                    )
+            for r in row_blocks:
+                rmu_result["device_block_reasons"].append(
+                    f"{r.get('object_type')}:{r.get('xml_id')}:{r.get('reason')}"
+                )
 
-            # Deduplicate reasons while preserving order.
+            # Deduplicate RMU-level blockers.
             seen = set()
             unique_reasons = []
             for reason in rmu_result["association_block_reasons"]:
@@ -1485,17 +1497,30 @@ class RmuValidator:
                     seen.add(reason)
                     unique_reasons.append(reason)
             rmu_result["association_block_reasons"] = unique_reasons
+
+            # Deduplicate device-level blockers.
+            seen = set()
+            device_reasons = []
+            for reason in rmu_result["device_block_reasons"]:
+                if reason not in seen:
+                    seen.add(reason)
+                    device_reasons.append(reason)
+            rmu_result["device_block_reasons"] = device_reasons
+
+            # This branch is reached only when the RMU NAME resolved uniquely.
+            # Therefore the RMU remains eligible for PARTIAL association even
+            # when some device rows fail. preview_association() will write only
+            # rows with association_ready=YES and writeback_needed=YES.
             rmu_result["association_eligible"] = not unique_reasons
 
             if unique_reasons:
                 rmu_result["rmu_status"] = "FAIL"
                 rmu_result["rmu_severity"] = "ERROR"
                 rmu_result["rmu_reason"] = "RMU_MODEL_DATA_INVALID"
-            elif rmu_result.get("feeder_match") != "YES":
-                # Warning only. The RMU may still enter automatic association.
-                rmu_result["rmu_status"] = "FEEDER"
-                rmu_result["rmu_severity"] = "FEEDER_MISMATCH"
-                rmu_result["rmu_reason"] = "RMU_FEEDER_MISMATCH"
+            elif device_reasons:
+                rmu_result["rmu_status"] = "WARN"
+                rmu_result["rmu_severity"] = "DEVICE_ERROR"
+                rmu_result["rmu_reason"] = "RMU_PARTIAL_DEVICE_ERRORS"
             else:
                 rmu_result["rmu_status"] = "PASS"
                 rmu_result["rmu_severity"] = "PASS"
@@ -1514,7 +1539,7 @@ class RmuValidator:
             "element_pass": sum(1 for d in device_rows if d.get("status") == "PASS"),
             "element_warn": sum(
                 1 for d in device_rows
-                if d.get("status") in ("WARN", "FEEDER")
+                if d.get("status") == "WARN"
             ),
             "element_fail": sum(
                 1 for d in device_rows

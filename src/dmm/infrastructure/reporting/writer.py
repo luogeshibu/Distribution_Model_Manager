@@ -19,8 +19,6 @@ DEVICE_FIELDS = [
     "selected_name_source", "selected_device_name", "paired_breaker_name",
     "table_id", "table_name", "configured_domain", "match_mode",
     "db_match_count", "db_device_id", "db_code", "db_name",
-    "g_file_feeder", "db_feeder_id", "db_feeder_name",
-    "device_feeder_match", "device_feeder_reason",
     "db_combined_id", "db_bv_id",
     "expected_keyid", "expected_keyid_verified",
     "current_keyid", "current_device_id", "current_table_id", "current_domain",
@@ -35,15 +33,11 @@ DEVICE_FIELDS = [
 RMU_FIELDS = [
     "file_name", "frame_index", "frame_xml_id", "rmu_name",
     "rmu_status", "rmu_severity", "rmu_reason",
-    "rmu_db_count", "rmu_id", "code", "feeder_id",
-    "file_feeder_hint", "feeder_table_id", "feeder_table_name",
-    "feeder_db_name", "database_feeder_name",
-    "feeder_match", "feeder_match_reason",
-    "graph_name", "combined_type", "run_state",
+    "rmu_db_count", "rmu_id",
     "device_count", "linked_correct_count", "unlinked_count",
     "linked_wrong_count", "association_eligible",
-    "association_block_reasons", "inventory_issues",
-    "db_integrity_issues",
+    "association_block_reasons", "device_block_reasons",
+    "inventory_issues", "db_integrity_issues",
 ]
 
 DEVICE_LABELS = {
@@ -65,11 +59,6 @@ DEVICE_LABELS = {
     "db_device_id": "关联数据库设备ID",
     "db_code": "关联设备CODE",
     "db_name": "关联设备NAME",
-    "g_file_feeder": "G文件所属馈线",
-    "db_feeder_id": "数据库设备馈线ID",
-    "db_feeder_name": "数据库设备所属馈线",
-    "device_feeder_match": "设备馈线是否正确",
-    "device_feeder_reason": "设备馈线说明",
     "db_combined_id": "所属环网柜ID",
     "db_bv_id": "BV_ID",
     "expected_keyid": "期望KeyID",
@@ -106,24 +95,13 @@ RMU_LABELS = {
     "rmu_reason": "说明",
     "rmu_db_count": "数据库记录数",
     "rmu_id": "环网柜ID",
-    "code": "CODE",
-    "feeder_id": "馈线ID",
-    "file_feeder_hint": "G文件馈线",
-    "feeder_table_id": "馈线表号",
-    "feeder_table_name": "馈线数据库表",
-    "feeder_db_name": "馈线NAME",
-    "database_feeder_name": "数据库馈线名称",
-    "feeder_match": "馈线匹配",
-    "feeder_match_reason": "馈线校验说明",
-    "graph_name": "GRAPH_NAME",
-    "combined_type": "COMBINED_TYPE",
-    "run_state": "RUN_STATE",
     "device_count": "已处理图元数",
     "linked_correct_count": "已正确关联设备数",
     "unlinked_count": "未关联设备数",
     "linked_wrong_count": "关联错误设备数",
     "association_eligible": "RMU可关联",
-    "association_block_reasons": "关联阻断原因",
+    "association_block_reasons": "RMU级关联阻断原因",
+    "device_block_reasons": "设备级阻断原因",
     "inventory_issues": "G图元匹配问题",
     "db_integrity_issues": "数据库匹配问题",
 }
@@ -137,7 +115,6 @@ def status_cls(status):
     return {
         "PASS": "pass",
         "WARN": "warn",
-        "FEEDER": "feeder",
         "RMU_LINK": "rmu-link",
         "BLOCKED": "blocked",
         "FAIL": "fail",
@@ -273,48 +250,6 @@ def flatten_rmu_rows(reports):
                 "rmu_db_count": db_count,
                 # Duplicate RMU: intentionally DO NOT list multiple IDs.
                 "rmu_id": unique_record.get("id", "") if db_count == 1 else "",
-                "code": unique_record.get("code", "") if db_count == 1 else "",
-                "feeder_id": (
-                    unique_record.get("feeder_id", "")
-                    if db_count == 1
-                    else ""
-                ),
-                "file_feeder_hint": rmu.get("file_feeder_hint", ""),
-                "feeder_table_id": (
-                    (rmu.get("feeder") or {}).get("_table_id", 13500)
-                    if rmu.get("feeder") else 13500
-                ),
-                "feeder_table_name": (
-                    (rmu.get("feeder") or {}).get(
-                        "_table_name",
-                        "dms_feeder_device",
-                    )
-                ),
-                "feeder_db_name": (
-                    (rmu.get("feeder") or {}).get("name", "")
-                ),
-                "database_feeder_name": rmu.get(
-                    "database_feeder_name", ""
-                ),
-                "feeder_match": rmu.get("feeder_match", ""),
-                "feeder_match_reason": rmu.get(
-                    "feeder_match_reason", ""
-                ),
-                "graph_name": (
-                    unique_record.get("graph_name", "")
-                    if db_count == 1
-                    else ""
-                ),
-                "combined_type": (
-                    unique_record.get("combined_type", "")
-                    if db_count == 1
-                    else ""
-                ),
-                "run_state": (
-                    unique_record.get("run_state", "")
-                    if db_count == 1
-                    else ""
-                ),
                 "device_count": len([
                     d for d in rmu.get("device_rows", [])
                     if d.get("xml_id")
@@ -332,6 +267,9 @@ def flatten_rmu_rows(reports):
                     else "NO"
                 ),
                 "association_block_reasons": "; ".join(block_reasons),
+                "device_block_reasons": "; ".join(
+                    rmu.get("device_block_reasons", [])
+                ),
                 "inventory_issues": "; ".join(
                     rmu.get("inventory_issues", [])
                 ),
@@ -481,7 +419,7 @@ table{{border-collapse:collapse;width:100%;font-size:12px}}
 th{{background:var(--green-dark);color:white;position:sticky;top:0}}
 th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-space:nowrap}}
 .scroll{{overflow:auto;max-height:650px}}
-.pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}} .feeder{{background:#FFE8CC}} .rmu-link{{background:#F0E7FF}} .blocked{{background:#EAF3FF}} .fail{{background:#FFF0F0}}
+.pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}} .rmu-link{{background:#F0E7FF}} .blocked{{background:#EAF3FF}} .fail{{background:#FFF0F0}}
 .status-list{{display:flex;flex-direction:column;gap:8px;max-width:1100px}}
 .status-item{{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:14px;padding:9px 12px;border-radius:6px;border:1px solid var(--border)}}
 .status-item strong{{white-space:nowrap}}
@@ -514,10 +452,6 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
         <strong>黄色 WARN</strong>
         <span>设备尚未关联，但满足自动关联条件。</span>
       </div>
-      <div class="status-item feeder">
-        <strong>橙色 FEEDER</strong>
-        <span>环网柜或设备馈线不一致、馈线信息异常；仅告警，不作为模型关联强制阻断条件。</span>
-      </div>
       <div class="status-item rmu-link">
         <strong>紫色 RMU_LINK</strong>
         <span>当前 KeyID 实际关联到了其他环网柜；属于硬错误，并阻断自动处理。</span>
@@ -535,12 +469,12 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
 
   <div class="card">
     <h2>环网柜汇总</h2>
-    <p>环网柜汇总严格按照 G 文件环网柜序号排列，每个环网柜只展示一行。数据库中该名称必须唯一：0条或多条时环网柜汇总直接报错。若设备尚未关联，则禁止自动关联；若设备已有人工KeyID，仍继续检查CODE/p_NameString、当前模型所属环网柜及馈线。馈线异常只告警，不作为自动关联阻断条件。设备明细始终以 G 文件实际设备图元为准。</p>
+    <p>环网柜汇总严格按照 G 文件环网柜序号排列，每个环网柜只展示一行。数据库中该名称必须唯一：0条或多条属于 RMU 级错误，整个环网柜禁止自动关联。RMU 唯一时，各设备独立校验、独立决定是否关联：某一设备 CODE 缺失、重复、与 p_NameString 不一致、KeyID 错误或属于其它环网柜，只阻断该设备，不影响同一环网柜内其它正确设备。馈线信息不参与任何判断。</p>
     {rmu_table}
   </div>
 
   <div class="card">
-    <h2>设备明细</h2><p>设备明细仅展示 G 文件中的设备图元；每个图元显示其唯一匹配到的数据库设备、G文件所属馈线、数据库设备所属馈线、当前 KeyID 及是否需要回写。数据库中与 G 图元 CODE 无关的其它设备不参与校验，也不进入设备明细。</p>
+    <h2>设备明细</h2><p>设备明细仅展示 G 文件中的设备图元；每个图元显示其唯一匹配到的数据库设备、CODE/p_NameString、当前 KeyID、实际所属环网柜及是否需要回写。数据库中与 G 图元 CODE 无关的其它设备不参与校验，也不进入设备明细。</p>
     {device_table}
   </div>
 </main>

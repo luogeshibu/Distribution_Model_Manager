@@ -1003,7 +1003,7 @@ class MainWindow(QMainWindow):
             "• 环网柜数据库记录为 0 条或多条时，环网柜汇总直接 FAIL。若 G 设备未关联，禁止自动关联。\n"
             "• 环网柜数据库记录为 0 条或多条，但 G 设备已经有人为 KeyID 时，不丢弃该模型：继续反解当前设备并校验 CODE/p_NameString 和实际所属环网柜。\n"
             "• 已有关联模型如果实际属于其它环网柜，使用紫色 RMU_LINK 标记，属于硬错误，禁止自动覆盖。\n"
-            "• 环网柜馈线或设备馈线不一致只使用橙色 FEEDER 告警，不再作为自动关联的强制阻断条件。\n"
+            "• 馈线判断已完全关闭：不读取文件名馈线、不比较 RMU feeder_id、不查询设备馈线，也不影响校验、预览或关联。\n"
             "• 唯一 RMU 下已有 KeyID 时，仍继续校验当前设备 ID、表号、域号、combined_id 和 Expected KeyID。"
         )
         policy_text.setWordWrap(True)
@@ -1028,11 +1028,10 @@ class MainWindow(QMainWindow):
         colors_layout = QVBoxLayout(colors)
         colors_text = QLabel(
             "绿色 PASS：设备模型校验正常；已有人工关联且 CODE、环网柜归属均正确时也可显示绿色。\n"
-            "黄色 WARN：设备尚未关联，但除馈线告警外满足自动关联条件。\n"
-            "橙色 FEEDER：环网柜或设备馈线不一致/馈线信息异常，仅告警，不阻断模型关联。\n"
+            "黄色 WARN：设备尚未关联，但满足自动关联条件。\n"
             "紫色 RMU_LINK：当前 KeyID 反解后的设备属于其他环网柜；这是硬错误，禁止自动覆盖。\n"
             "红色 FAIL：硬错误，例如 RMU 0条/多条且设备未关联、CODE 与 p_NameString 对不上、CODE不存在/重复、KeyID无法反解。\n"
-            "注意：RMU 0条或多条时，环网柜汇总仍然是红色 FAIL；但已有人为 KeyID 的设备会继续检查，不因馈线问题直接判定模型错误。"
+            "馈线相关状态已取消；报告不再输出 FEEDER 状态。"
         )
         colors_text.setWordWrap(True)
         colors_layout.addWidget(colors_text)
@@ -1047,7 +1046,7 @@ class MainWindow(QMainWindow):
             "app=6500000, voltype=0, p_ReportType=1, state=41, keyid=Expected KeyID\n\n"
             "BusDis 回写：\n"
             "app=6500000, voltype=0, p_ReportType=1, state=15, keyid=Expected KeyID\n\n"
-            "模型关联不会自动修改 p_NameString。自动关联不以馈线一致为前置条件，但目标数据库设备必须通过 CODE/p_NameString 校验并属于当前唯一环网柜。已有人工 KeyID 还会反查实际所属环网柜。"
+            "模型关联不会自动修改 p_NameString。馈线信息完全不参与判断；目标数据库设备必须通过 CODE/p_NameString 校验，并且自动关联目标必须属于当前唯一环网柜。已有人工 KeyID 仍会反查实际所属环网柜。"
         )
         assoc_text.setWordWrap(True)
         assoc_layout.addWidget(assoc_text)

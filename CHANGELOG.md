@@ -20,6 +20,80 @@ All notable changes to Distribution Model Manager are documented here.
 
 
 
+
+
+
+
+## [3.0.27] - 2026-08-10
+
+### Association
+- Device-level failures no longer set the whole unique RMU to association-ineligible.
+- Missing/duplicate CODE blocks only the affected G element.
+- CODE/p_NameString mismatch blocks only the affected G element.
+- Wrong RMU ownership or wrong existing KeyID blocks only the affected G element when the RMU itself is unique.
+- Other valid devices in the same RMU remain eligible for write-back.
+- RMU NAME 0/multiple remains a whole-RMU blocker.
+
+### Reporting
+- Added separate RMU-level and device-level blocker columns.
+- Unique RMUs with partial device errors are reported as WARN while remaining association-eligible.
+
+### Unchanged
+- No feeder validation.
+- BusDis remains Table ID 13506 / Domain 1.
+
+## [3.0.26] - 2026-08-10
+
+### Validation
+- Made database-device RMU ownership an explicit hard rule instead of relying only on `combined_id`-scoped queries.
+- Added one-to-one validation for logical `p_NameString` values inside each G-file RMU.
+- Added one-to-one validation so one database device ID cannot be consumed by multiple G elements.
+- Missing CODE remains a hard FAIL for the corresponding G element and blocks automatic association.
+- Duplicate CODE remains a hard FAIL.
+- For non-unique RMU names with existing manual KeyIDs, CODE uniqueness is now re-queried inside the actual owner RMU before accepting the manual link.
+- Existing manual links across multiple same-name `combined_id` values remain a hard `RMU_LINK` error.
+- Existing manual links to another RMU NAME remain a hard `RMU_LINK` error.
+
+### Unchanged
+- Unrelated extra database devices are ignored.
+- No feeder validation is performed.
+- BusDis remains Table ID `13506`, Domain `1`.
+
+## [3.0.25] - 2026-08-10
+
+### Reporting
+- Removed RMU-summary columns `CODE`, `GRAPH_NAME`, `COMBINED_TYPE`, and `RUN_STATE` from HTML and CSV.
+
+### Validation
+- Added cross-device consistency validation for existing manual KeyIDs when an RMU NAME is not unique.
+- Existing linked devices inside one G-file RMU must all resolve to the same actual `combined_id`.
+- Multiple same-name RMU IDs used by devices inside one G RMU are now a hard `RMU_LINK` error.
+- Existing KeyID resolving to another RMU NAME remains a hard `RMU_LINK` error.
+- RMU NAME uniqueness, device CODE uniqueness, CODE/p_NameString equality, Expected KeyID, and actual RMU ownership remain the core checks.
+
+### Removed
+- No feeder validation or feeder reporting is reintroduced.
+
+## [3.0.24] - 2026-08-10
+
+### Changed
+- Removed all feeder-based validation from the RMU module.
+- G filename feeder hints are no longer parsed or used.
+- RMU `feeder_id` is no longer resolved through `dms_feeder_device`.
+- Device `feeder_id` is no longer queried or compared.
+- Removed `FEEDER` / `FEEDER_MISMATCH` from RMU validation and HTML status legend.
+- Removed feeder-related columns from RMU summary and device-detail reports.
+
+### Validation
+- RMU association now depends only on RMU uniqueness, CODE uniqueness,
+  logical p_NameString/CODE equality, Expected KeyID correctness, and existing
+  model RMU ownership.
+- Existing KeyID pointing to another RMU remains a hard `RMU_LINK` error.
+
+### Unchanged
+- BusDis remains Table ID `13506`, Domain `1`.
+- Original G files remain unchanged; association writes only Workspace copies.
+
 ## [3.0.23] - 2026-08-10
 
 ### Fixed

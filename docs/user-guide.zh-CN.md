@@ -1,3 +1,27 @@
+## v3.0.24 馈线判断策略
+
+RMU 模块不再进行任何馈线相关判断。
+
+不会再使用以下信息参与模型校验或模型关联：
+
+- G 文件名中的馈线号。
+- 环网柜 `feeder_id`。
+- `dms_feeder_device` 表的馈线名称。
+- 设备表中的 `feeder_id`。
+- G 图上 Bus 周围的馈线名称。
+
+当前 RMU 自动关联的核心条件为：
+
+1. 环网柜名称在 `dms_combined_device` 中唯一。
+2. G 图元逻辑 `p_NameString` 有效。
+3. 对应数据库设备 CODE 唯一存在。
+4. 数据库 CODE 与逻辑 `p_NameString` 一致。
+5. Expected KeyID 校验正确。
+6. 如果 G 图元已经存在 KeyID，当前模型必须属于当前环网柜。
+7. 如果已有 KeyID 关联到了其它环网柜，则属于 `RMU_LINK` 硬错误。
+
+馈线不会产生 PASS / WARN / FAIL，也不会阻断模型关联。
+
 # 配网模型管理工具 v2.8.5 用户帮助
 
 ## Workspace

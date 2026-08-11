@@ -1,4 +1,301 @@
-# 配网模型管理工具 v3.0.23
+# 配网模型管理工具 v3.0.27
+
+## 关联粒度调整：设备错误不再拖累同一 RMU 的其它设备
+
+RMU 唯一时，模型关联按设备逐条执行。
+
+例如：
+
+```text
+RMU 17613 唯一
+
+Y1  -> CODE唯一，CODE=p_NameString，属于17613 -> 可关联
+Y2  -> CODE=0条                           -> 只阻断Y2
+Q1  -> CODE唯一，CODE=p_NameString，属于17613 -> 可关联
+BUS -> CODE唯一，CODE=p_NameString，属于17613 -> 可关联
+```
+
+最终关联预览只生成：
+
+```text
+Y1
+Q1
+BUS
+```
+
+不会因为 Y2 缺失而把整个 17613 跳过。
+
+### RMU级阻断
+
+只有以下情况阻断整个环网柜：
+
+```text
+RMU NAME 查询 0 条
+RMU NAME 查询多条
+RMU 名称无法可靠识别
+```
+
+### 设备级阻断
+
+以下问题只阻断当前设备：
+
+```text
+CODE 0 条
+CODE 多条
+CODE != p_NameString
+p_NameString 为空
+设备不属于当前 RMU
+Expected KeyID 错误
+已有 KeyID 错误
+已有 KeyID 属于其它 RMU
+同一 p_NameString 被多个 G 图元使用
+同一个数据库设备被多个 G 图元占用
+```
+
+报告中分别显示：
+
+```text
+RMU级关联阻断原因
+设备级阻断原因
+```
+
+唯一 RMU 存在部分设备错误时：
+
+```text
+RMU状态 = WARN
+RMU可关联 = YES
+```
+
+表示可以进行“部分设备关联”。
+
+馈线判断仍然完全关闭。
+
+
+## 不可违背的设备硬规则
+
+每个 G 文件环网柜内的设备明细必须满足：
+
+```text
+逻辑 p_NameString
+        ↓
+数据库 CODE
+        ↓
+唯一匹配
+        ↓
+该数据库设备必须属于当前环网柜
+```
+
+具体规则：
+
+1. `p_NameString` 不能为空。
+2. 数据库 CODE 必须与逻辑 `p_NameString` 完全对应。
+3. 同一个 CODE 在目标环网柜内必须唯一；0 条表示设备缺失，>1 条表示 CODE 重复。
+4. 数据库设备的 `combined_id` 必须等于当前唯一 RMU 的 ID。
+5. 同一个逻辑 `p_NameString` 不能被同一 RMU 内多个 G 图元重复使用。
+6. 同一个数据库设备 ID 不能被同一 RMU 内多个 G 图元重复占用。
+7. 数据库可以存在与当前 G 文件无关的额外设备；这些额外设备不参与校验。
+8. 如果 G 文件需要的某个设备数据库中缺失，则该 G 设备直接 FAIL，并阻断该 RMU 自动关联。
+
+## RMU NAME 不唯一时
+
+RMU 汇总始终 FAIL。
+
+如果 G 设备没有人工 KeyID：
+
+```text
+FAIL
+禁止自动关联
+```
+
+如果已经有人为 KeyID：
+
+```text
+反解 KeyID
+→ 找到实际数据库设备
+→ 检查 CODE == 逻辑 p_NameString
+→ 在实际 combined_id 内重新确认 CODE 唯一
+→ 检查实际 RMU NAME
+→ 检查本 G RMU 所有已关联设备是否来自同一个 combined_id
+```
+
+只要出现以下任一情况就报错：
+
+```text
+设备来自其他 RMU NAME
+同名 RMU 但设备跨多个 combined_id
+CODE 与 p_NameString 不一致
+CODE 在实际 RMU 内不存在
+CODE 在实际 RMU 内有多条
+同一个数据库设备被多个 G 图元占用
+```
+
+## 馈线
+
+馈线相关判断仍然完全关闭，不参与任何 PASS/WARN/FAIL 或自动关联条件。
+
+
+## RMU 汇总字段精简
+
+环网柜汇总报告中删除以下四个数据库字段：
+
+```text
+CODE
+GRAPH_NAME
+COMBINED_TYPE
+RUN_STATE
+```
+
+这些字段不参与当前 RMU 模型校验和模型关联判断，因此不再出现在 HTML / CSV 的环网柜汇总中。
+
+## 当前核心判断
+
+RMU 模块只关注：
+
+```text
+1. G 图识别的环网柜名称
+2. dms_combined_device 中该 NAME 是否唯一
+3. G 设备逻辑 p_NameString
+4. 对应数据库设备 CODE 是否唯一
+5. CODE 是否与逻辑 p_NameString 对应
+6. Expected KeyID
+7. 已有关联 KeyID 实际属于哪个环网柜
+```
+
+不进行任何馈线判断。
+
+## RMU 名称不唯一 + 已有人为 KeyID
+
+如果数据库中同一个 RMU NAME 有多条记录：
+
+- RMU 汇总仍然是 FAIL，因为 RMU NAME 本身不唯一。
+- 未关联设备仍禁止自动关联。
+- 已有关联 KeyID 的设备继续反解检查。
+- 所有已关联设备必须实际来自同一个 `combined_id`。
+- 即使这些数据库 RMU 的 NAME 相同，只要已关联设备分别来自多个不同 `combined_id`，就判定为模型关联错误。
+- 如果当前 KeyID 实际属于其它 RMU NAME，同样判定为模型关联错误。
+
+因此：
+
+```text
+同名 RMU A(ID=100)
+同名 RMU B(ID=200)
+
+Y1 -> ID=100
+Y2 -> ID=200
+```
+
+即使两个 RMU 都叫相同名字，也会直接报错，因为同一个 G 图环网柜的设备不允许跨多个实际数据库环网柜。
+
+
+## RMU 模块取消全部馈线判断
+
+从 v3.0.24 开始，RMU 模块不再根据馈线进行任何校验或关联决策。
+
+以下逻辑全部停用：
+
+```text
+G 文件名提取馈线
+Bus 周围识别馈线名称
+RMU feeder_id 比较
+dms_feeder_device 查询
+设备 feeder_id 比较
+FEEDER_MISMATCH 状态
+橙色 FEEDER 报警
+```
+
+RMU 校验与自动关联只关注：
+
+```text
+环网柜名称是否唯一
+        ↓
+G 图元逻辑 p_NameString
+        ↓
+数据库 CODE 是否唯一存在
+        ↓
+CODE == p_NameString
+        ↓
+Expected KeyID 是否正确
+        ↓
+已有 KeyID 是否属于当前环网柜
+```
+
+### 唯一 RMU + 未关联设备
+
+```text
+RMU 唯一
+CODE 唯一
+CODE == p_NameString
+Expected KeyID 正确
+→ 黄色 WARN
+→ 可以自动关联
+```
+
+### 已有模型
+
+已有 KeyID 时仍然反解：
+
+```text
+KeyID
+→ 当前数据库设备
+→ current combined_id
+→ dms_combined_device
+→ 当前模型实际所属 RMU
+```
+
+如果属于当前 RMU：
+
+```text
+PASS
+模型已关联且正确
+```
+
+如果属于其它 RMU：
+
+```text
+RMU_LINK
+硬错误
+禁止自动覆盖
+```
+
+### RMU 0 条或多条
+
+RMU 汇总仍然：
+
+```text
+红色 FAIL
+```
+
+如果设备未关联：
+
+```text
+禁止自动关联
+```
+
+如果设备已经人工关联：
+
+```text
+继续检查 CODE/p_NameString
+继续反查实际所属 RMU
+```
+
+馈线不参与上述任何结果。
+
+## BusDis
+
+BusDis 当前配置保持：
+
+```text
+Table ID = 13506
+Table = dms_bs_device
+Domain = 1
+```
+
+Expected KeyID：
+
+```text
+DeviceID + (1 << 32)
+```
+
 
 ## BusDis 默认域号修正
 
