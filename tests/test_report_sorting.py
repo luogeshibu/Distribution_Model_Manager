@@ -46,9 +46,14 @@ def test_rmu_summary_orders_only_by_frame_sequence():
     rows = flatten_rmu_rows([report])
 
     assert [row["frame_index"] for row in rows] == [
-        1, 1, 1, 3, 5, 6, 9
+        1, 3, 5, 6, 9
     ]
-    assert [row["db_record_index"] for row in rows[:3]] == [1, 2, 3]
+
+    # Duplicate database RMUs are represented by one G-frame summary row.
+    first = rows[0]
+    assert first["rmu_db_count"] == 3
+    assert first["rmu_id"] == ""
+    assert first["rmu_status"] == "FAIL"
 
 
 def test_device_details_only_group_types_inside_each_rmu():

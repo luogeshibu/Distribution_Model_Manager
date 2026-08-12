@@ -70,9 +70,17 @@ class RmuModelModule(ModelModule):
 
     @staticmethod
     def _attributes_for_row(row):
+        bv_id = str(row.get("db_bv_id", "") or "").strip()
+        if not bv_id:
+            raise ValueError(
+                f"{row.get('object_type')}:{row.get('xml_id')}: "
+                "数据库 BV_ID 为空，禁止生成模型回写。"
+            )
+
         attrs = {
             "app": "6500000",
-            "voltype": "0",
+            # voltype 必须使用当前实际匹配数据库设备的 BV_ID。
+            "voltype": bv_id,
             "p_ReportType": "1",
             "keyid": str(row["expected_keyid"]),
         }
@@ -131,7 +139,8 @@ class RmuModelModule(ModelModule):
 
                     preview_row = dict(row)
                     preview_row["reason"] = (
-                        f"PREVIEW_WRITE app=6500000 voltype=0 p_ReportType=1 "
+                        f"PREVIEW_WRITE app=6500000 "
+                        f"voltype={attrs['voltype']} p_ReportType=1 "
                         f"state={attrs['state']} keyid={attrs['keyid']}"
                     )
                     rows.append(preview_row)

@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton, QComboBox, QPlainTextEdit, QFrame, QStackedWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QListWidget, QListWidgetItem, QGroupBox, QTabWidget, QScrollArea, QSizePolicy,
-    QProgressBar, QSplitter
+    QProgressBar, QSplitter, QDialog, QTextBrowser, QDialogButtonBox
 )
 
 from dmm.application.job_worker import JobWorker
@@ -680,7 +680,12 @@ class MainWindow(QMainWindow):
         for module_id, module in self.modules.items():
             self.module_combo.addItem(module.display_name, module_id)
         self.module_combo.currentIndexChanged.connect(self.on_module_changed)
-        grid.addWidget(self.module_combo, 0, 1, 1, 3)
+        grid.addWidget(self.module_combo, 0, 1, 1, 2)
+
+        self.module_help_btn = QPushButton("当前模型帮助")
+        self.module_help_btn.setMinimumWidth(112)
+        self.module_help_btn.clicked.connect(self.show_current_module_help)
+        grid.addWidget(self.module_help_btn, 0, 3)
 
         grid.addWidget(QLabel("G 文件 / 目录"), 1, 0)
         self.input_edit = QLineEdit(self.cfg.get("input_path", ""))
@@ -732,7 +737,17 @@ class MainWindow(QMainWindow):
         self.module_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
 
         for module_id, module in self.modules.items():
-            widget = create_settings_widget(module_id, self.module_stack, self.cfg)
+            widget = create_settings_widget(
+                module_id,
+                self.module_stack,
+                self.cfg,
+            )
+            widget.setSizePolicy(
+                QSizePolicy.Expanding,
+                QSizePolicy.Preferred,
+            )
+            widget.setMinimumWidth(0)
+            widget.setMaximumWidth(16777215)
             self.module_widgets[module_id] = widget
             self.module_stack.addWidget(widget)
 
@@ -863,7 +878,10 @@ class MainWindow(QMainWindow):
         return page
 
     def _update_module_stack_height(self, *_args):
-        """确保当前模型配置页完整显示，由最外层页面滚动条负责滚动。"""
+        """
+        当前模块始终横向铺满工作区，纵向使用自然高度。
+        模块自身不产生滚动条，只由工作区最外层 QScrollArea 滚动。
+        """
         if not hasattr(self, "module_stack"):
             return
 
@@ -871,20 +889,199 @@ class MainWindow(QMainWindow):
         if widget is None:
             return
 
+        # 清除上一模块残留的固定高度。
+        self.module_stack.setMinimumHeight(0)
+        self.module_stack.setMaximumHeight(16777215)
+
+        widget.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred,
+        )
+        widget.setMinimumWidth(0)
+        widget.setMaximumWidth(16777215)
+
+        # 先按当前 stack 的真实宽度布局，WordWrap 标签才能得到正确高度。
+        available_width = self.module_stack.width()
+        if hasattr(self, "workspace_content"):
+            available_width = max(
+                available_width,
+                self.workspace_content.width() - 56,
+            )
+        available_width = max(available_width, 800)
+
+        widget.resize(
+            available_width,
+            max(widget.height(), 1),
+        )
+
+        if widget.layout() is not None:
+            widget.layout().invalidate()
+            widget.layout().activate()
+
         widget.adjustSize()
+
         hint = widget.sizeHint()
         minimum = widget.minimumSizeHint()
-
         height = max(
             hint.height(),
             minimum.height(),
-            330,
+            280,
         )
 
-        # 多留少量余量，避免 GroupBox 标题/边框在不同 DPI 下被裁切。
-        self.module_stack.setMinimumHeight(height + 18)
-        self.module_stack.setMaximumHeight(height + 18)
+        # DPI / GroupBox 标题留出少量余量。
+        final_height = height + 18
+        self.module_stack.setMinimumHeight(final_height)
+        self.module_stack.setMaximumHeight(final_height)
+
         self.module_stack.updateGeometry()
+        widget.updateGeometry()
+        if hasattr(self, "workspace_content"):
+            self.workspace_content.updateGeometry()
+
+    def _current_module_help_html(self):
+        module_id = str(self.module_combo.currentData() or "RMU").upper()
+
+        if module_id == "FEEDER":
+            return """
+            <h2>馈线模型帮助</h2>
+
+            <h3>1. 馈线识别规则</h3>
+            <p>当前版本按单馈线 G 图处理。</p>
+            <ol>
+              <li>优先扫描 G 文件中的 <b>&lt;Bus&gt;</b> 元素。</li>
+              <li>在 Bus 周围寻找距离最近的有效工程文字，例如 <b>AJWD-07</b>。</li>
+              <li>如果 Bus 周围无法可靠识别馈线名称，再从 G 文件名中提取类似 AJWD-07 / ABN-02 的馈线标识。</li>
+              <li>名称比较时统一忽略横线、下划线和空格并转为大写。例如 AJWD-07 → AJWD07。</li>
+              <li>数据库可读馈线名称由程序内部自动组合并匹配；馈线主表不作为用户配置项。</li>
+            </ol>
+
+            <h3>2. FeedLine 关联规则</h3>
+            <ul>
+              <li>G 馈线段图元类型：<b>&lt;FeedLine&gt;</b>。</li>
+              <li>馈线段数据库表默认：<b>13503 / dms_section_device</b>，Domain 默认：<b>1</b>。</li>
+              <li>已有关联时：反解当前 KeyID，检查表号、域号以及实际数据库馈线段是否属于当前识别馈线；正确则保留，不重复写回。</li>
+              <li>未关联时：先排除已经被现有正确模型占用的数据库馈线段。</li>
+              <li>剩余数据库馈线段按照 SEC001、SEC002、SEC003… 自然顺序排列。</li>
+              <li>G 中未关联 FeedLine 按照<b>从上到下、从左到右</b>排序，并依次匹配剩余数据库馈线段。</li>
+              <li>已经关联错误的 KeyID 不自动覆盖，只在报告中报错。</li>
+            </ul>
+
+            <h3>3. FeedLine 安全回写</h3>
+            <pre>
+    app="6500000"
+    p_ReportType="1"
+    state="20"
+    voltype="dms_section_device.BV_ID"
+    keyid="Expected KeyID"
+            </pre>
+            <p>原始 G 文件永不修改，只修改 Workspace 中的安全副本。</p>
+
+            <h3>4. 报告</h3>
+            <p>馈线模块独立生成【馈线汇总】和【馈线段明细】HTML / CSV。</p>
+            """
+
+        return """
+        <h2>RMU 环网柜模型帮助</h2>
+
+        <h3>1. 环网柜识别</h3>
+        <ul>
+          <li>通过矩形框和 RMU 内三类目标设备图元识别环网柜。</li>
+          <li>环网柜名称按照当前页面勾选的方向读取：上方 / 下方 / 左侧 / 右侧。</li>
+          <li>同一方向只有一个候选名称时直接取最近名称，不判断颜色；只有多个候选名称时才优先使用绿色文字消歧。</li>
+          <li>名称始终按照字符串处理，支持数字、字母、横线、下划线等常见工程名称。</li>
+        </ul>
+
+        <h3>2. 设备名称规则</h3>
+        <p><b>使用 p_NameString：</b></p>
+        <ul>
+          <li>CBreakerDis：使用自身 p_NameString。</li>
+          <li>ZhaiWaiJieDiDaoZha：与 CBreakerDis 空间配对，目标 CODE=开关名+D，并要求 p_NameString 与 CODE 一致。</li>
+          <li>BusDis：使用自身 p_NameString。</li>
+        </ul>
+
+        <p><b>使用环网柜内图上文字：</b></p>
+        <ul>
+          <li>CBreakerDis：使用识别到的图上名称作为逻辑 p_NameString。</li>
+          <li>ZhaiWaiJieDiDaoZha：逻辑 p_NameString=配对开关名称+D。</li>
+          <li>BusDis：逻辑 p_NameString 固定为 BUS。</li>
+        </ul>
+
+        <h3>3. 强制校验</h3>
+        <ul>
+          <li>环网柜数据库记录必须唯一；0 条或多条时环网柜汇总直接 FAIL。</li>
+          <li>设备 CODE 必须与当前用于校验的 p_NameString 一致；NAME 不参与判断。</li>
+          <li>已有 KeyID 时继续检查实际设备、表号、域号、所属环网柜和 Expected KeyID。</li>
+          <li>已关联到其他环网柜的设备属于硬错误，禁止自动覆盖。</li>
+          <li>RMU 模块不进行任何馈线判断。</li>
+        </ul>
+
+        <h3>4. RMU 安全回写</h3>
+        <p>CBreakerDis / ZhaiWaiJieDiDaoZha：</p>
+        <pre>
+    app="6500000"
+    voltype="数据库设备BV_ID"
+    p_ReportType="1"
+    state="41"
+    keyid="Expected KeyID"
+        </pre>
+
+        <p>BusDis：</p>
+        <pre>
+    app="6500000"
+    voltype="数据库设备BV_ID"
+    p_ReportType="1"
+    state="15"
+    keyid="Expected KeyID"
+        </pre>
+
+        <p>原始 G 文件永不修改，只修改 Workspace 中的安全副本。</p>
+        """
+
+    def show_current_module_help(self):
+        """在模型工作区内提供当前模型专属帮助。"""
+        module_name = self.module_combo.currentText() or "模型"
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{module_name} - 模型帮助")
+        dialog.resize(820, 680)
+        dialog.setMinimumSize(680, 520)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(False)
+        browser.setHtml(
+            """
+            <style>
+              body {
+                font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI';
+                color: #17372E;
+                font-size: 14px;
+                line-height: 1.6;
+              }
+              h2 { color: #006B52; margin-top: 4px; }
+              h3 { color: #007A5E; margin-top: 18px; }
+              pre {
+                background: #F3F7F5;
+                border: 1px solid #D3E3DC;
+                border-radius: 6px;
+                padding: 10px;
+              }
+              li { margin-bottom: 5px; }
+            </style>
+            """
+            + self._current_module_help_html()
+        )
+        layout.addWidget(browser, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.clicked.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.exec()
 
     # ------------------------------------------------------------
     # Settings
@@ -933,7 +1130,7 @@ class MainWindow(QMainWindow):
         root.addWidget(
             self._page_header(
                 "帮助",
-                "团队内部使用说明：RMU 模型校验、名称来源、报告和模型关联回写。",
+                "团队内部使用说明：RMU 与馈线模型校验、关联预览、报告和安全回写。",
             )
         )
 
@@ -950,8 +1147,8 @@ class MainWindow(QMainWindow):
         quick_layout = QVBoxLayout(quick)
         quick_text = QLabel(
             "1. 在【数据库】页面确认 Oracle 配置，可先点击‘测试数据库连接’。\n"
-            "2. 进入【模型工作区】，选择 RMU 环网柜模型和 G 文件/目录。\n"
-            "3. 配置环网柜名称方向、开关名称来源以及表号/域号。\n"
+            "2. 进入【模型工作区】，选择 RMU 环网柜模型或馈线模型，并选择 G 文件/目录。\n"
+            "3. RMU 模块配置名称来源与设备表/域；馈线模块配置 13503 馈线段表及域号。\n"
             "4. 点击底部【模型校验】执行独立校验，并生成校验 HTML / CSV。\n"
             "5. 需要关联时先点击【模型关联预览】，确认预览结果后【执行模型关联】才会启用。\n"
             "6. 执行模型关联只修改 Workspace 中的安全副本，原始 G 文件不变。\n"
@@ -1003,7 +1200,7 @@ class MainWindow(QMainWindow):
             "• 环网柜数据库记录为 0 条或多条时，环网柜汇总直接 FAIL。若 G 设备未关联，禁止自动关联。\n"
             "• 环网柜数据库记录为 0 条或多条，但 G 设备已经有人为 KeyID 时，不丢弃该模型：继续反解当前设备并校验 CODE/p_NameString 和实际所属环网柜。\n"
             "• 已有关联模型如果实际属于其它环网柜，使用紫色 RMU_LINK 标记，属于硬错误，禁止自动覆盖。\n"
-            "• 馈线判断已完全关闭：不读取文件名馈线、不比较 RMU feeder_id、不查询设备馈线，也不影响校验、预览或关联。\n"
+            "• RMU 模块中的馈线判断已完全关闭；馈线模型关联由独立的【馈线模型】模块处理。\n"
             "• 唯一 RMU 下已有 KeyID 时，仍继续校验当前设备 ID、表号、域号、combined_id 和 Expected KeyID。"
         )
         policy_text.setWordWrap(True)
@@ -1031,7 +1228,7 @@ class MainWindow(QMainWindow):
             "黄色 WARN：设备尚未关联，但满足自动关联条件。\n"
             "紫色 RMU_LINK：当前 KeyID 反解后的设备属于其他环网柜；这是硬错误，禁止自动覆盖。\n"
             "红色 FAIL：硬错误，例如 RMU 0条/多条且设备未关联、CODE 与 p_NameString 对不上、CODE不存在/重复、KeyID无法反解。\n"
-            "馈线相关状态已取消；报告不再输出 FEEDER 状态。"
+            "RMU 报告不输出馈线状态；馈线模块使用独立报告。"
         )
         colors_text.setWordWrap(True)
         colors_layout.addWidget(colors_text)
@@ -1043,9 +1240,9 @@ class MainWindow(QMainWindow):
             "建议先执行【模型关联预览】，确认所有 Expected KeyID 和可关联设备。\n"
             "真正执行模型关联时，程序会重新检查数据库及预览有效性，然后复制所有选中 G 文件到 Workspace/g_output，只修改副本。原始 G 文件绝不修改。\n\n"
             "CBreakerDis / ZhaiWaiJieDiDaoZha 回写：\n"
-            "app=6500000, voltype=0, p_ReportType=1, state=41, keyid=Expected KeyID\n\n"
+            "app=6500000, voltype=数据库设备BV_ID, p_ReportType=1, state=41, keyid=Expected KeyID\n\n"
             "BusDis 回写：\n"
-            "app=6500000, voltype=0, p_ReportType=1, state=15, keyid=Expected KeyID\n\n"
+            "app=6500000, voltype=数据库设备BV_ID, p_ReportType=1, state=15, keyid=Expected KeyID\n\n"
             "模型关联不会自动修改 p_NameString。馈线信息完全不参与判断；目标数据库设备必须通过 CODE/p_NameString 校验，并且自动关联目标必须属于当前唯一环网柜。已有人工 KeyID 仍会反查实际所属环网柜。"
         )
         assoc_text.setWordWrap(True)
@@ -1056,7 +1253,7 @@ class MainWindow(QMainWindow):
         reports_layout = QVBoxLayout(reports)
         reports_text = QLabel(
             "•【环网柜汇总】严格按 G 文件环网柜序号排列，每个 G 环网柜只显示一行；数据库 0 条或多条直接 FAIL，不展开多个 ID。\n"
-            "•【设备明细】只显示 G 文件实际存在的设备图元，并展示逻辑 p_NameString、数据库 CODE、当前 KeyID、实际所属环网柜和馈线告警。\n"
+            "•【设备明细】只显示 G 文件实际存在的 RMU 设备图元，并展示逻辑 p_NameString、数据库 CODE、当前 KeyID 和实际所属环网柜。\n"
             "• RMU 数据库记录异常时，已有人为 KeyID 的设备仍继续校验；未关联设备则直接阻断自动关联。\n"
             "• 当选择图上文字模式时，报告中的 p_NameString 表示用于校验的逻辑 p_NameString，不是 XML 原属性。\n"
             "• 每次模型校验、关联预览和关联完成都会自动生成对应 HTML / CSV；Workspace 历史按软件保留策略自动清理。"
@@ -1064,6 +1261,24 @@ class MainWindow(QMainWindow):
         reports_text.setWordWrap(True)
         reports_layout.addWidget(reports_text)
         layout.addWidget(reports)
+
+
+        feeder_help = QGroupBox("馈线模型规则")
+        feeder_help_layout = QVBoxLayout(feeder_help)
+        feeder_help_text = QLabel(
+            "• 当前版本仅处理单馈线 G 图，不处理一个文件内多馈线总图。\n"
+            "• 馈线名称优先从 <Bus> 周围最近的有效 Text 获取，例如 AJWD-07；若找不到，再从文件名提取。\n"
+            "• 数据库可读馈线名称由站名 + dms_feeder_device.NAME 组合；名称匹配忽略横线、下划线和空格：AJWD-07 → AJWD07；JED CTL AJWD + 07 → JEDCTLAJWD07。\n"
+            "• 馈线主表：13500 / dms_feeder_device；馈线段表：13503 / dms_section_device；默认域号：1。\n"
+            "• G 馈线段图元为 <FeedLine>。已有关联时，当前 KeyID 必须反解到 13503 / Domain 1 且数据库记录属于当前馈线。\n"
+            "• 未关联 FeedLine：已正确关联的数据库馈线段先视为占用；其余数据库馈线段按 SEC001、SEC002… 自然顺序排列，未关联 G FeedLine 按从上到下、从左到右依次分配。\n"
+            "• 已经关联错误的 FeedLine 不自动覆盖，只在报告中标红，避免静默改错已有模型。\n"
+            "• FeedLine 回写安全副本：app=6500000, p_ReportType=1, state=20, voltype=dms_section_device.BV_ID, keyid=Expected KeyID。\n"
+            "• 馈线模块拥有独立的【馈线汇总】和【馈线段明细】HTML / CSV 报告，不改变 RMU 模块已经取消馈线判断的规则。"
+        )
+        feeder_help_text.setWordWrap(True)
+        feeder_help_layout.addWidget(feeder_help_text)
+        layout.addWidget(feeder_help)
 
         safety = QGroupBox("注意事项")
         safety_layout = QVBoxLayout(safety)
@@ -1098,10 +1313,34 @@ class MainWindow(QMainWindow):
     # Model operation state
     # ------------------------------------------------------------
     def on_module_changed(self, index):
+        """切换模块时解除旧页面几何限制，并重新布局当前模块。"""
+        if not hasattr(self, "module_stack"):
+            return
+
+        # 先解除上一模块写入的固定高度，避免新模块继承旧页面尺寸。
+        self.module_stack.setMinimumHeight(0)
+        self.module_stack.setMaximumHeight(16777215)
+
         self.module_stack.setCurrentIndex(index)
+
+        widget = self.module_stack.currentWidget()
+        if widget is not None:
+            widget.setSizePolicy(
+                QSizePolicy.Expanding,
+                QSizePolicy.Preferred,
+            )
+            widget.setMinimumWidth(0)
+            widget.setMaximumWidth(16777215)
+            if widget.layout() is not None:
+                widget.layout().invalidate()
+                widget.layout().activate()
+            widget.updateGeometry()
+
         self.current_preview = None
         self.apply_btn.setEnabled(False)
         self.refresh_operation_state()
+
+        # 等 Qt 完成本次 stacked page 切换后，再计算新页面高度。
         QTimer.singleShot(0, self._update_module_stack_height)
 
     def refresh_operation_state(self):
@@ -1142,30 +1381,57 @@ class MainWindow(QMainWindow):
 
     def _update_artifact_buttons(self, task_type=""):
         """Only show result buttons for artifacts that really exist."""
-        labels = {
-            "validation": (
-                "打开校验 HTML",
-                "打开校验环网柜 CSV",
-                "打开校验设备 CSV",
-            ),
-            "preview": (
-                "打开预览 HTML",
-                "打开预览环网柜 CSV",
-                "打开预览设备 CSV",
-            ),
-            "association": (
-                "打开关联结果 HTML",
-                "打开关联结果环网柜 CSV",
-                "打开关联结果设备 CSV",
-            ),
-        }
-        html_text, rmu_text, device_text = labels.get(
+        report_kind = str(
+            self.current_artifacts.get(
+                "report_kind",
+                self.module_combo.currentData() or "RMU",
+            )
+        ).upper()
+
+        if report_kind == "FEEDER":
+            labels = {
+                "validation": (
+                    "打开校验 HTML",
+                    "打开馈线汇总 CSV",
+                    "打开馈线段明细 CSV",
+                ),
+                "preview": (
+                    "打开预览 HTML",
+                    "打开馈线汇总 CSV",
+                    "打开馈线段明细 CSV",
+                ),
+                "association": (
+                    "打开关联结果 HTML",
+                    "打开馈线汇总 CSV",
+                    "打开馈线段明细 CSV",
+                ),
+            }
+        else:
+            labels = {
+                "validation": (
+                    "打开校验 HTML",
+                    "打开校验环网柜 CSV",
+                    "打开校验设备 CSV",
+                ),
+                "preview": (
+                    "打开预览 HTML",
+                    "打开预览环网柜 CSV",
+                    "打开预览设备 CSV",
+                ),
+                "association": (
+                    "打开关联结果 HTML",
+                    "打开关联结果环网柜 CSV",
+                    "打开关联结果设备 CSV",
+                ),
+            }
+
+        html_text, first_csv_text, second_csv_text = labels.get(
             task_type,
-            ("打开 HTML", "打开环网柜 CSV", "打开设备 CSV"),
+            ("打开 HTML", "打开汇总 CSV", "打开明细 CSV"),
         )
         self.open_html_btn.setText(html_text)
-        self.open_rmu_csv_btn.setText(rmu_text)
-        self.open_device_csv_btn.setText(device_text)
+        self.open_rmu_csv_btn.setText(first_csv_text)
+        self.open_device_csv_btn.setText(second_csv_text)
 
         for key, button in (
             ("html", self.open_html_btn),
@@ -1438,7 +1704,14 @@ class MainWindow(QMainWindow):
                 else:
                     self.cfg["last_folder_path"] = str(input_path)
 
-            for key in ("rmu_name_positions", "device_rules", "breaker_name_source"):
+            for key in (
+                "rmu_name_positions",
+                "device_rules",
+                "breaker_name_source",
+                "feeder_table_id",
+                "section_table_id",
+                "section_domain",
+            ):
                 if key in settings:
                     self.cfg[key] = settings[key]
 
@@ -1549,8 +1822,12 @@ class MainWindow(QMainWindow):
 
         self.log(f"任务完成。本次运行目录：{report_dir}")
         self.log(f"HTML：{self.current_artifacts.get('html', '')}")
-        self.log(f"环网柜 CSV：{self.current_artifacts.get('rmu_csv', '')}")
-        self.log(f"设备 CSV：{self.current_artifacts.get('device_csv', '')}")
+        if str(self.current_artifacts.get("report_kind", "")).upper() == "FEEDER":
+            self.log(f"馈线汇总 CSV：{self.current_artifacts.get('rmu_csv', '')}")
+            self.log(f"馈线段明细 CSV：{self.current_artifacts.get('device_csv', '')}")
+        else:
+            self.log(f"环网柜 CSV：{self.current_artifacts.get('rmu_csv', '')}")
+            self.log(f"设备 CSV：{self.current_artifacts.get('device_csv', '')}")
 
         # 保存完整的本次 Console 日志到当前任务的实际报告目录。
         try:
@@ -1607,9 +1884,12 @@ class MainWindow(QMainWindow):
             len(v) for v in self.current_preview["changes_by_file"].values()
         )
         skipped_count = len(self.current_preview.get("skipped_rmus", []))
+        module_id = str(self.module_combo.currentData() or "")
+        skip_label = "馈线文件" if module_id == "FEEDER" else "RMU"
+        target_label = "FeedLine 图元" if module_id == "FEEDER" else "设备图元"
         message = (
-            f"本次将关联 {change_count} 个设备图元。\n"
-            f"因校验不通过而跳过的 RMU：{skipped_count} 个。\n\n"
+            f"本次将关联 {change_count} 个{target_label}。\n"
+            f"因校验不通过而跳过的{skip_label}：{skipped_count} 个。\n\n"
             "原始 G 文件不会被修改。程序会复制全部选中 G 文件到 "
             "Workspace/g_output，再只修改安全副本。\n"
             "关联完成后，程序会立即重新校验这些安全副本，并生成与模型校验"
@@ -1711,6 +1991,7 @@ class MainWindow(QMainWindow):
 
             self.current_artifacts = {
                 "task_type": "association",
+                "report_kind": module.module_id,
                 "operation": "APPLY_ASSOCIATION",
                 "run_dir": str(self.current_run_dir),
                 "report_dir": str(report_dir),
@@ -1757,20 +2038,34 @@ class MainWindow(QMainWindow):
             self.apply_btn.setEnabled(False)
             self._update_artifact_buttons("association")
 
+            is_feeder = module.module_id == "FEEDER"
+            object_label = "FeedLine 图元" if is_feeder else "设备图元"
             self.log(
-                f"模型关联完成：修改设备图元={total}；"
+                f"模型关联完成：修改{object_label}={total}；"
                 f"原始 G 文件未修改；输出目录={output_dir}"
             )
             self.log(f"关联完成 HTML：{html_path}")
             if len(csv_paths) > 0:
-                self.log(f"关联完成环网柜 CSV：{csv_paths[0]}")
+                self.log(
+                    (
+                        f"关联完成馈线汇总 CSV：{csv_paths[0]}"
+                        if is_feeder
+                        else f"关联完成环网柜 CSV：{csv_paths[0]}"
+                    )
+                )
             if len(csv_paths) > 1:
-                self.log(f"关联完成设备 CSV：{csv_paths[1]}")
+                self.log(
+                    (
+                        f"关联完成馈线段明细 CSV：{csv_paths[1]}"
+                        if is_feeder
+                        else f"关联完成设备 CSV：{csv_paths[1]}"
+                    )
+                )
 
             QMessageBox.information(
                 self,
                 "模型关联完成",
-                f"模型关联处理完成，共修改 {total} 个设备图元。\n\n"
+                f"模型关联处理完成，共修改 {total} 个{object_label}。\n\n"
                 f"原始 G 文件未修改。\n"
                 f"处理后的 G 文件：\n{output_dir}\n\n"
                 f"最终校验报告：\n{html_path}",

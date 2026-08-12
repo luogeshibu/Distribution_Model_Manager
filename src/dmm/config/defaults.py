@@ -45,4 +45,7 @@ DEFAULT_SETTINGS = {
     "rmu_name_positions": DEFAULT_NAME_POSITIONS,
     "device_rules": {},
     "breaker_name_source": "P_NAME_STRING",
+    "feeder_table_id": 13500,
+    "section_table_id": 13503,
+    "section_domain": 1,
 }

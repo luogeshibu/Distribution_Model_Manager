@@ -1,4 +1,346 @@
-# 配网模型管理工具 v3.0.27
+# 配网模型管理工具 v3.1.3
+
+## 模型工作区帮助与馈线配置界面调整
+
+### 馈线配置页
+
+馈线模块主页面现在只保留真正需要用户修改的参数：
+
+```text
+馈线段 dms_section_device
+Table ID = 13503
+Domain   = 1
+```
+
+`dms_feeder_device / 13500` 仍然是程序内部用于识别馈线的固定业务表，但不再作为用户配置项显示。
+
+馈线表号和域号数字输入框与 RMU 使用完全相同的深绿色上下调节按钮。
+
+### 当前模型帮助
+
+模型工作区的【模型任务】区域新增：
+
+```text
+当前模型帮助
+```
+
+选择：
+
+```text
+RMU 环网柜模型
+```
+
+点击后显示 RMU 专属帮助，包括环网柜名称识别、设备名称规则、CODE/p_NameString 校验、已有模型反查、BV_ID/KeyID 回写规则。
+
+选择：
+
+```text
+馈线模型
+```
+
+点击后显示馈线专属帮助，包括 Bus 附近名称识别、文件名回退、FeedLine 排序、已有模型检查、13503/Domain 1、BV_ID/KeyID 安全回写规则。
+
+馈线主页面不再占用空间展示“馈线识别规则”和“FeedLine 关联规则”；这些说明统一放入当前模型帮助弹窗。
+
+业务处理逻辑保持 v3.1.2 不变。
+
+
+## 模型回写统一写入 BV_ID → voltype
+
+从 v3.1.2 开始，所有自动模型关联回写都必须把数据库实际设备记录的 `BV_ID` 写入 G 图元的 `voltype`。
+
+### RMU 设备
+
+```text
+CBreakerDis
+ZhaiWaiJieDiDaoZha
+BusDis
+```
+
+数据库匹配到目标设备后：
+
+```text
+voltype = 目标数据库设备.BV_ID
+```
+
+回写示例：
+
+```xml
+<CBreakerDis
+    app="6500000"
+    voltype="112871465660973067"
+    p_ReportType="1"
+    state="41"
+    keyid="Expected KeyID"
+/>
+```
+
+```xml
+<ZhaiWaiJieDiDaoZha
+    app="6500000"
+    voltype="112871465660973067"
+    p_ReportType="1"
+    state="41"
+    keyid="Expected KeyID"
+/>
+```
+
+```xml
+<BusDis
+    app="6500000"
+    voltype="112871465660973067"
+    p_ReportType="1"
+    state="15"
+    keyid="Expected KeyID"
+/>
+```
+
+RMU 设备明细报告中的 `BV_ID` 即为实际回写的 `voltype`。
+
+### FeedLine
+
+数据库目标记录来自：
+
+```text
+13503 / dms_section_device
+```
+
+回写：
+
+```xml
+<FeedLine
+    app="6500000"
+    p_ReportType="1"
+    state="20"
+    voltype="dms_section_device.BV_ID"
+    keyid="Expected KeyID"
+/>
+```
+
+例如数据库：
+
+```text
+ID    = 3800756610523988004
+BV_ID = 112871465660973067
+```
+
+则程序回写：
+
+```text
+keyid   = 3800756614818955300
+voltype = 112871465660973067
+```
+
+其中 KeyID 与 BV_ID 是两套独立字段，不能混用。
+
+### 安全规则
+
+如果准备自动关联的数据库设备 `BV_ID` 为空：
+
+```text
+当前设备 / 当前 FeedLine = FAIL
+禁止自动回写
+```
+
+不会再生成 `voltype=""` 或 `voltype="0"` 的新模型关联。
+
+其它 RMU / FeedLine 校验和关联规则保持 v3.1.1 不变。
+
+
+## 模块切换界面修复
+
+RMU 与馈线模型现在使用统一的动态配置容器尺寸规则：
+
+```text
+切换模型
+→ 释放上一模块固定高度
+→ 切换 QStackedWidget 当前页
+→ 当前模块强制 Expanding
+→ 按工作区真实宽度重新布局
+→ 重新计算当前模块自然高度
+→ 只由最外层工作区滚动条负责滚动
+```
+
+馈线配置页也调整为与 RMU 类似的完整横向布局：
+
+```text
+馈线识别规则        馈线段数据库表与域配置
+------------------------------------------------
+FeedLine 关联规则（整行）
+```
+
+这样 RMU ↔ 馈线来回切换时，不会再出现馈线模块只缩在左侧、旧模块高度残留或配置区域显示不完整的问题。
+
+业务校验与关联规则保持 v3.1.0 不变。
+
+
+## 新增：馈线模型校验与模型关联
+
+v3.1.0 新增独立【馈线模型】模块。RMU 模块继续保持“不做馈线判断”，两套业务逻辑完全分开。
+
+### 当前支持范围
+
+```text
+单馈线 G 文件
+G 馈线入口：<Bus>
+G 馈线段：<FeedLine>
+
+馈线主表：
+13500 / dms_feeder_device
+
+馈线段表：
+13503 / dms_section_device
+
+馈线段 Domain：
+1
+```
+
+### 馈线名称识别
+
+第一优先级：
+
+```text
+扫描 <Bus>
+→ 找到距离 Bus 最近的有效工程 Text
+→ 例如 AJWD-07
+```
+
+第二优先级：
+
+```text
+Bus 周围无法识别
+→ 从 G 文件名提取
+→ 例如 JED-CTL-AJWD-07.sln.pic.g
+→ AJWD-07
+```
+
+比较时统一标准化：
+
+```text
+AJWD-07
+AJWD_07
+AJWD 07
+→ AJWD07
+
+数据库：
+JED CTL AJWD 07
+→ JEDCTLAJWD07
+
+AJWD07 包含于 JEDCTLAJWD07
+→ 匹配
+```
+
+数据库匹配使用 `station.name + dms_feeder_device.name` 形成可读馈线名称，例如站名 `JED CTL AJWD` + 馈线名 `07` = `JED CTL AJWD 07`。标准化后必须唯一匹配一条馈线。
+
+### FeedLine 已有关联
+
+对于已经存在 KeyID 的 `<FeedLine>`：
+
+```text
+KeyID
+→ 反解 device_id
+→ 反解 table_id
+→ 反解 domain
+→ 查询 dms_section_device
+→ 检查 feeder_id
+```
+
+必须满足：
+
+```text
+table_id = 13503
+domain = 1
+数据库馈线段 feeder_id = 当前识别出的 feeder_id
+```
+
+正确：
+
+```text
+PASS
+保留原关联
+不重复写回
+```
+
+错误：
+
+```text
+FAIL
+只报告
+不自动覆盖已有错误 KeyID
+```
+
+### FeedLine 未关联
+
+先把已经正确关联的数据库馈线段视为“已占用”。
+
+剩余数据库记录：
+
+```text
+按 NAME 中 SEC001、SEC002、SEC003... 自然递增排序
+```
+
+G 文件未关联 FeedLine：
+
+```text
+从上到下
+再从左到右
+```
+
+依次一一分配。
+
+所以如果中间只有几个 FeedLine 没有关联，程序会优先使用当前馈线中尚未被已有正确 KeyID 占用的数据库馈线段，再按照递增顺序补齐。
+
+### Expected KeyID
+
+```text
+Expected KeyID
+= dms_section_device.ID + (1 << 32)
+```
+
+并再次通过 Oracle：
+
+```text
+long2_to_long1
+get_tab_no
+get_col_no
+```
+
+验证必须得到：
+
+```text
+device_id = 目标馈线段 ID
+table_id = 13503
+domain = 1
+```
+
+### 安全回写
+
+原始 G 文件永不修改。
+
+执行关联时只修改 Workspace 中的安全副本：
+
+```xml
+<FeedLine
+    app="6500000"
+    p_ReportType="1"
+    state="20"
+    keyid="Expected KeyID"
+/>
+```
+
+已有正确关联不重复写；已有错误关联不自动覆盖。
+
+### 独立报告
+
+馈线模块拥有独立报告：
+
+```text
+馈线汇总
+馈线段明细
+```
+
+模型校验、关联预览、关联完成后都会生成独立 HTML / CSV。
+
 
 ## 关联粒度调整：设备错误不再拖累同一 RMU 的其它设备
 

@@ -404,6 +404,19 @@ class RmuValidator:
             row["model_linked"] = "NO"
             row["model_link_correct"] = ""
             row["model_link_status"] = "未关联"
+
+            # 模型回写时 voltype 必须来自数据库实际设备 BV_ID。
+            # BV_ID 为空时仅阻断当前设备，不能生成不完整模型属性。
+            if not norm(row.get("db_bv_id")):
+                row["association_action"] = "禁止自动关联"
+                row["writeback_needed"] = "NO"
+                row["association_ready"] = "NO"
+                self._set_fail(
+                    row,
+                    "BV_ID_EMPTY: 数据库设备 BV_ID 为空，无法写入 voltype"
+                )
+                return
+
             row["association_action"] = "需要关联"
             row["writeback_needed"] = "YES"
             row["association_ready"] = "YES"

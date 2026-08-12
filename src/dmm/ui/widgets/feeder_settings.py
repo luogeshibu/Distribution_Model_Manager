@@ -1,36 +1,174 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QGroupBox
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QGroupBox,
+    QGridLayout, QSpinBox, QPushButton, QSizePolicy,
+    QAbstractSpinBox,
+)
+
+
+def _resource_dir():
+    if getattr(sys, "frozen", False):
+        return (
+            Path(
+                getattr(
+                    sys,
+                    "_MEIPASS",
+                    Path(sys.executable).resolve().parent,
+                )
+            )
+            / "dmm"
+            / "resources"
+        )
+    return Path(__file__).resolve().parents[2] / "resources"
+
+
+SPIN_UP_ICON = (_resource_dir() / "spin_up.png").as_posix()
+SPIN_DOWN_ICON = (_resource_dir() / "spin_down.png").as_posix()
+
+
+class NoWheelSpinBox(QSpinBox):
+    """
+    与 RMU 模块完全一致的数字输入框：
+    - 深绿色上下调节按钮；
+    - 支持直接输入；
+    - 鼠标滚轮不误修改数值。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+        self.setKeyboardTracking(False)
+        self.setWrapping(False)
+        self.setSingleStep(1)
+        self.setAccelerated(False)
+        self.setStyleSheet(f"""
+            QSpinBox {{
+                padding-right: 30px;
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{
+                width: 28px;
+                background: #006B52;
+                border-left: 1px solid #005640;
+            }}
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+                background: #00966E;
+            }}
+            QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {{
+                background: #004D3A;
+            }}
+            QSpinBox::up-arrow {{
+                image: url("{SPIN_UP_ICON}");
+                width: 14px;
+                height: 10px;
+            }}
+            QSpinBox::down-arrow {{
+                image: url("{SPIN_DOWN_ICON}");
+                width: 14px;
+                height: 10px;
+            }}
+        """)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
 
 class FeederSettingsWidget(QWidget):
+    DEFAULT_FEEDER_TABLE_ID = 13500
+    DEFAULT_SECTION_TABLE_ID = 13503
+    DEFAULT_SECTION_DOMAIN = 1
+
     def __init__(self, config):
         super().__init__()
+        self.config = config
+
+        self.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Maximum,
+        )
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(16777215)
+
         root = QVBoxLayout(self)
-        root.setContentsMargins(0,0,0,0)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(12)
 
         info = QLabel(
-            "馈线模型模块已纳入平台架构。当前尚未配置馈线对应的数据库表、"
-            "G 图元类型、匹配规则及域号，因此暂不开放执行，避免使用未经确认的业务规则。"
+            "馈线模型当前页面仅配置馈线段数据库表号和域号。"
+            "馈线识别方式、FeedLine 关联顺序、KeyID / BV_ID 回写规则，"
+            "请点击模型任务右侧的【当前模型帮助】查看。"
         )
         info.setWordWrap(True)
         info.setObjectName("moduleDescription")
+        info.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred,
+        )
         root.addWidget(info)
 
-        box = QGroupBox("馈线模型后续配置项")
-        lay = QVBoxLayout(box)
-        text = QLabel(
-            "后续需要明确：\n"
-            "• 馈线唯一性与数据库查询规则\n"
-            "• G 文件中的馈线识别规则\n"
-            "• 图元与数据库表映射\n"
-            "• 关联域号\n"
-            "• Expected KeyID 计算规则\n"
-            "• 模型关联预览\n"
-            "• G 文件安全回写"
+        mapping = QGroupBox("馈线段数据库表与域配置")
+        mapping.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred,
         )
-        text.setWordWrap(True)
-        lay.addWidget(text)
-        root.addWidget(box)
-        root.addStretch()
+        grid = QGridLayout(mapping)
+        grid.setContentsMargins(14, 18, 14, 14)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
+        grid.setColumnStretch(0, 3)
+        grid.setColumnStretch(1, 3)
+        grid.setColumnStretch(2, 3)
+
+        grid.addWidget(QLabel("用途"), 0, 0)
+        grid.addWidget(QLabel("表号（Table ID）"), 0, 1)
+        grid.addWidget(QLabel("域号（Domain）"), 0, 2)
+
+        grid.addWidget(QLabel("馈线段 dms_section_device"), 1, 0)
+
+        self.section_table = NoWheelSpinBox()
+        self.section_table.setRange(1, 999999)
+        self.section_table.setMinimumHeight(36)
+        self.section_table.setValue(
+            int(
+                config.get(
+                    "section_table_id",
+                    self.DEFAULT_SECTION_TABLE_ID,
+                )
+            )
+        )
+        grid.addWidget(self.section_table, 1, 1)
+
+        self.section_domain = NoWheelSpinBox()
+        self.section_domain.setRange(0, 999999)
+        self.section_domain.setMinimumHeight(36)
+        self.section_domain.setValue(
+            int(
+                config.get(
+                    "section_domain",
+                    self.DEFAULT_SECTION_DOMAIN,
+                )
+            )
+        )
+        grid.addWidget(self.section_domain, 1, 2)
+
+        restore = QPushButton("恢复馈线默认配置")
+        restore.setMinimumHeight(36)
+        restore.clicked.connect(self.restore_defaults)
+        grid.addWidget(restore, 2, 0, 1, 3)
+
+        root.addWidget(mapping)
+
+    def restore_defaults(self):
+        self.section_table.setValue(self.DEFAULT_SECTION_TABLE_ID)
+        self.section_domain.setValue(self.DEFAULT_SECTION_DOMAIN)
 
     def collect_settings(self):
-        return {}
-
+        # 馈线主表 13500 是程序内部固定业务表，不再作为用户配置项显示。
+        return {
+            "feeder_table_id": self.DEFAULT_FEEDER_TABLE_ID,
+            "section_table_id": int(self.section_table.value()),
+            "section_domain": int(self.section_domain.value()),
+        }

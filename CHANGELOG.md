@@ -24,6 +24,105 @@ All notable changes to Distribution Model Manager are documented here.
 
 
 
+
+
+
+
+## [3.1.4] - 2026-08-12
+
+### Fixed
+- Fixed application startup failure:
+  `AttributeError: 'MainWindow' object has no attribute 'show_current_module_help'`.
+- `_current_module_help_html()` and `show_current_module_help()` are now proper
+  `MainWindow` class methods instead of accidentally nested local functions
+  inside `_update_module_stack_height()`.
+- No RMU, Feeder, database, KeyID, BV_ID, report, or write-back business logic
+  was changed.
+
+## [3.1.3] - 2026-08-12
+
+### Feeder UI
+- Feeder Table/Domain spin controls now use exactly the same dark-green up/down button style as the RMU module.
+- Removed the user-editable feeder master table row from the Feeder settings page.
+- The Feeder settings page now exposes only:
+  - `13503 / dms_section_device`
+  - Domain `1`
+- The internal feeder master table remains fixed at `13500` and is no longer a user-facing setting.
+
+### Workspace module help
+- Added a dedicated `当前模型帮助` button directly in the Model Workspace task area.
+- The help content changes automatically with the selected model type.
+- Feeder identification rules and FeedLine association rules were removed from the main Feeder settings page and moved into Feeder model help.
+- Added dedicated RMU model help in the same Model Workspace button.
+- Help is displayed in a separate scrollable dialog so it does not consume normal workspace configuration height.
+
+### Unchanged
+- RMU validation and association business rules are unchanged.
+- Feeder validation and association business rules are unchanged.
+- BV_ID -> voltype write-back remains unchanged from v3.1.2.
+- Original G files remain unchanged; write-back continues only on Workspace safety copies.
+
+## [3.1.2] - 2026-08-12
+
+### Model write-back
+- RMU `CBreakerDis`, `ZhaiWaiJieDiDaoZha`, and `BusDis` now write `voltype` from the matched database device `BV_ID`.
+- FeedLine now writes `voltype` from `dms_section_device.BV_ID`.
+- Removed the old RMU write-back constant `voltype=0`.
+- FeedLine section queries now include `BV_ID`.
+- FeedLine detail reports now show current and target `BV_ID`.
+- Association preview messages show the exact `voltype` that will be written.
+
+### Safety
+- An unlinked RMU device with an empty database `BV_ID` is blocked only for that device.
+- An unlinked FeedLine with an empty database `BV_ID` is blocked only for that FeedLine.
+- No new automatic model association is allowed to write an empty or zero-placeholder `voltype`.
+
+### Unchanged
+- KeyID calculation rules are unchanged.
+- RMU and feeder ownership validation rules are unchanged.
+- Original G files remain unchanged; write-back still operates only on Workspace safety copies.
+
+## [3.1.1] - 2026-08-11
+
+### UI
+- Fixed RMU / Feeder module switching geometry.
+- Feeder settings now use the same expanding width policy as RMU settings.
+- Feeder configuration changed to a full-width two-column layout:
+  feeder recognition rules on the left and database table/domain settings on the right.
+- FeedLine association rules now span the full configuration width below the two columns.
+- Module switching now releases the previous page's fixed height before changing the stacked page.
+- The newly selected module is re-laid out using the actual workspace width before calculating its natural height.
+- Only the outer workspace scroll area remains responsible for page scrolling; no local module scrollbar is introduced.
+
+### Unchanged
+- RMU validation/association business rules are unchanged.
+- Feeder validation/association business rules are unchanged.
+- Original G files remain read-only and all write-back continues to target Workspace safety copies.
+
+## [3.1.0] - 2026-08-11
+
+### Added
+- Enabled the independent Feeder Model module.
+- Added single-feeder name resolution from nearest Text around `<Bus>`, with filename fallback.
+- Added punctuation-insensitive feeder name containment lookup against `dms_feeder_device` (13500).
+- Added `<FeedLine>` model validation.
+- Added `dms_section_device` (13503) / Domain 1 Expected KeyID generation and Oracle verification.
+- Added validation for existing FeedLine KeyIDs and actual feeder ownership.
+- Added automatic assignment for unlinked FeedLines using remaining database section records.
+- Added top-to-bottom / left-to-right ordering for unlinked G FeedLine objects.
+- Added natural database section ordering using SEC001, SEC002, SEC003...
+- Added safe FeedLine write-back to Workspace copies only:
+  `app=6500000`, `p_ReportType=1`, `state=20`, `keyid=Expected KeyID`.
+- Added dedicated Feeder Summary and FeedLine Detail HTML/CSV reports.
+
+### Safety
+- Existing wrong FeedLine links are reported but are not silently overwritten.
+- Existing correctly linked database sections are reserved before assigning unlinked FeedLines.
+- Original G files remain unchanged.
+
+### RMU
+- RMU module continues to perform zero feeder validation. The new feeder logic exists only in the independent Feeder Model module.
+
 ## [3.0.27] - 2026-08-10
 
 ### Association

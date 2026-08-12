@@ -209,7 +209,7 @@ class OracleClient:
         if feeder_id in (None, ""):
             return None
 
-        table_name = self.get_table_name(13500)
+        table_name = self.get_table_name(int(table_id))
         rows = self._query(
             f"""
             SELECT id, code, name, st_id, graph_name
@@ -243,6 +243,106 @@ class OracleClient:
             return rows[0] if len(rows) == 1 else None
         except Exception:
             return None
+
+
+    def find_feeders_by_name_hint(
+        self,
+        normalized_hint: str,
+        table_id: int = 13500,
+    ) -> List[Dict[str, Any]]:
+        """
+        Resolve feeder master records using the human-readable feeder name.
+
+        In the Oracle model, dms_feeder_device.NAME may contain only the local
+        feeder suffix (for example "07"), while DBI renders FEEDER_ID as a
+        readable value such as "JED CTL AJWD 07" by combining the station name
+        and feeder name.
+
+        Therefore matching is performed against:
+
+            station.name + feeder.name
+
+        after removing punctuation/spaces and upper-casing.
+
+        Example:
+            G label:          AJWD-07  -> AJWD07
+            station.name:     JED CTL AJWD
+            feeder.name:      07
+            database display: JED CTL AJWD 07
+            normalized:       JEDCTLAJWD07
+
+        AJWD07 is contained in JEDCTLAJWD07 -> match.
+        """
+        hint = "".join(
+            ch for ch in str(normalized_hint or "").upper()
+            if ch.isalnum()
+        )
+        if not hint:
+            return []
+
+        feeder_table = self.get_table_name(int(table_id))
+        station_table = self.get_table_name(405)
+
+        rows = self._query(
+            f"""
+            SELECT
+                f.id,
+                f.code,
+                f.name,
+                f.st_id,
+                f.graph_name,
+                s.name AS station_name,
+                TRIM(
+                    NVL(s.name, '') || ' ' ||
+                    NVL(f.name, '')
+                ) AS display_name
+            FROM {feeder_table} f
+            LEFT JOIN {station_table} s
+              ON s.id = f.st_id
+            WHERE REGEXP_REPLACE(
+                    UPPER(
+                        TRIM(
+                            NVL(s.name, '') || ' ' ||
+                            NVL(f.name, '')
+                        )
+                    ),
+                    '[^A-Z0-9]',
+                    ''
+                  ) LIKE :name_pattern
+            ORDER BY s.name, f.name, f.id
+            """,
+            {"name_pattern": f"%{hint}%"},
+        )
+
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = feeder_table
+            if not str(row.get("display_name") or "").strip():
+                row["display_name"] = str(row.get("name") or "").strip()
+
+        return rows
+
+
+    def get_sections_by_feeder_id(
+        self,
+        feeder_id: int,
+        table_id: int = 13503,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Return dms_section_device rows belonging to one feeder."""
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT id, code, name, feeder_id, bv_id
+            FROM {table_name}
+            WHERE feeder_id = :feeder_id
+            ORDER BY name, id
+            """,
+            {"feeder_id": int(feeder_id)},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return table_name, rows
 
     def verify_keyid(self, keyid: int) -> Dict[str, Any]:
         rows = self._query(

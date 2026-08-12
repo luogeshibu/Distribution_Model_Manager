@@ -82,6 +82,7 @@ class JobWorker(QThread):
 
             artifacts = {
                 "task_type": report_context[0],
+                "report_kind": self.module.module_id,
                 "operation": self.operation,
                 "run_dir": str(self.run_dir),
                 "report_dir": str(report_dir),

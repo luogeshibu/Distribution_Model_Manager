@@ -13,6 +13,80 @@ from pathlib import Path
 from dmm.config.constants import APP_NAME, APP_VERSION
 
 
+
+FEEDER_FIELDS = [
+    "file_name",
+    "feeder_hint", "feeder_hint_source",
+    "feeder_normalized_hint",
+    "feeder_db_count", "feeder_id", "feeder_name",
+    "feedline_count", "linked_correct_count",
+    "unlinked_count", "error_count",
+    "association_ready_count", "association_eligible",
+    "status", "severity", "reason",
+]
+
+FEEDLINE_FIELDS = [
+    "file_name", "feeder_name",
+    "order_index", "object_type", "xml_id",
+    "model_linked", "model_link_correct",
+    "current_keyid", "current_device_id",
+    "current_table_id", "current_domain",
+    "current_db_name", "current_db_code",
+    "current_bv_id", "current_feeder_id",
+    "assigned_device_id", "assigned_section_name", "assigned_bv_id",
+    "expected_keyid", "expected_keyid_verified",
+    "association_ready", "writeback_needed",
+    "status", "severity", "reason",
+]
+
+FEEDER_LABELS = {
+    "file_name": "G文件",
+    "feeder_hint": "图上/文件馈线标识",
+    "feeder_hint_source": "馈线名称来源",
+    "feeder_normalized_hint": "标准化馈线标识",
+    "feeder_db_count": "馈线数据库匹配数",
+    "feeder_id": "馈线ID",
+    "feeder_name": "数据库馈线名称",
+    "feedline_count": "FeedLine图元数",
+    "linked_correct_count": "已正确关联数",
+    "unlinked_count": "未关联数",
+    "error_count": "错误数",
+    "association_ready_count": "可自动关联数",
+    "association_eligible": "馈线可执行关联",
+    "status": "状态",
+    "severity": "状态类型",
+    "reason": "说明",
+}
+
+FEEDLINE_LABELS = {
+    "file_name": "G文件",
+    "feeder_name": "馈线名称",
+    "order_index": "FeedLine序号",
+    "object_type": "G图元类型",
+    "xml_id": "图元XML ID",
+    "model_linked": "是否已关联",
+    "model_link_correct": "当前模型是否正确",
+    "current_keyid": "当前KeyID",
+    "current_device_id": "当前数据库馈线段ID",
+    "current_table_id": "当前表号",
+    "current_domain": "当前域号",
+    "current_db_name": "当前数据库馈线段NAME",
+    "current_db_code": "当前数据库馈线段CODE",
+    "current_bv_id": "当前模型BV_ID",
+    "current_feeder_id": "当前模型所属馈线ID",
+    "assigned_device_id": "目标馈线段ID",
+    "assigned_section_name": "目标馈线段NAME",
+    "assigned_bv_id": "目标BV_ID / voltype",
+    "expected_keyid": "期望KeyID",
+    "expected_keyid_verified": "期望KeyID校验",
+    "association_ready": "可进入关联流程",
+    "writeback_needed": "是否需要回写",
+    "status": "状态",
+    "severity": "状态类型",
+    "reason": "说明",
+}
+
+
 DEVICE_FIELDS = [
     "rmu_name", "rmu_id",
     "object_type", "xml_id", "p_name_string", "graphical_name",
@@ -309,9 +383,86 @@ def flatten_device_rows(reports):
                 row.pop("x", None)
                 row.pop("y", None)
                 row["file_name"] = file_name
+                row.setdefault("rmu_name", rmu.get("rmu_name", ""))
+                row.setdefault("rmu_id", rmu.get("rmu_id", ""))
                 rows.append(row)
 
     return rows
+
+
+
+def _is_feeder_reports(reports):
+    return bool(
+        reports
+        and str(reports[0].get("report_type", "")).upper() == "FEEDER"
+    )
+
+
+def flatten_feeder_rows(reports):
+    rows = []
+    for report in reports:
+        feedline_rows = list(report.get("feedline_rows", []))
+        rows.append({
+            "file_name": report.get("file_name", ""),
+            "feeder_hint": report.get("feeder_hint", ""),
+            "feeder_hint_source": report.get("feeder_hint_source", ""),
+            "feeder_normalized_hint": report.get(
+                "feeder_normalized_hint", ""
+            ),
+            "feeder_db_count": len(report.get("feeder_records", []) or []),
+            "feeder_id": report.get("feeder_id", ""),
+            "feeder_name": report.get("feeder_name", ""),
+            "feedline_count": len(feedline_rows),
+            "linked_correct_count": sum(
+                1 for row in feedline_rows
+                if row.get("model_link_correct") == "YES"
+            ),
+            "unlinked_count": sum(
+                1 for row in feedline_rows
+                if row.get("model_linked") == "NO"
+            ),
+            "error_count": sum(
+                1 for row in feedline_rows
+                if row.get("status") == "FAIL"
+            ),
+            "association_ready_count": sum(
+                1 for row in feedline_rows
+                if (
+                    row.get("association_ready") == "YES"
+                    and row.get("writeback_needed") == "YES"
+                )
+            ),
+            "association_eligible": (
+                "YES" if report.get("association_eligible") else "NO"
+            ),
+            "status": report.get("status", ""),
+            "severity": report.get("severity", ""),
+            "reason": report.get("reason", ""),
+        })
+
+    return rows
+
+
+def flatten_feedline_rows(reports):
+    rows = []
+    for report in reports:
+        file_name = report.get("file_name", "")
+        feeder_name = report.get("feeder_name", "")
+        for row in report.get("feedline_rows", []):
+            item = dict(row)
+            item.pop("x", None)
+            item.pop("y", None)
+            item["file_name"] = file_name
+            item["feeder_name"] = feeder_name
+            rows.append(item)
+
+    return sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("file_name", "")),
+            _numeric_sequence(row.get("order_index", "")),
+        ),
+    )
 
 
 def _write_csv(path, rows, fields, labels):
@@ -352,17 +503,52 @@ def write_report(report, output_dir, domain_rules):
     return html_path
 
 
+
 def export_csv_bundle(reports, export_path):
     export_path = Path(export_path)
-    base = export_path.with_suffix("") if export_path.suffix.lower() == ".csv" else export_path
+    base = (
+        export_path.with_suffix("")
+        if export_path.suffix.lower() == ".csv"
+        else export_path
+    )
+
+    if _is_feeder_reports(reports):
+        feeder_path = base.with_name(
+            base.name + "_馈线汇总.csv"
+        )
+        section_path = base.with_name(
+            base.name + "_馈线段明细.csv"
+        )
+        _write_csv(
+            feeder_path,
+            flatten_feeder_rows(reports),
+            FEEDER_FIELDS,
+            FEEDER_LABELS,
+        )
+        _write_csv(
+            section_path,
+            flatten_feedline_rows(reports),
+            FEEDLINE_FIELDS,
+            FEEDLINE_LABELS,
+        )
+        return [feeder_path, section_path]
 
     rmu_path = base.with_name(base.name + "_环网柜汇总.csv")
     dev_path = base.with_name(base.name + "_设备明细.csv")
 
-    _write_csv(rmu_path, flatten_rmu_rows(reports), RMU_FIELDS, RMU_LABELS)
-    _write_csv(dev_path, flatten_device_rows(reports), ["file_name"]+DEVICE_FIELDS, DEVICE_LABELS)
+    _write_csv(
+        rmu_path,
+        flatten_rmu_rows(reports),
+        RMU_FIELDS,
+        RMU_LABELS,
+    )
+    _write_csv(
+        dev_path,
+        flatten_device_rows(reports),
+        ["file_name"] + DEVICE_FIELDS,
+        DEVICE_LABELS,
+    )
     return [rmu_path, dev_path]
-
 
 def _table_html(rows, fields, labels, status_field=None):
     body = []
@@ -383,7 +569,7 @@ def _table_html(rows, fields, labels, status_field=None):
     )
 
 
-def export_html_bundle(reports, export_path, domain_rules):
+def _export_rmu_html_bundle(reports, export_path, domain_rules):
     export_path = Path(export_path)
     rmu_rows = flatten_rmu_rows(reports)
     device_rows = flatten_device_rows(reports)
@@ -483,3 +669,124 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
 
     export_path.write_text(text, encoding="utf-8")
     return export_path
+
+def _export_feeder_html_bundle(reports, export_path, domain_rules):
+    export_path = Path(export_path)
+    feeder_rows = flatten_feeder_rows(reports)
+    feedline_rows = flatten_feedline_rows(reports)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    domain_rows = "".join(
+        f"<tr><td>{esc(tag)}</td>"
+        f"<td>{esc(rule['table_id'])}</td>"
+        f"<td>{esc(rule['domain'])}</td></tr>"
+        for tag, rule in domain_rules.items()
+    )
+
+    feeder_table = _table_html(
+        feeder_rows,
+        FEEDER_FIELDS,
+        FEEDER_LABELS,
+        "status",
+    )
+    feedline_table = _table_html(
+        feedline_rows,
+        FEEDLINE_FIELDS,
+        FEEDLINE_LABELS,
+        "status",
+    )
+
+    text = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>馈线模型管理报告</title>
+<style>
+:root {{
+  --green:#008C6A;
+  --green-dark:#006B52;
+  --border:#D3E3DC;
+  --text:#17372E;
+}}
+body{{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;margin:0;background:#F3F7F5;color:var(--text)}}
+header{{background:var(--green-dark);color:white;padding:24px 32px;border-bottom:5px solid #00B578}}
+main{{padding:24px 30px}}
+.card{{background:white;border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:18px}}
+table{{border-collapse:collapse;width:100%;font-size:12px}}
+th{{background:var(--green-dark);color:white;position:sticky;top:0}}
+th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-space:nowrap}}
+.scroll{{overflow:auto;max-height:650px}}
+.pass{{background:#EAF8F2}}
+.warn{{background:#FFF8DE}}
+.fail{{background:#FFF0F0}}
+.info{{background:#EAF3FF}}
+.status-list{{display:flex;flex-direction:column;gap:8px;max-width:1100px}}
+.status-item{{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:14px;padding:9px 12px;border-radius:6px;border:1px solid var(--border)}}
+.meta{{color:#D7EEE5}}
+</style>
+</head>
+<body>
+<header>
+  <h1>馈线模型管理报告</h1>
+  <div class="meta">软件：{esc(APP_NAME)}　版本：{esc(APP_VERSION)}　导出时间：{esc(now)}</div>
+</header>
+<main>
+  <div class="card">
+    <h2>馈线段模型规则</h2>
+    <table>
+      <thead><tr><th>G 图元类型</th><th>表号</th><th>域号</th></tr></thead>
+      <tbody>{domain_rows}</tbody>
+    </table>
+    <p>馈线主表：13500 / dms_feeder_device。馈线段表：13503 / dms_section_device，默认域号 1；回写 voltype 使用目标馈线段 BV_ID。</p>
+  </div>
+
+  <div class="card">
+    <h2>状态颜色说明</h2>
+    <div class="status-list">
+      <div class="status-item pass" style="background:#EAF8F2">
+        <strong>绿色 PASS</strong>
+        <span>当前 FeedLine 已经关联到本馈线下的数据库馈线段，表号/域号均正确。</span>
+      </div>
+      <div class="status-item warn" style="background:#FFF8DE">
+        <strong>黄色 WARN</strong>
+        <span>当前 FeedLine 尚未关联，但已经分配到可用数据库馈线段，可以进入关联预览。</span>
+      </div>
+      <div class="status-item fail" style="background:#FFF0F0">
+        <strong>红色 FAIL</strong>
+        <span>馈线名称无法唯一解析、当前 KeyID 不属于本馈线、表号/域号错误、数据库馈线段不足或其它硬错误。</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>馈线汇总</h2>
+    <p>当前版本按单馈线图处理。优先读取 Bus 周围最近有效文字作为馈线名称；失败后再从文件名提取。名称比较会忽略横线、下划线和空格。</p>
+    {feeder_table}
+  </div>
+
+  <div class="card">
+    <h2>馈线段明细</h2>
+    <p>已经关联的 FeedLine 只检查当前 KeyID 是否属于本馈线。未关联 FeedLine 按从上到下、从左到右排序，并依次使用本馈线下尚未被占用的 dms_section_device 记录。</p>
+    {feedline_table}
+  </div>
+</main>
+</body>
+</html>"""
+
+    export_path.write_text(text, encoding="utf-8")
+    return export_path
+
+
+def export_html_bundle(reports, export_path, domain_rules):
+    if _is_feeder_reports(reports):
+        return _export_feeder_html_bundle(
+            reports,
+            export_path,
+            domain_rules,
+        )
+    return _export_rmu_html_bundle(
+        reports,
+        export_path,
+        domain_rules,
+    )
+

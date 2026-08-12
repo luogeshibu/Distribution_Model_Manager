@@ -14,6 +14,7 @@ def make_row(xml_id, ready, writeback, expected_keyid, status="WARN"):
         "rmu_id": 100,
         "selected_device_name": f"Y{xml_id}",
         "db_device_id": 1000 + int(xml_id),
+        "db_bv_id": 112871465660973067,
         "expected_keyid": expected_keyid,
         "status": status,
     }
