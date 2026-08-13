@@ -189,7 +189,10 @@ def status_cls(status):
     return {
         "PASS": "pass",
         "WARN": "warn",
-        "RMU_LINK": "rmu-link",
+        "RELINK": "relink",
+        "RMU_RELINK": "rmu-relink",
+        # RMU_LINK remains a hard error used by ambiguous/non-unique RMU cases.
+        "RMU_LINK": "fail",
         "BLOCKED": "blocked",
         "FAIL": "fail",
         "INFO": "info",
@@ -550,19 +553,46 @@ def export_csv_bundle(reports, export_path):
     )
     return [rmu_path, dev_path]
 
-def _table_html(rows, fields, labels, status_field=None):
+def _table_html(
+    rows,
+    fields,
+    labels,
+    status_field=None,
+    selectable=False,
+):
     body = []
     for row in rows:
         cls = status_cls(str(row.get(status_field, ""))) if status_field else ""
+        select_cell = (
+            "<td class='select-col'>"
+            "<input type='checkbox' class='row-check' "
+            "title='选中后整行保持高亮，便于横向查看' "
+            "onchange='toggleSelectedRow(this)'>"
+            "</td>"
+            if selectable else ""
+        )
         body.append(
             f"<tr class='{cls}'>"
-            + "".join(f"<td>{esc(row.get(field,''))}</td>" for field in fields)
+            + select_cell
+            + "".join(
+                f"<td>{esc(row.get(field,''))}</td>"
+                for field in fields
+            )
             + "</tr>"
         )
 
+    select_header = (
+        "<th class='select-col'>选择</th>"
+        if selectable else ""
+    )
+
     return (
         "<div class='scroll'><table><thead><tr>"
-        + "".join(f"<th>{esc(labels.get(field,field))}</th>" for field in fields)
+        + select_header
+        + "".join(
+            f"<th>{esc(labels.get(field,field))}</th>"
+            for field in fields
+        )
         + "</tr></thead><tbody>"
         + "".join(body)
         + "</tbody></table></div>"
@@ -575,20 +605,51 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules):
     device_rows = flatten_device_rows(reports)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    is_operation_report = any(
+        str(rmu.get("rmu_reason", "")).startswith(
+            "ASSOCIATION_EXECUT"
+        )
+        for report in reports
+        for rmu in report.get("rmu_results", [])
+    )
+    report_title = (
+        "RMU 模型关联执行报告"
+        if is_operation_report
+        else "配网模型管理报告"
+    )
+    rmu_intro = (
+        "本报告只展示本次用户勾选并执行的环网柜。"
+        "未选中的环网柜不会进入本次执行报告。"
+        if is_operation_report
+        else (
+            "环网柜汇总严格按照 G 文件环网柜序号排列，"
+            "每个环网柜只展示一行。"
+        )
+    )
+    device_intro = (
+        "本表只展示本次用户勾选执行的设备。"
+        "PASS 表示本次成功写回；FAIL 表示执行时数据库事实发生变化，"
+        "该设备已跳过且未写回。"
+        if is_operation_report
+        else (
+            "设备明细仅展示 G 文件实际存在的设备图元。"
+        )
+    )
+
     domain_rows = "".join(
         f"<tr><td>{esc(tag)}</td><td>{esc(rule['table_id'])}</td><td>{esc(rule['domain'])}</td></tr>"
         for tag, rule in domain_rules.items()
     )
 
-    rmu_table = _table_html(rmu_rows, RMU_FIELDS, RMU_LABELS, "rmu_status")
+    rmu_table = _table_html(rmu_rows, RMU_FIELDS, RMU_LABELS, "rmu_status", selectable=True)
     device_fields = ["file_name"] + DEVICE_FIELDS
-    device_table = _table_html(device_rows, device_fields, DEVICE_LABELS, "status")
+    device_table = _table_html(device_rows, device_fields, DEVICE_LABELS, "status", selectable=True)
 
     text = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>配网模型管理工具报告</title>
+<title>{esc(report_title)}</title>
 <style>
 :root {{
   --green:#008C6A;
@@ -605,7 +666,16 @@ table{{border-collapse:collapse;width:100%;font-size:12px}}
 th{{background:var(--green-dark);color:white;position:sticky;top:0}}
 th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-space:nowrap}}
 .scroll{{overflow:auto;max-height:650px}}
-.pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}} .rmu-link{{background:#F0E7FF}} .blocked{{background:#EAF3FF}} .fail{{background:#FFF0F0}}
+.pass{{background:#EAF8F2}}
+.warn{{background:#FFF8DE}}
+.relink{{background:#FFE8CC}}
+.rmu-relink{{background:#F0E7FF}}
+.blocked{{background:#EAF3FF}}
+.fail{{background:#FFF0F0}}
+tr.row-selected{{outline:3px solid #1976D2;outline-offset:-3px;font-weight:600}}
+.select-col{{position:sticky;left:0;z-index:4;text-align:center!important;min-width:52px;max-width:52px;background:#F8FBFA!important}}
+thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}}
+.row-check{{width:17px;height:17px;cursor:pointer;accent-color:#1976D2}}
 .status-list{{display:flex;flex-direction:column;gap:8px;max-width:1100px}}
 .status-item{{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:14px;padding:9px 12px;border-radius:6px;border:1px solid var(--border)}}
 .status-item strong{{white-space:nowrap}}
@@ -615,7 +685,7 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
 </head>
 <body>
 <header>
-  <h1>配网模型管理报告</h1>
+  <h1>{esc(report_title)}</h1>
   <div class="meta">软件：{esc(APP_NAME)}　版本：{esc(APP_VERSION)}　导出时间：{esc(now)}</div>
 </header>
 <main>
@@ -632,38 +702,53 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
     <div class="status-list">
       <div class="status-item pass">
         <strong>绿色 PASS</strong>
-        <span>校验正常；已有模型关联正确时也使用该状态。</span>
+        <span>当前模型已关联到数据库当前正确设备，无需处理。</span>
       </div>
       <div class="status-item warn">
-        <strong>黄色 WARN</strong>
-        <span>设备尚未关联，但满足自动关联条件。</span>
+        <strong>黄色 UNLINKED</strong>
+        <span>当前 G 图元尚未关联；数据库 RMU 和目标设备均唯一且符合 CODE/p_NameString 与环网柜归属规则，可以关联。</span>
       </div>
-      <div class="status-item rmu-link">
-        <strong>紫色 RMU_LINK</strong>
-        <span>当前 KeyID 实际关联到了其他环网柜；属于硬错误，并阻断自动处理。</span>
+      <div class="status-item relink" style="background:#FFE8CC">
+        <strong>橙色 RELINK</strong>
+        <span>旧 KeyID、设备 ID、表号或 Domain 已过期/错误，或者旧设备被删除后重新创建；数据库当前目标设备仍唯一且符合规则，可以重新关联并覆盖旧模型。</span>
+      </div>
+      <div class="status-item rmu-relink" style="background:#F0E7FF">
+        <strong>紫色 RMU_RELINK</strong>
+        <span>当前 KeyID 指向了其他环网柜，但当前 RMU 唯一，并且本 RMU 内 CODE/p_NameString 已唯一确定正确设备；允许重新关联到当前环网柜。</span>
       </div>
       <div class="status-item blocked">
         <strong>蓝色 BLOCKED</strong>
-        <span>保留用于其它需要人工确认的阻断场景。</span>
+        <span>需要人工确认的整体阻断场景。</span>
       </div>
       <div class="status-item fail">
         <strong>红色 FAIL</strong>
-        <span>硬错误，例如 RMU 记录异常且设备未关联、CODE/p_NameString 不一致、CODE 不存在或 KeyID 无法反解。</span>
+        <span>数据库当前事实无法安全确定目标，例如 RMU 0/多条、当前 RMU 内 CODE 0/多条、CODE 与逻辑 p_NameString 不一致、目标设备不属于当前 RMU、Expected KeyID 或 BV_ID 无效。</span>
       </div>
     </div>
   </div>
 
   <div class="card">
     <h2>环网柜汇总</h2>
-    <p>环网柜汇总严格按照 G 文件环网柜序号排列，每个环网柜只展示一行。数据库中该名称必须唯一：0条或多条属于 RMU 级错误，整个环网柜禁止自动关联。RMU 唯一时，各设备独立校验、独立决定是否关联：某一设备 CODE 缺失、重复、与 p_NameString 不一致、KeyID 错误或属于其它环网柜，只阻断该设备，不影响同一环网柜内其它正确设备。馈线信息不参与任何判断。</p>
+    <p>{esc(rmu_intro)}</p>
     {rmu_table}
   </div>
 
   <div class="card">
-    <h2>设备明细</h2><p>设备明细仅展示 G 文件中的设备图元；每个图元显示其唯一匹配到的数据库设备、CODE/p_NameString、当前 KeyID、实际所属环网柜及是否需要回写。数据库中与 G 图元 CODE 无关的其它设备不参与校验，也不进入设备明细。</p>
+    <h2>设备明细</h2><p>{esc(device_intro)}</p>
     {device_table}
   </div>
 </main>
+<script>
+function toggleSelectedRow(cb) {{
+  const row = cb.closest('tr');
+  if (!row) return;
+  if (cb.checked) {{
+    row.classList.add('row-selected');
+  }} else {{
+    row.classList.remove('row-selected');
+  }}
+}}
+</script>
 </body>
 </html>"""
 

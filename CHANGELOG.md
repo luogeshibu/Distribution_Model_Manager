@@ -28,6 +28,188 @@ All notable changes to Distribution Model Manager are documented here.
 
 
 
+
+
+
+
+
+## [3.4.0] - 2026-08-13
+
+### RMU execution performance
+- Split RMU workflow into two explicit phases:
+  - full model validation = full G/RMU/device analysis;
+  - execute association = selected-device-only processing.
+- Clicking `执行模型关联` no longer reruns full RMU validation for the whole G file.
+- Execution only re-checks database facts for RMUs/devices explicitly selected in the in-app table.
+- RMU queries and per-table device inventory queries are cached during one execution, so multiple selected devices in the same RMU do not repeat the same database query.
+- G objects are written directly by `(tag + XML ID)`; the execution phase does not rediscover frames, labels or unrelated devices.
+
+### Database refresh at execution time
+- Selected devices receive a lightweight current-database re-check immediately before write-back:
+  - RMU name is still unique;
+  - CODE still uniquely matches the logical p_NameString inside that RMU;
+  - device still belongs to that RMU;
+  - BV_ID is present;
+  - Expected KeyID still verifies against table/domain.
+- If a previously validated device was deleted/re-created and its ID/BV_ID changed, execution refreshes the current ID/BV_ID/Expected KeyID and writes the new values.
+- If database truth becomes ambiguous after validation, only that selected device is skipped; other selected valid devices continue.
+
+### Operation-scoped report
+- RMU association completion no longer generates another full validation report.
+- The association report contains only RMUs and devices selected for this execution.
+- RMU summary shows only selected RMUs.
+- Device details show only selected devices and their execution result.
+- Successful rows use `ASSOCIATION_WRITE_SUCCESS`.
+- Devices skipped because database facts changed at execution time are reported as FAIL in this operation report only.
+- The HTML title is now `RMU 模型关联执行报告` for operation-scoped RMU reports.
+
+### Console
+- Removed the post-write full-G validation loop and its many `无需关联` messages.
+- Execution logs now focus on:
+  - number of selected RMUs/devices;
+  - selected RMU database re-check;
+  - database target changes;
+  - safety-copy write-back;
+  - success / skip totals.
+
+### Unchanged
+- Original G files remain unchanged.
+- Workspace safety-copy behavior is unchanged.
+- RMU database-truth eligibility rules are unchanged.
+- BV_ID -> voltype is unchanged.
+- Feeder workflow remains unchanged.
+- No smoke test added.
+
+## [3.3.2] - 2026-08-13
+
+### RMU selection table UI
+- Kept the RMU-name live filter introduced in v3.3.1.
+- Forced every row in the in-app selectable device-detail table to the same height: 38 px.
+- Disabled cell word-wrapping in this table so long descriptions no longer expand individual rows.
+- Long cell content is elided with `...`; the complete text remains available in the existing tooltip.
+- The vertical header uses fixed section resize mode to prevent Qt from recalculating different row heights.
+
+### Unchanged
+- RMU validation and selective association logic are unchanged.
+- Filtering remains display-only and never changes checkbox state or eligibility.
+- Feeder behavior is unchanged.
+- No smoke test added.
+
+## [3.3.1] - 2026-08-13
+
+### RMU selection table
+- Added a fast RMU-name filter above the in-app selectable device-detail table.
+- Supports partial matching such as `17613`, `RMU-42646`, or other RMU name fragments.
+- Filtering is live while typing.
+- Added a clear-button and a dedicated `清除筛选` action.
+- The selection counter shows the number of currently visible rows when a filter is active.
+
+### Safety
+- Filtering is display-only.
+- Hidden rows keep their checkbox state.
+- Filtering never changes validation results, association eligibility, selected candidate keys, or write-back behavior.
+- Clearing the filter restores all device rows.
+
+### Unchanged
+- Database-truth association rules remain unchanged from v3.3.0.
+- Selective RMU association behavior is unchanged.
+- Feeder behavior is unchanged.
+- No smoke test added.
+
+## [3.3.0] - 2026-08-12
+
+### RMU selective association UI
+- RMU model validation now also builds a read-only in-memory association candidate set; it still does not modify any G file.
+- Added an in-app `可关联设备选择（模型校验结果）` table immediately below task progress.
+- The table shows G-file RMU device detail rows with:
+  - G file;
+  - RMU sequence and name;
+  - G object type;
+  - logical p_NameString / selected device name;
+  - current database CODE;
+  - PASS / UNLINKED / RELINK / RMU_RELINK / FAIL / BLOCKED status;
+  - current model state;
+  - current target database device ID;
+  - Expected KeyID;
+  - processing reason.
+- Only rows already validated as:
+  `association_ready=YES` and `writeback_needed=YES`
+  are checkable.
+- PASS, FAIL and BLOCKED rows cannot accidentally be selected for write-back.
+- Nothing is selected by default. The user must explicitly choose one or more devices.
+- Added `全选可关联` and `清空选择`.
+
+### Selective write-back
+- `执行模型关联` now processes only explicitly checked RMU device rows.
+- Users can select:
+  - one device;
+  - multiple devices in one RMU;
+  - devices across multiple RMUs / G files.
+- Only G files containing checked devices are copied into the current Workspace `g_output`.
+- The final validation report is generated from those processed safety-copy G files.
+- Device eligibility is never re-decided by the checkbox UI; the RMU validator remains the only authority.
+
+### Database-truth rule retained
+- Current database truth remains authoritative.
+- A unique RMU + unique CODE/p_NameString match + correct RMU ownership + valid Expected KeyID/BV_ID is selectable.
+- Old wrong KeyID/domain/device ID or an old cross-RMU link remains correctable through RELINK / RMU_RELINK.
+- Database ambiguity remains a hard blocker.
+
+### Unchanged
+- Original G files are never modified.
+- BV_ID -> voltype write-back is unchanged.
+- Feeder module behavior is unchanged.
+- No smoke test was added.
+
+## [3.2.0] - 2026-08-12
+
+### RMU association strategy
+- Changed RMU association authority from the old G KeyID to the CURRENT database truth.
+- A device is association-eligible when:
+  - RMU name resolves to exactly one database RMU;
+  - the G logical `p_NameString` / selected name uniquely matches one CODE inside that RMU;
+  - CODE equals the logical `p_NameString`;
+  - the matched current database device belongs to the same RMU;
+  - Expected KeyID is valid;
+  - BV_ID is available when write-back is needed.
+- Device-level failures remain isolated: one missing/duplicate CODE does not block other valid devices in the same unique RMU.
+
+### Correctable model states
+- Added `RELINK` (orange):
+  - old device ID changed;
+  - old device record was deleted and recreated;
+  - current KeyID is stale or unresolvable;
+  - current table/domain is wrong;
+  - current KeyID differs from the new Expected KeyID.
+  These cases are no longer red FAIL when the current database target is uniquely valid.
+- Added `RMU_RELINK` (purple):
+  - the existing G KeyID currently points to another RMU;
+  - the current unique RMU still contains one valid CODE/p_NameString target.
+  The tool may overwrite the old association and link to the correct current RMU.
+- Existing correct models remain green PASS.
+- Unlinked but valid devices remain yellow WARN.
+
+### Device recreation / ID changes
+- If a previously linked database device was deleted and recreated with a new ID,
+  the old G KeyID no longer blocks association.
+- The current RMU + CODE/p_NameString match is resolved again and a new Expected KeyID,
+  BV_ID/voltype and model attributes are written to the Workspace copy.
+
+### HTML report usability
+- Added a left-side selection checkbox to RMU summary and device detail rows.
+- Checking a row keeps the whole row outlined in blue while horizontally scrolling,
+  reducing the chance of reading the wrong KeyID/Domain/BV_ID/description row.
+- Updated status legend for PASS / UNLINKED / RELINK / RMU_RELINK / BLOCKED / FAIL.
+
+### Unchanged hard blockers
+- RMU database name has 0 or multiple records.
+- Current-RMU CODE match has 0 or multiple records.
+- CODE does not equal the logical p_NameString.
+- The current target database device does not belong to the current RMU.
+- Expected KeyID validation fails.
+- Required BV_ID is missing for write-back.
+- RMU feeder information remains completely excluded from RMU validation.
+
 ## [3.1.4] - 2026-08-12
 
 ### Fixed

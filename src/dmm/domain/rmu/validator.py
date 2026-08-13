@@ -223,10 +223,53 @@ class RmuValidator:
 
     @staticmethod
     def _set_rmu_link_issue(row, reason):
+        """
+        Hard RMU-link issue.
+
+        Reserved for cases where the database truth itself is ambiguous
+        (for example a non-unique RMU).  A UNIQUE RMU whose old G KeyID points
+        elsewhere is handled by RMU_RELINK instead and remains writable.
+        """
         row["status"] = "RMU_LINK"
         row["severity"] = "RMU_LINK_MISMATCH"
         row["reason"] = reason
         row["association_ready"] = "NO"
+
+    @staticmethod
+    def _set_relink(row, reason):
+        """
+        Correctable stale/wrong existing model.
+
+        The current database target has already passed all hard rules:
+        unique RMU, CODE == logical p_NameString, unique device in this RMU,
+        correct RMU ownership and a valid Expected KeyID.
+        """
+        row["status"] = "RELINK"
+        row["severity"] = "MODEL_RELINK"
+        row["reason"] = reason
+        row["model_link_correct"] = "NO"
+        row["model_link_status"] = "旧模型关联已过期或错误，可重新关联"
+        row["association_action"] = "重新关联（覆盖旧模型关联）"
+        row["writeback_needed"] = "YES"
+        row["association_ready"] = "YES"
+
+    @staticmethod
+    def _set_rmu_relink(row, reason):
+        """
+        Correctable existing model that currently points to another RMU.
+
+        Because the current target device in the UNIQUE expected RMU has
+        already been uniquely resolved from CODE/p_NameString, the old
+        cross-RMU KeyID can be safely replaced.
+        """
+        row["status"] = "RMU_RELINK"
+        row["severity"] = "RMU_RELINK"
+        row["reason"] = reason
+        row["model_link_correct"] = "NO"
+        row["model_link_status"] = "当前模型关联到了其他环网柜，可重新关联"
+        row["association_action"] = "重新关联到当前环网柜（覆盖旧模型关联）"
+        row["writeback_needed"] = "YES"
+        row["association_ready"] = "YES"
 
     @staticmethod
     def _make_expected_keyid(device_id, domain):
@@ -388,25 +431,30 @@ class RmuValidator:
 
     def _evaluate_current_model(self, row, elem, device_id, rule, rmu_id):
         """
-        Evaluate an existing KeyID for a UNIQUE RMU.
+        Evaluate the CURRENT G model only after the CURRENT DATABASE target
+        has already passed all hard business rules.
 
-        Feeder is intentionally NOT checked.
+        Hard truth comes from the current database:
+        - RMU name resolved uniquely;
+        - logical p_NameString / selected name resolved;
+        - exactly one CODE match exists inside that RMU;
+        - CODE == logical p_NameString;
+        - matched database device belongs to the current RMU;
+        - Expected KeyID is valid.
 
-        Hard validation rules:
-        - expected database device must already be uniquely resolved by CODE;
-        - logical p_NameString/CODE validation must already have passed;
-        - invalid/unresolvable KeyID is an error;
-        - existing KeyID must resolve to the expected device/table/domain;
-        - existing KeyID must belong to the current RMU;
-        - existing KeyID must equal Expected KeyID.
+        Therefore an old G association is diagnostic, not authoritative.
+        A stale/deleted device ID, old KeyID, wrong table/domain, or an old
+        link to another RMU is CORRECTABLE and may be overwritten.
+
+        Only failures in the CURRENT database target are hard blockers; those
+        are handled before this method is called.
         """
+        # No current model: normal association candidate.
         if not elem.keyid:
             row["model_linked"] = "NO"
             row["model_link_correct"] = ""
             row["model_link_status"] = "未关联"
 
-            # 模型回写时 voltype 必须来自数据库实际设备 BV_ID。
-            # BV_ID 为空时仅阻断当前设备，不能生成不完整模型属性。
             if not norm(row.get("db_bv_id")):
                 row["association_action"] = "禁止自动关联"
                 row["writeback_needed"] = "NO"
@@ -428,135 +476,180 @@ class RmuValidator:
         row["model_linked"] = "YES"
         row["writeback_needed"] = "NO"
 
-        current_keyid = int_or_none(elem.keyid)
-        if current_keyid is None:
+        # Any corrective write-back needs the CURRENT target BV_ID.
+        if not norm(row.get("db_bv_id")):
             row["model_link_correct"] = "NO"
-            row["model_link_status"] = "已关联，但KeyID格式错误"
-            row["association_action"] = "禁止自动关联"
-            self._set_fail(row, "CURRENT_KEYID_INVALID")
-            return
-
-        try:
-            curv = self.db.verify_keyid(current_keyid)
-            current_device_id = int_or_none(curv.get("device_id"))
-            current_table_id = int_or_none(curv.get("tab_no"))
-            current_domain = int_or_none(curv.get("col_no"))
-
-            row["current_device_id"] = curv.get("device_id", "")
-            row["current_table_id"] = curv.get("tab_no", "")
-            row["current_domain"] = curv.get("col_no", "")
-
-            current_record = None
-            if current_device_id is not None and current_table_id is not None:
-                try:
-                    current_record = self.db.get_device_by_id(
-                        current_table_id,
-                        current_device_id,
-                    )
-                except Exception as exc:
-                    row["current_record_error"] = str(exc)
-
-            if current_record:
-                row["current_table_name"] = current_record.get("_table_name", "")
-                row["current_db_code"] = norm(current_record.get("code"))
-                row["current_db_name"] = norm(current_record.get("name"))
-                row["current_combined_id"] = current_record.get(
-                    "combined_id", ""
-                )
-
-            current_combined_id = int_or_none(
-                row.get("current_combined_id")
-            )
-
-            current_rmu = None
-            if current_combined_id is not None:
-                try:
-                    current_rmu = self.db.get_rmu_by_id(
-                        current_combined_id
-                    )
-                except Exception as exc:
-                    row["current_rmu_lookup_error"] = str(exc)
-
-            current_rmu_name = norm((current_rmu or {}).get("name"))
-            row["current_rmu_name"] = current_rmu_name
-
-            rmu_match = (
-                current_combined_id is not None
-                and rmu_id is not None
-                and current_combined_id == int(rmu_id)
-            )
-            row["current_rmu_match"] = "YES" if rmu_match else "NO"
-
-            expected_rmu_name = norm(row.get("rmu_name"))
-            rmu_name_match = (
-                bool(expected_rmu_name)
-                and bool(current_rmu_name)
-                and expected_rmu_name == current_rmu_name
-            )
-            row["current_rmu_name_match"] = (
-                "YES" if rmu_name_match else "NO"
-            )
-
-        except Exception as exc:
-            row["model_link_correct"] = "NO"
-            row["model_link_status"] = "已关联，但KeyID无法反向验证"
+            row["model_link_status"] = "当前模型需要修复，但数据库BV_ID为空"
             row["association_action"] = "禁止自动关联"
             self._set_fail(
                 row,
-                f"CURRENT_KEYID_VERIFY_ERROR: {exc}"
+                "BV_ID_EMPTY: 数据库设备 BV_ID 为空，无法重新写入 voltype"
             )
             return
 
-        if (
-            row.get("current_rmu_match") != "YES"
-            or row.get("current_rmu_name_match") != "YES"
-        ):
-            row["model_link_correct"] = "NO"
-            row["model_link_status"] = "已关联，但关联到了其他环网柜"
-            row["association_action"] = "禁止自动关联，请检查现有模型"
-            self._set_rmu_link_issue(
+        current_keyid = int_or_none(elem.keyid)
+
+        # A malformed old keyid is not a hard database error.  The current
+        # target is already uniquely known, so simply replace the old model.
+        if current_keyid is None:
+            row["current_keyid"] = elem.keyid
+            self._set_relink(
                 row,
-                "CURRENT_MODEL_RMU_MISMATCH: "
+                "CURRENT_KEYID_INVALID: 当前G文件KeyID格式错误；"
+                "数据库当前目标设备唯一且有效，允许重新关联"
+            )
+            return
+
+        current_verify_error = ""
+        try:
+            curv = self.db.verify_keyid(current_keyid)
+        except Exception as exc:
+            curv = {}
+            current_verify_error = str(exc)
+
+        # Old device may have been deleted/recreated.  Failure to reverse an
+        # old KeyID is therefore a RELINK condition, not FAIL.
+        if current_verify_error:
+            self._set_relink(
+                row,
+                "CURRENT_KEYID_STALE_OR_UNRESOLVABLE: "
+                f"{current_verify_error}；数据库当前目标设备唯一且有效，允许重新关联"
+            )
+            return
+
+        current_device_id = int_or_none(curv.get("device_id"))
+        current_table_id = int_or_none(curv.get("tab_no"))
+        current_domain = int_or_none(curv.get("col_no"))
+
+        row["current_device_id"] = curv.get("device_id", "")
+        row["current_table_id"] = curv.get("tab_no", "")
+        row["current_domain"] = curv.get("col_no", "")
+
+        current_record = None
+        if current_device_id is not None and current_table_id is not None:
+            try:
+                current_record = self.db.get_device_by_id(
+                    current_table_id,
+                    current_device_id,
+                )
+            except Exception as exc:
+                row["current_record_error"] = str(exc)
+
+        if current_record:
+            row["current_table_name"] = current_record.get("_table_name", "")
+            row["current_db_code"] = norm(current_record.get("code"))
+            row["current_db_name"] = norm(current_record.get("name"))
+            row["current_combined_id"] = current_record.get(
+                "combined_id", ""
+            )
+
+        current_combined_id = int_or_none(
+            row.get("current_combined_id")
+        )
+
+        current_rmu = None
+        if current_combined_id is not None:
+            try:
+                current_rmu = self.db.get_rmu_by_id(
+                    current_combined_id
+                )
+            except Exception as exc:
+                row["current_rmu_lookup_error"] = str(exc)
+
+        current_rmu_name = norm((current_rmu or {}).get("name"))
+        row["current_rmu_name"] = current_rmu_name
+
+        expected_rmu_id = int_or_none(rmu_id)
+        rmu_match = (
+            current_combined_id is not None
+            and expected_rmu_id is not None
+            and current_combined_id == expected_rmu_id
+        )
+        row["current_rmu_match"] = "YES" if rmu_match else "NO"
+
+        expected_rmu_name = norm(row.get("rmu_name"))
+        rmu_name_match = (
+            bool(expected_rmu_name)
+            and bool(current_rmu_name)
+            and expected_rmu_name == current_rmu_name
+        )
+        row["current_rmu_name_match"] = (
+            "YES" if rmu_name_match else "NO"
+        )
+
+        # If the old model can be resolved and explicitly belongs to another
+        # RMU, show a dedicated correctable status.
+        if (
+            current_combined_id is not None
+            and expected_rmu_id is not None
+            and current_combined_id != expected_rmu_id
+        ):
+            self._set_rmu_relink(
+                row,
+                "CURRENT_MODEL_RMU_MISMATCH_RELINK: "
                 f"当前图形环网柜={row.get('rmu_name') or '-'}；"
-                f"当前KeyID设备所属环网柜={row.get('current_rmu_name') or '-'}；"
-                f"当前combined_id={row.get('current_combined_id') or '-'}；"
-                f"期望combined_id={rmu_id or '-'}"
+                f"旧KeyID设备所属环网柜={current_rmu_name or '-'}；"
+                f"旧combined_id={current_combined_id}；"
+                f"目标combined_id={expected_rmu_id}；"
+                "数据库当前目标设备已通过CODE/p_NameString及RMU归属校验，允许强制重新关联"
             )
             return
 
         reasons = []
 
-        if int_or_none(row.get("current_device_id")) != int(device_id):
+        if current_device_id != int(device_id):
             reasons.append(
-                f"DEVICE_ID不匹配(current={row.get('current_device_id')}, "
+                f"DEVICE_ID已变化(current={current_device_id}, "
                 f"expected={device_id})"
             )
 
-        if int_or_none(row.get("current_table_id")) != int(rule["table_id"]):
+        if current_table_id != int(rule["table_id"]):
             reasons.append(
-                f"TABLE_ID不匹配(current={row.get('current_table_id')}, "
+                f"TABLE_ID不匹配(current={current_table_id}, "
                 f"expected={rule['table_id']})"
             )
 
-        if int_or_none(row.get("current_domain")) != int(rule["domain"]):
+        if current_domain != int(rule["domain"]):
             reasons.append(
-                f"DOMAIN不匹配(current={row.get('current_domain')}, "
+                f"DOMAIN不匹配(current={current_domain}, "
                 f"expected={rule['domain']})"
             )
 
         if current_keyid != int(row["expected_keyid"]):
             reasons.append(
-                f"KEYID不匹配(current={current_keyid}, "
+                f"KEYID已变化或不匹配(current={current_keyid}, "
                 f"expected={row['expected_keyid']})"
             )
 
+        # If the old record itself disappeared, its RMU ownership cannot be
+        # verified.  Since the CURRENT database target is valid, repair it.
+        if current_record is None:
+            reasons.append(
+                "旧KeyID对应数据库记录已不存在或无法读取"
+            )
+
+        # Any old-model mismatch is now a correctable RELINK state.
         if reasons:
-            row["model_link_correct"] = "NO"
-            row["model_link_status"] = "模型已关联但关联错误"
-            row["association_action"] = "禁止自动关联，请检查现有模型"
-            self._set_fail(
+            self._set_relink(
                 row,
-                "MODEL_LINK_WRONG: " + "; ".join(reasons)
+                "MODEL_RELINK_REQUIRED: " + "; ".join(reasons)
+                + "；数据库当前目标设备唯一且符合规则，允许重新关联"
+            )
+            return
+
+        # Current keyid/table/domain/device all match expected.  At this point
+        # current_record should be the same current database target, therefore
+        # ownership is also expected to match. If ownership cannot be proven,
+        # repair rather than hard-fail.
+        if (
+            row.get("current_rmu_match") != "YES"
+            or row.get("current_rmu_name_match") != "YES"
+        ):
+            self._set_relink(
+                row,
+                "CURRENT_MODEL_RMU_UNVERIFIED: "
+                "当前KeyID基础信息与期望一致，但旧模型环网柜归属无法完整验证；"
+                "数据库当前目标设备唯一且有效，允许重新关联"
             )
             return
 
@@ -564,10 +657,10 @@ class RmuValidator:
         row["model_link_status"] = "模型已关联且正确"
         row["association_action"] = "模型已关联，无需关联"
         row["association_ready"] = "YES"
+        row["writeback_needed"] = "NO"
         row["status"] = "PASS"
         row["severity"] = "PASS"
         row["reason"] = "MODEL_ALREADY_LINKED_CORRECT"
-
 
     def _inspect_current_link_without_unique_rmu(
         self,
@@ -1526,6 +1619,11 @@ class RmuValidator:
             # rows with association_ready=YES and writeback_needed=YES.
             rmu_result["association_eligible"] = not unique_reasons
 
+            action_required = any(
+                row.get("status") in ("WARN", "RELINK", "RMU_RELINK")
+                for row in g_rows
+            )
+
             if unique_reasons:
                 rmu_result["rmu_status"] = "FAIL"
                 rmu_result["rmu_severity"] = "ERROR"
@@ -1534,6 +1632,10 @@ class RmuValidator:
                 rmu_result["rmu_status"] = "WARN"
                 rmu_result["rmu_severity"] = "DEVICE_ERROR"
                 rmu_result["rmu_reason"] = "RMU_PARTIAL_DEVICE_ERRORS"
+            elif action_required:
+                rmu_result["rmu_status"] = "WARN"
+                rmu_result["rmu_severity"] = "ASSOCIATION_ACTION_REQUIRED"
+                rmu_result["rmu_reason"] = "RMU_ASSOCIATION_ACTION_REQUIRED"
             else:
                 rmu_result["rmu_status"] = "PASS"
                 rmu_result["rmu_severity"] = "PASS"
@@ -1552,7 +1654,7 @@ class RmuValidator:
             "element_pass": sum(1 for d in device_rows if d.get("status") == "PASS"),
             "element_warn": sum(
                 1 for d in device_rows
-                if d.get("status") == "WARN"
+                if d.get("status") in ("WARN", "RELINK", "RMU_RELINK")
             ),
             "element_fail": sum(
                 1 for d in device_rows

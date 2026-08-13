@@ -774,6 +774,111 @@ class MainWindow(QMainWindow):
         layout.addWidget(progress_box)
 
         # --------------------------------------------------------
+        # RMU 模型校验后的可选择关联设备明细
+        # --------------------------------------------------------
+        self.association_selection_box = QGroupBox(
+            "可关联设备选择（模型校验结果）"
+        )
+        selection_layout = QVBoxLayout(self.association_selection_box)
+        selection_layout.setContentsMargins(12, 16, 12, 12)
+        selection_layout.setSpacing(8)
+
+        selection_tip = QLabel(
+            "模型校验完成后，这里展示 G 文件设备明细。"
+            "只有数据库当前事实已经唯一确定、并且需要关联或重新关联的设备"
+            "才允许勾选。PASS / FAIL / BLOCKED 行不会被误关联。"
+            "执行模型关联时只处理你勾选的设备。"
+        )
+        selection_tip.setWordWrap(True)
+        selection_tip.setStyleSheet(
+            "color:#315B4F; background:#F3F8F6; "
+            "border:1px solid #D0E2DA; border-radius:6px; padding:7px 9px;"
+        )
+        selection_layout.addWidget(selection_tip)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("环网柜名称筛选"))
+        self.rmu_filter_edit = QLineEdit()
+        self.rmu_filter_edit.setPlaceholderText(
+            "输入环网柜名称快速筛选，例如：17613 / RMU-42646"
+        )
+        self.rmu_filter_edit.setClearButtonEnabled(True)
+        self.rmu_filter_edit.textChanged.connect(
+            self._apply_rmu_name_filter
+        )
+        filter_row.addWidget(self.rmu_filter_edit, 1)
+
+        clear_filter_btn = QPushButton("清除筛选")
+        clear_filter_btn.clicked.connect(
+            lambda: self.rmu_filter_edit.clear()
+        )
+        filter_row.addWidget(clear_filter_btn)
+        selection_layout.addLayout(filter_row)
+
+        selection_actions = QHBoxLayout()
+        self.selection_count_label = QLabel("已选择 0 个设备")
+        self.select_all_assoc_btn = QPushButton("全选可关联")
+        self.clear_assoc_selection_btn = QPushButton("清空选择")
+        self.select_all_assoc_btn.clicked.connect(
+            self._select_all_association_candidates
+        )
+        self.clear_assoc_selection_btn.clicked.connect(
+            self._clear_association_selection
+        )
+        selection_actions.addWidget(self.selection_count_label)
+        selection_actions.addStretch(1)
+        selection_actions.addWidget(self.select_all_assoc_btn)
+        selection_actions.addWidget(self.clear_assoc_selection_btn)
+        selection_layout.addLayout(selection_actions)
+
+        self.association_table = QTableWidget()
+        self.association_table.setColumnCount(12)
+        self.association_table.setHorizontalHeaderLabels([
+            "选择",
+            "G文件",
+            "环网柜序号",
+            "环网柜名称",
+            "G图元类型",
+            "p_NameString / 逻辑名称",
+            "数据库CODE",
+            "状态",
+            "当前关联",
+            "目标设备ID",
+            "Expected KeyID",
+            "处理说明",
+        ])
+        self.association_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers
+        )
+        self.association_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows
+        )
+        self.association_table.setAlternatingRowColors(False)
+        self.association_table.setWordWrap(False)
+        self.association_table.setTextElideMode(Qt.ElideRight)
+        self.association_table.setMinimumHeight(260)
+        self.association_table.setMaximumHeight(460)
+
+        vertical_header = self.association_table.verticalHeader()
+        vertical_header.setVisible(False)
+        vertical_header.setMinimumSectionSize(38)
+        vertical_header.setDefaultSectionSize(38)
+        vertical_header.setSectionResizeMode(QHeaderView.Fixed)
+
+        header = self.association_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(11, QHeaderView.Stretch)
+        self.association_table.itemChanged.connect(
+            self._on_association_selection_changed
+        )
+        selection_layout.addWidget(self.association_table)
+
+        self.association_selection_box.setVisible(False)
+        self._association_table_populating = False
+        self._association_candidate_keys = set()
+        layout.addWidget(self.association_selection_box)
+
+        # --------------------------------------------------------
         # Console 日志 + 自动报告入口
         # --------------------------------------------------------
         log_box = QGroupBox("本次运行 Console 日志")
@@ -1010,8 +1115,12 @@ class MainWindow(QMainWindow):
         <ul>
           <li>环网柜数据库记录必须唯一；0 条或多条时环网柜汇总直接 FAIL。</li>
           <li>设备 CODE 必须与当前用于校验的 p_NameString 一致；NAME 不参与判断。</li>
-          <li>已有 KeyID 时继续检查实际设备、表号、域号、所属环网柜和 Expected KeyID。</li>
-          <li>已关联到其他环网柜的设备属于硬错误，禁止自动覆盖。</li>
+          <li>RMU 唯一后，每个 G 设备独立判断：当前 RMU 内 CODE 必须与逻辑 p_NameString 唯一对应，并且目标数据库设备必须属于当前 RMU。</li>
+          <li>已有 KeyID 只用于判断当前模型是否需要修复：旧设备 ID、表号、域号或 KeyID 错误，不再作为数据库当前正确目标的硬阻断条件。</li>
+          <li>如果旧设备被删除后重新创建并产生新 ID，只要当前 CODE/p_NameString 仍能唯一确定本 RMU 内的新设备，就允许重新关联。</li>
+          <li>如果当前 KeyID 指向其他环网柜，但本 RMU 内已经唯一确定正确目标设备，则标记为 RMU_RELINK，并允许重新关联到当前环网柜。</li>
+          <li>同一 RMU 内某些设备不符合条件时，只阻断这些设备；其它符合条件的设备仍可以正常关联。</li>
+          <li>模型校验完成后，工作区会展示设备明细选择表；只有数据库事实已唯一确定且需要写回的设备可勾选。执行关联时只处理勾选设备。</li>
           <li>RMU 模块不进行任何馈线判断。</li>
         </ul>
 
@@ -1199,9 +1308,9 @@ class MainWindow(QMainWindow):
             "• BusDis：CODE 不得为空；CODE 必须等于当前用于校验的 p_NameString；图上文字模式固定为 BUS，NAME 不参与判断。\n"
             "• 环网柜数据库记录为 0 条或多条时，环网柜汇总直接 FAIL。若 G 设备未关联，禁止自动关联。\n"
             "• 环网柜数据库记录为 0 条或多条，但 G 设备已经有人为 KeyID 时，不丢弃该模型：继续反解当前设备并校验 CODE/p_NameString 和实际所属环网柜。\n"
-            "• 已有关联模型如果实际属于其它环网柜，使用紫色 RMU_LINK 标记，属于硬错误，禁止自动覆盖。\n"
+            "• 唯一 RMU 下，若旧 KeyID 实际属于其它环网柜，使用紫色 RMU_RELINK 标记，可以覆盖旧模型并重新关联到当前 RMU；只有 RMU 本身不唯一时才继续作为硬阻断。\n"
             "• RMU 模块中的馈线判断已完全关闭；馈线模型关联由独立的【馈线模型】模块处理。\n"
-            "• 唯一 RMU 下已有 KeyID 时，仍继续校验当前设备 ID、表号、域号、combined_id 和 Expected KeyID。"
+            "• 唯一 RMU 下以当前数据库为准：CODE/p_NameString 和目标设备 RMU 归属通过后，即使旧设备 ID、表号、域号、KeyID 已失效，也允许重新关联。"
         )
         policy_text.setWordWrap(True)
         policy_layout.addWidget(policy_text)
@@ -1226,8 +1335,10 @@ class MainWindow(QMainWindow):
         colors_text = QLabel(
             "绿色 PASS：设备模型校验正常；已有人工关联且 CODE、环网柜归属均正确时也可显示绿色。\n"
             "黄色 WARN：设备尚未关联，但满足自动关联条件。\n"
-            "紫色 RMU_LINK：当前 KeyID 反解后的设备属于其他环网柜；这是硬错误，禁止自动覆盖。\n"
-            "红色 FAIL：硬错误，例如 RMU 0条/多条且设备未关联、CODE 与 p_NameString 对不上、CODE不存在/重复、KeyID无法反解。\n"
+            "黄色 WARN：设备当前未关联，但数据库当前目标唯一有效，可以关联。\n"
+            "橙色 RELINK：旧设备 ID、KeyID、表号或域号已过期/错误，或旧设备被删除重建；数据库当前目标唯一有效，可以重新关联。\n"
+            "紫色 RMU_RELINK：旧 KeyID 指向其他环网柜，但当前 RMU 内已唯一确定正确设备，可以强制重新关联。\n"
+            "红色 FAIL：数据库当前事实无法唯一确定安全目标，例如 RMU 0/多条、CODE 0/多条、CODE/p_NameString 不一致、目标设备不属于当前 RMU、Expected KeyID/BV_ID 无效。\n"
             "RMU 报告不输出馈线状态；馈线模块使用独立报告。"
         )
         colors_text.setWordWrap(True)
@@ -1243,7 +1354,7 @@ class MainWindow(QMainWindow):
             "app=6500000, voltype=数据库设备BV_ID, p_ReportType=1, state=41, keyid=Expected KeyID\n\n"
             "BusDis 回写：\n"
             "app=6500000, voltype=数据库设备BV_ID, p_ReportType=1, state=15, keyid=Expected KeyID\n\n"
-            "模型关联不会自动修改 p_NameString。馈线信息完全不参与判断；目标数据库设备必须通过 CODE/p_NameString 校验，并且自动关联目标必须属于当前唯一环网柜。已有人工 KeyID 仍会反查实际所属环网柜。"
+            "模型关联不会自动修改 p_NameString。馈线信息完全不参与判断；数据库当前唯一 RMU 和 CODE/p_NameString 匹配结果是关联依据。旧 KeyID 仅用于识别 PASS / RELINK / RMU_RELINK，不会阻止修复已经过期的模型关联。"
         )
         assoc_text.setWordWrap(True)
         assoc_layout.addWidget(assoc_text)
@@ -1338,6 +1449,8 @@ class MainWindow(QMainWindow):
 
         self.current_preview = None
         self.apply_btn.setEnabled(False)
+        if hasattr(self, "association_table"):
+            self._clear_association_table()
         self.refresh_operation_state()
 
         # 等 Qt 完成本次 stacked page 切换后，再计算新页面高度。
@@ -1356,9 +1469,24 @@ class MainWindow(QMainWindow):
             self.current_preview
             and self.current_preview.get("changes_by_file")
         )
-        self.apply_btn.setEnabled(
-            module.supports("APPLY_ASSOCIATION") and has_preview
-        )
+
+        if str(module_id).upper() == "RMU":
+            selected_count = len(
+                self._selected_association_keys()
+                if hasattr(self, "association_table")
+                else set()
+            )
+            self.apply_btn.setEnabled(
+                bool(
+                    module.supports("APPLY_ASSOCIATION")
+                    and has_preview
+                    and selected_count > 0
+                )
+            )
+        else:
+            self.apply_btn.setEnabled(
+                module.supports("APPLY_ASSOCIATION") and has_preview
+            )
 
         self.workspace_status.setText("请选择下方具体任务按钮执行。")
         apply_status_style(self.workspace_status, False)
@@ -1734,6 +1862,7 @@ class MainWindow(QMainWindow):
         self._set_task_buttons_enabled(False)
         self.current_preview = None
         self.apply_btn.setEnabled(False)
+        self._clear_association_table()
         self.log_edit.clear()
 
         self.progress_bar.setValue(0)
@@ -1802,11 +1931,30 @@ class MainWindow(QMainWindow):
         self.current_task_type = self.current_artifacts.get("task_type", "")
 
         if self.current_preview and self.current_preview.get("changes_by_file"):
-            change_count = sum(len(v) for v in self.current_preview["changes_by_file"].values())
-            self.apply_btn.setEnabled(change_count > 0)
-            self.log(f"关联预览已生成：可回写设备 {change_count} 个。")
+            change_count = sum(
+                len(v)
+                for v in self.current_preview["changes_by_file"].values()
+            )
+
+            if (
+                str(self.module_combo.currentData() or "").upper() == "RMU"
+            ):
+                self._populate_association_table(self.current_preview)
+                self.log(
+                    f"模型校验已生成可关联设备清单："
+                    f"可关联/重新关联设备 {change_count} 个。"
+                    "请在工作区表格中勾选需要处理的设备。"
+                )
+                # Explicit selection is required before Apply is enabled.
+                self.apply_btn.setEnabled(False)
+            else:
+                self.apply_btn.setEnabled(change_count > 0)
+                self.log(
+                    f"关联预览已生成：可回写设备 {change_count} 个。"
+                )
         else:
             self.apply_btn.setEnabled(False)
+            self._clear_association_table()
 
         self.progress_bar.setValue(100)
         self.progress_message.setText(
@@ -1871,31 +2019,474 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------
     # Association write-back placeholder
     # ------------------------------------------------------------
+    @staticmethod
+    def _association_change_key(source_file, change):
+        """Stable UI key for one G object association candidate."""
+        return "|".join([
+            str(Path(source_file).resolve()),
+            str(change.get("tag", "") or ""),
+            str(change.get("xml_id", "") or ""),
+        ])
+
+    def _clear_association_table(self):
+        if not hasattr(self, "association_table"):
+            return
+        self._association_table_populating = True
+        try:
+            self.association_table.clearContents()
+            self.association_table.setRowCount(0)
+            self._association_candidate_keys = set()
+            self.selection_count_label.setText("已选择 0 个设备")
+            if hasattr(self, "rmu_filter_edit"):
+                self.rmu_filter_edit.blockSignals(True)
+                self.rmu_filter_edit.clear()
+                self.rmu_filter_edit.blockSignals(False)
+            self.association_selection_box.setVisible(False)
+        finally:
+            self._association_table_populating = False
+
+    def _candidate_change_lookup(self, preview_data):
+        lookup = {}
+        if not preview_data:
+            return lookup
+
+        for source_file, changes in (
+            preview_data.get("changes_by_file", {}) or {}
+        ).items():
+            for change in changes or []:
+                key = self._association_change_key(
+                    source_file,
+                    change,
+                )
+                lookup[key] = change
+        return lookup
+
+    @staticmethod
+    def _row_status_text(row):
+        status = str(row.get("status", "") or "")
+        mapping = {
+            "PASS": "PASS",
+            "WARN": "UNLINKED",
+            "RELINK": "RELINK",
+            "RMU_RELINK": "RMU_RELINK",
+            "FAIL": "FAIL",
+            "RMU_LINK": "FAIL",
+            "BLOCKED": "BLOCKED",
+        }
+        return mapping.get(status, status)
+
+    @staticmethod
+    def _association_status_brush(status):
+        # Keep exactly the same semantic palette as the HTML report.
+        from PySide6.QtGui import QColor, QBrush
+
+        colors = {
+            "PASS": "#EAF8F2",
+            "WARN": "#FFF8DE",
+            "RELINK": "#FFE8CC",
+            "RMU_RELINK": "#F0E7FF",
+            "FAIL": "#FFF0F0",
+            "RMU_LINK": "#FFF0F0",
+            "BLOCKED": "#EAF3FF",
+        }
+        value = colors.get(str(status or ""), "")
+        return QBrush(QColor(value)) if value else None
+
+    def _populate_association_table(self, preview_data):
+        """
+        Show ALL RMU G-device detail rows after validation.
+
+        Only rows that the validated preview already marked as safe write-back
+        candidates are checkable.  This is deliberately UI-only filtering:
+        the validator remains the authority for database uniqueness and
+        CODE/p_NameString/RMU ownership rules.
+        """
+        self._clear_association_table()
+
+        if (
+            str(self.module_combo.currentData() or "").upper() != "RMU"
+            or not preview_data
+        ):
+            return
+
+        candidate_lookup = self._candidate_change_lookup(preview_data)
+        reports = preview_data.get("reports", []) or []
+        display_rows = []
+
+        # Build frame-index lookup while preserving G/RMU/device report order.
+        for report in reports:
+            source_file = str(report.get("g_file", "") or "")
+            file_name = str(report.get("file_name", "") or Path(source_file).name)
+            for rmu in report.get("rmu_results", []) or []:
+                frame_index = rmu.get("frame_index", "")
+                for row in rmu.get("device_rows", []) or []:
+                    if not row.get("xml_id"):
+                        continue
+                    item = dict(row)
+                    item["_source_file"] = source_file
+                    item["_file_name"] = file_name
+                    item["_frame_index"] = frame_index
+                    display_rows.append(item)
+
+        self._association_table_populating = True
+        try:
+            self.association_table.setRowCount(len(display_rows))
+            self._association_candidate_keys = set(candidate_lookup)
+
+            for row_index, row in enumerate(display_rows):
+                source_file = row["_source_file"]
+                key = self._association_change_key(
+                    source_file,
+                    {
+                        "tag": row.get("object_type", ""),
+                        "xml_id": row.get("xml_id", ""),
+                    },
+                )
+                is_candidate = key in candidate_lookup
+
+                check_item = QTableWidgetItem()
+                check_item.setData(Qt.UserRole, key)
+                if is_candidate:
+                    check_item.setFlags(
+                        Qt.ItemIsEnabled
+                        | Qt.ItemIsSelectable
+                        | Qt.ItemIsUserCheckable
+                    )
+                    # Explicit user choice: nothing is pre-selected.
+                    check_item.setCheckState(Qt.Unchecked)
+                    check_item.setToolTip(
+                        "数据库当前事实已唯一确定该设备，可以选择关联/重新关联。"
+                    )
+                else:
+                    check_item.setFlags(
+                        Qt.ItemIsEnabled | Qt.ItemIsSelectable
+                    )
+                    check_item.setText("—")
+                    check_item.setToolTip(
+                        "当前记录无需回写或被数据库事实校验阻断。"
+                    )
+                self.association_table.setItem(
+                    row_index,
+                    0,
+                    check_item,
+                )
+
+                current_text = str(
+                    row.get("model_link_status", "")
+                    or (
+                        "已关联"
+                        if row.get("model_linked") == "YES"
+                        else "未关联"
+                    )
+                )
+
+                values = [
+                    row["_file_name"],
+                    row["_frame_index"],
+                    row.get("rmu_name", ""),
+                    row.get("object_type", ""),
+                    row.get("p_name_string", "")
+                    or row.get("selected_device_name", ""),
+                    row.get("db_code", ""),
+                    self._row_status_text(row),
+                    current_text,
+                    row.get("db_device_id", ""),
+                    row.get("expected_keyid", ""),
+                    row.get("reason", ""),
+                ]
+
+                brush = self._association_status_brush(
+                    row.get("status", "")
+                )
+
+                for col_offset, value in enumerate(values, start=1):
+                    cell = QTableWidgetItem(
+                        "" if value is None else str(value)
+                    )
+                    cell.setToolTip(
+                        "" if value is None else str(value)
+                    )
+                    if brush is not None:
+                        cell.setBackground(brush)
+                    self.association_table.setItem(
+                        row_index,
+                        col_offset,
+                        cell,
+                    )
+
+                if brush is not None:
+                    check_item.setBackground(brush)
+
+            # Keep every row at the same fixed height. Long text is
+            # elided and remains fully available through the cell tooltip.
+            for table_row in range(self.association_table.rowCount()):
+                self.association_table.setRowHeight(table_row, 38)
+
+            self.association_selection_box.setVisible(
+                bool(display_rows)
+            )
+        finally:
+            self._association_table_populating = False
+
+        self._update_association_selection_state()
+        if hasattr(self, "rmu_filter_edit"):
+            self._apply_rmu_name_filter(
+                self.rmu_filter_edit.text()
+            )
+
+    def _selected_association_keys(self):
+        if not hasattr(self, "association_table"):
+            return set()
+
+        selected = set()
+        for row in range(self.association_table.rowCount()):
+            item = self.association_table.item(row, 0)
+            if (
+                item is not None
+                and item.flags() & Qt.ItemIsUserCheckable
+                and item.checkState() == Qt.Checked
+            ):
+                key = item.data(Qt.UserRole)
+                if key:
+                    selected.add(str(key))
+        return selected
+
+    def _update_association_selection_state(self):
+        selected_count = len(self._selected_association_keys())
+        total_candidates = len(
+            getattr(self, "_association_candidate_keys", set())
+        )
+        if hasattr(self, "selection_count_label"):
+            filter_text = (
+                self.rmu_filter_edit.text().strip()
+                if hasattr(self, "rmu_filter_edit")
+                else ""
+            )
+            visible_count = sum(
+                1
+                for row in range(self.association_table.rowCount())
+                if not self.association_table.isRowHidden(row)
+            ) if hasattr(self, "association_table") else 0
+            suffix = (
+                f"；当前显示 {visible_count} 行"
+                if filter_text
+                else ""
+            )
+            self.selection_count_label.setText(
+                f"已选择 {selected_count} 个设备 / "
+                f"可关联 {total_candidates} 个{suffix}"
+            )
+
+        module_id = str(self.module_combo.currentData() or "")
+        module = self.modules.get(module_id)
+        self.apply_btn.setEnabled(
+            bool(
+                module
+                and module.supports("APPLY_ASSOCIATION")
+                and self.current_preview
+                and selected_count > 0
+            )
+        )
+
+    def _on_association_selection_changed(self, item):
+        if getattr(self, "_association_table_populating", False):
+            return
+        if item.column() != 0:
+            return
+        self._update_association_selection_state()
+
+    def _apply_rmu_name_filter(self, text=""):
+        """
+        Filter the RMU device-selection table by RMU name.
+
+        This is display-only:
+        - it never changes checkbox state;
+        - it never changes association eligibility;
+        - clearing the filter restores all rows exactly as before.
+        """
+        if not hasattr(self, "association_table"):
+            return
+
+        needle = str(text or "").strip().casefold()
+        visible_count = 0
+
+        for row in range(self.association_table.rowCount()):
+            item = self.association_table.item(row, 3)
+            rmu_name = (
+                item.text().strip().casefold()
+                if item is not None
+                else ""
+            )
+            visible = (not needle) or (needle in rmu_name)
+            self.association_table.setRowHidden(row, not visible)
+            if visible:
+                visible_count += 1
+
+        if hasattr(self, "selection_count_label"):
+            selected_count = len(self._selected_association_keys())
+            total_candidates = len(
+                getattr(self, "_association_candidate_keys", set())
+            )
+            suffix = (
+                f"；当前显示 {visible_count} 行"
+                if needle
+                else ""
+            )
+            self.selection_count_label.setText(
+                f"已选择 {selected_count} 个设备 / "
+                f"可关联 {total_candidates} 个{suffix}"
+            )
+
+    def _select_all_association_candidates(self):
+        self._association_table_populating = True
+        try:
+            for row in range(self.association_table.rowCount()):
+                item = self.association_table.item(row, 0)
+                if (
+                    item is not None
+                    and item.flags() & Qt.ItemIsUserCheckable
+                ):
+                    item.setCheckState(Qt.Checked)
+        finally:
+            self._association_table_populating = False
+        self._update_association_selection_state()
+
+    def _clear_association_selection(self):
+        self._association_table_populating = True
+        try:
+            for row in range(self.association_table.rowCount()):
+                item = self.association_table.item(row, 0)
+                if (
+                    item is not None
+                    and item.flags() & Qt.ItemIsUserCheckable
+                ):
+                    item.setCheckState(Qt.Unchecked)
+        finally:
+            self._association_table_populating = False
+        self._update_association_selection_state()
+
+    def _selected_association_preview(self):
+        """
+        Filter validated preview data down to the rows explicitly selected by
+        the user.  No new eligibility decision is made here.
+        """
+        if not self.current_preview:
+            return None
+
+        selected_keys = self._selected_association_keys()
+        if not selected_keys:
+            return None
+
+        filtered = dict(self.current_preview)
+        filtered_changes = {}
+        selected_source_files = set()
+
+        for source_file, changes in (
+            self.current_preview.get("changes_by_file", {}) or {}
+        ).items():
+            kept = []
+            for change in changes or []:
+                key = self._association_change_key(
+                    source_file,
+                    change,
+                )
+                if key in selected_keys:
+                    kept.append(dict(change))
+            if kept:
+                filtered_changes[source_file] = kept
+                selected_source_files.add(
+                    str(Path(source_file).resolve())
+                )
+
+        filtered["changes_by_file"] = filtered_changes
+        filtered["selected_change_count"] = sum(
+            len(v) for v in filtered_changes.values()
+        )
+        filtered["selected_source_files"] = sorted(
+            selected_source_files
+        )
+
+        fingerprints = {}
+        for source_file, fingerprint in (
+            self.current_preview.get("file_fingerprints", {}) or {}
+        ).items():
+            if str(Path(source_file).resolve()) in selected_source_files:
+                fingerprints[source_file] = dict(fingerprint)
+        filtered["file_fingerprints"] = fingerprints
+
+        # Keep only selected preview rows when the module supplied them.
+        selected_rows = []
+        for row in self.current_preview.get("rows", []) or []:
+            for source_file in filtered_changes:
+                key = self._association_change_key(
+                    source_file,
+                    {
+                        "tag": row.get("object_type", ""),
+                        "xml_id": row.get("xml_id", ""),
+                    },
+                )
+                if key in selected_keys:
+                    selected_rows.append(dict(row))
+                    break
+        filtered["rows"] = selected_rows
+
+        return filtered
+
     def apply_association(self):
         if not self.current_preview or not self.current_preview.get("changes_by_file"):
             QMessageBox.information(
                 self,
                 "模型关联",
-                "当前没有可执行的关联预览，请先点击下方“模型关联预览”。",
+                "当前没有可执行的模型校验/关联预览结果，请先执行模型校验。",
             )
             return
 
-        change_count = sum(
-            len(v) for v in self.current_preview["changes_by_file"].values()
-        )
-        skipped_count = len(self.current_preview.get("skipped_rmus", []))
         module_id = str(self.module_combo.currentData() or "")
+
+        if module_id.upper() == "RMU":
+            execution_preview = self._selected_association_preview()
+            if not execution_preview or not execution_preview.get(
+                "changes_by_file"
+            ):
+                QMessageBox.information(
+                    self,
+                    "模型关联",
+                    "请先在“可关联设备选择”表格中勾选至少一个需要关联"
+                    "或重新关联的设备。",
+                )
+                return
+        else:
+            execution_preview = self.current_preview
+
+        change_count = sum(
+            len(v)
+            for v in execution_preview["changes_by_file"].values()
+        )
+        skipped_count = len(
+            execution_preview.get("skipped_rmus", [])
+        )
         skip_label = "馈线文件" if module_id == "FEEDER" else "RMU"
         target_label = "FeedLine 图元" if module_id == "FEEDER" else "设备图元"
-        message = (
-            f"本次将关联 {change_count} 个{target_label}。\n"
-            f"因校验不通过而跳过的{skip_label}：{skipped_count} 个。\n\n"
-            "原始 G 文件不会被修改。程序会复制全部选中 G 文件到 "
-            "Workspace/g_output，再只修改安全副本。\n"
-            "关联完成后，程序会立即重新校验这些安全副本，并生成与模型校验"
-            "同规格的 HTML / CSV 最终报告。\n\n"
-            "是否确认执行？"
-        )
+
+        if module_id.upper() == "RMU":
+            message = (
+                f"本次将只处理已勾选的 {change_count} 个{target_label}。\n\n"
+                "执行阶段不会重新扫描整张 G 图，也不会重新循环全部环网柜。"
+                "程序只会对这些设备所属环网柜和设备做轻量数据库复核，"
+                "然后按 XML ID 精确写回 Workspace 安全副本。\n\n"
+                "最终 HTML / CSV 只汇报本次选中的环网柜和设备。\n\n"
+                "是否确认执行？"
+            )
+        else:
+            message = (
+                f"本次将只处理已勾选的 {change_count} 个{target_label}。\n"
+                f"因校验不通过而跳过的{skip_label}：{skipped_count} 个。\n\n"
+                "原始 G 文件不会被修改。程序会复制全部选中 G 文件到 "
+                "Workspace/g_output，再只修改安全副本。\n"
+                "关联完成后，程序会立即重新校验这些安全副本，并生成与模型校验"
+                "同规格的 HTML / CSV 最终报告。\n\n"
+                "是否确认执行？"
+            )
         reply = QMessageBox.question(
             self,
             "确认执行模型关联",
@@ -1917,6 +2508,24 @@ class MainWindow(QMainWindow):
             settings = self.module_widgets[module_id].collect_settings()
             files = self.resolve_files(self.input_edit.text().strip())
 
+            if module_id == "RMU":
+                selected_source_files = {
+                    str(Path(p).resolve())
+                    for p in execution_preview.get(
+                        "selected_source_files",
+                        [],
+                    )
+                }
+                files = [
+                    Path(p)
+                    for p in files
+                    if str(Path(p).resolve()) in selected_source_files
+                ]
+                if not files:
+                    raise RuntimeError(
+                        "没有找到已勾选设备对应的 G 文件，请重新执行模型校验。"
+                    )
+
             self.log("\n开始执行模型关联：重新验证 Oracle 数据库连接。")
             db = OracleClient(self.current_db_config())
             self.log(db.test_connection())
@@ -1927,12 +2536,16 @@ class MainWindow(QMainWindow):
                 db,
                 files,
                 settings,
-                self.current_preview,
+                execution_preview,
                 self.log,
                 output_g_dir=Path(self.current_run_dir) / "g_output",
             )
 
             total = int(result_bundle.get("applied_count", 0))
+            skipped_total = int(result_bundle.get("skipped_count", 0))
+            selected_total = int(
+                result_bundle.get("selected_count", change_count)
+            )
             output_dir = result_bundle.get("output_g_dir", "")
             copied_files = [
                 Path(p)
@@ -1940,41 +2553,79 @@ class MainWindow(QMainWindow):
                 if Path(p).exists()
             ]
 
-            if not copied_files:
-                raise RuntimeError(
-                    "模型关联已执行，但没有找到可用于最终校验的 G 文件安全副本。"
+            if module_id == "RMU":
+                # RMU execution report is intentionally operation-scoped:
+                # selected RMUs/devices only.  Do NOT rerun a full G-file
+                # validation loop after write-back.
+                reports = result_bundle.get(
+                    "operation_reports",
+                    [],
+                )
+                final_rules = result_bundle.get(
+                    "rules",
+                    settings.get("_runtime_rules", {}),
+                )
+                final_summary = {
+                    "selected": selected_total,
+                    "applied": total,
+                    "skipped": skipped_total,
+                }
+                self.progress_bar.setValue(90)
+                self.progress_message.setText(
+                    "正在生成本次模型关联执行报告……"
+                )
+                self.log(
+                    "已完成已选设备的轻量数据库复核与精确回写；"
+                    "不再对整张 G 图重新循环校验。"
+                )
+            else:
+                if not copied_files:
+                    raise RuntimeError(
+                        "模型关联已执行，但没有找到可用于最终校验的 "
+                        "G 文件安全副本。"
+                    )
+
+                self.progress_bar.setValue(65)
+                self.progress_message.setText(
+                    "关联完成，正在重新校验安全副本……"
+                )
+                self.log(
+                    "模型关联写入完成，开始对 g_output 中的安全副本"
+                    "执行最终模型校验。"
                 )
 
-            self.progress_bar.setValue(65)
-            self.progress_message.setText(
-                "关联完成，正在重新校验安全副本……"
-            )
-            self.log(
-                "模型关联写入完成，开始对 g_output 中的安全副本执行最终模型校验。"
-            )
-
-            def final_progress(percent, message=""):
-                # module.validate gives roughly 5~95; map it into 65~92
-                mapped = 65 + int(max(0, min(100, int(percent))) * 0.27)
-                self.progress_bar.setValue(min(mapped, 92))
-                if message:
-                    self.progress_message.setText(
-                        f"最终校验：{message}"
+                def final_progress(percent, message=""):
+                    mapped = (
+                        65
+                        + int(
+                            max(
+                                0,
+                                min(100, int(percent)),
+                            )
+                            * 0.27
+                        )
                     )
-                QApplication.processEvents()
+                    self.progress_bar.setValue(
+                        min(mapped, 92)
+                    )
+                    if message:
+                        self.progress_message.setText(
+                            f"最终校验：{message}"
+                        )
+                    QApplication.processEvents()
 
-            reports, final_summary, final_rules = module.validate(
-                db,
-                copied_files,
-                settings,
-                self.log,
-                final_progress,
-            )
+                reports, final_summary, final_rules = module.validate(
+                    db,
+                    copied_files,
+                    settings,
+                    self.log,
+                    final_progress,
+                )
 
-            self.progress_bar.setValue(94)
-            self.progress_message.setText(
-                "正在生成模型关联完成报告……"
-            )
+                self.progress_bar.setValue(94)
+                self.progress_message.setText(
+                    "正在生成模型关联完成报告……"
+                )
 
             report_dir = (
                 Path(self.current_run_dir) / "association_result_report"
@@ -2008,6 +2659,7 @@ class MainWindow(QMainWindow):
             self.current_task_type = "association"
             self.current_rules = dict(final_rules)
             self.current_preview = None
+            self._clear_association_table()
 
             # Save complete console log beside final association report.
             try:
@@ -2041,7 +2693,8 @@ class MainWindow(QMainWindow):
             is_feeder = module.module_id == "FEEDER"
             object_label = "FeedLine 图元" if is_feeder else "设备图元"
             self.log(
-                f"模型关联完成：修改{object_label}={total}；"
+                f"模型关联完成：本次选择={selected_total}，"
+                f"成功写回={total}，执行时跳过={skipped_total}；"
                 f"原始 G 文件未修改；输出目录={output_dir}"
             )
             self.log(f"关联完成 HTML：{html_path}")
@@ -2065,7 +2718,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "模型关联完成",
-                f"模型关联处理完成，共修改 {total} 个{object_label}。\n\n"
+                f"模型关联处理完成。\n"
+                f"本次选择：{selected_total} 个{object_label}\n"
+                f"成功写回：{total} 个\n"
+                f"执行时跳过：{skipped_total} 个\n\n"
                 f"原始 G 文件未修改。\n"
                 f"处理后的 G 文件：\n{output_dir}\n\n"
                 f"最终校验报告：\n{html_path}",

@@ -43,13 +43,43 @@ class JobWorker(QThread):
             preview_data = None
 
             if self.operation == "VALIDATE":
-                reports, summary, rules = self.module.validate(
-                    db,
-                    self.files,
-                    self.settings,
-                    lambda msg: self.log.emit(str(msg)),
-                    lambda percent, message="": self.progress.emit(int(percent), str(message)),
-                )
+                # RMU validation also builds an in-memory association candidate
+                # set.  This DOES NOT write any G file.  It allows the desktop
+                # UI to show the validated device-detail table immediately
+                # after model validation and lets the user explicitly choose
+                # which valid devices should be associated/re-associated.
+                #
+                # Database truth remains authoritative: only rows already
+                # marked association_ready=YES + writeback_needed=YES by the
+                # RMU validator become selectable.
+                if (
+                    self.module.module_id == "RMU"
+                    and self.module.supports("PREVIEW_ASSOCIATION")
+                ):
+                    preview_data = self.module.preview_association(
+                        db,
+                        self.files,
+                        self.settings,
+                        lambda msg: self.log.emit(str(msg)),
+                        lambda percent, message="": self.progress.emit(
+                            int(percent),
+                            str(message),
+                        ),
+                    )
+                    reports = preview_data.get("reports", [])
+                    summary = preview_data.get("summary", {})
+                    rules = preview_data.get("rules", {})
+                else:
+                    reports, summary, rules = self.module.validate(
+                        db,
+                        self.files,
+                        self.settings,
+                        lambda msg: self.log.emit(str(msg)),
+                        lambda percent, message="": self.progress.emit(
+                            int(percent),
+                            str(message),
+                        ),
+                    )
 
             elif self.operation == "PREVIEW_ASSOCIATION":
                 preview_data = self.module.preview_association(
