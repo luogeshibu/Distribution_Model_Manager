@@ -1,7 +1,7 @@
 APP_NAME = "配网模型管理工具"
 APP_NAME_EN = "Distribution Model Manager"
-APP_VERSION = "3.6.7"
-APP_DESCRIPTION = "配网 G 文件模型校验、模型关联预览及安全回写工具"
+APP_VERSION = "3.6.9"
+APP_DESCRIPTION = "配网 G 文件模型校验、候选选择及安全关联回写工具"
 APP_EDITION = "团队内部版"
 
 WORKSPACE_RETENTION_DAYS = 30

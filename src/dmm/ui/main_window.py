@@ -112,7 +112,7 @@ class MainWindow(QMainWindow):
         self._check_saved_input_path_on_startup()
 
         self.log(f"{APP_NAME} v{APP_VERSION} 已启动。")
-        self.log("工作流：模型校验 → 模型关联预览 → 模型关联回写。")
+        self.log("工作流：模型校验 → 勾选可关联对象 → 执行模型关联。")
         self.log("安全模式：原始 G 文件永不修改；执行关联时只处理 Workspace 中的安全副本。")
 
     # ------------------------------------------------------------
@@ -489,7 +489,7 @@ class MainWindow(QMainWindow):
         title.setObjectName("headerTitle")
 
         subtitle = QLabel(
-            f"{APP_NAME_EN} · 模型校验 · 关联预览 · 安全回写"
+            f"{APP_NAME_EN} · 模型校验 · 校验候选 · 安全回写"
         )
         subtitle.setObjectName("headerSub")
 
@@ -946,12 +946,6 @@ class MainWindow(QMainWindow):
             lambda: self.start_job("VALIDATE")
         )
 
-        self.preview_btn = QPushButton("模型关联预览")
-        self.preview_btn.setObjectName("secondary")
-        self.preview_btn.clicked.connect(
-            lambda: self.start_job("PREVIEW_ASSOCIATION")
-        )
-
         self.apply_btn = QPushButton("执行模型关联")
         self.apply_btn.setObjectName("danger")
         self.apply_btn.setEnabled(False)
@@ -963,14 +957,12 @@ class MainWindow(QMainWindow):
 
         for button in (
             self.validate_btn,
-            self.preview_btn,
             self.apply_btn,
             database_btn,
         ):
             button.setFixedSize(168, 42)
 
         actions.addWidget(self.validate_btn)
-        actions.addWidget(self.preview_btn)
         actions.addWidget(self.apply_btn)
         actions.addWidget(database_btn)
         actions.addStretch()
@@ -1241,7 +1233,7 @@ class MainWindow(QMainWindow):
         text = QLabel(
             f"• 当前工作目录下自动生成的报告保留 {WORKSPACE_RETENTION_DAYS} 天\n"
             "• 每次执行任务前必须进行 Oracle 预检查\n"
-            "• 模型回写必须先生成关联预览\n"
+            "• 模型回写必须先生成校验候选\n"
             "• 修改 G 文件前必须创建原文件备份\n"
             "• 回写目标必须通过 G 图元类型 + XML ID 唯一定位\n"
             "• G 文件采用临时文件写入后原子替换\n"
@@ -1267,7 +1259,7 @@ class MainWindow(QMainWindow):
         root.addWidget(
             self._page_header(
                 "帮助",
-                "团队内部使用说明：RMU 与馈线模型校验、关联预览、报告和安全回写。",
+                "团队内部使用说明：RMU 与馈线模型校验、校验候选、报告和安全回写。",
             )
         )
 
@@ -1287,7 +1279,7 @@ class MainWindow(QMainWindow):
             "2. 进入【模型工作区】，选择 RMU 环网柜模型或馈线模型，并选择 G 文件/目录。\n"
             "3. RMU 模块配置名称来源与设备表/域；馈线模块配置 13503 馈线段表及域号。\n"
             "4. 点击底部【模型校验】执行独立校验，并生成校验 HTML / CSV。\n"
-            "5. 需要关联时先点击【模型关联预览】，确认预览结果后【执行模型关联】才会启用。\n"
+            "5. 需要关联时先点击【可关联清单】，确认预览结果后【执行模型关联】才会启用。\n"
             "6. 执行模型关联只修改 Workspace 中的安全副本，原始 G 文件不变。\n"
             "7. 关联完成后程序会重新校验安全副本，并生成与模型校验同规格的最终 HTML / CSV 报告。"
         )
@@ -1365,7 +1357,7 @@ class MainWindow(QMainWindow):
         assoc = QGroupBox("模型关联与 G 文件回写")
         assoc_layout = QVBoxLayout(assoc)
         assoc_text = QLabel(
-            "建议先执行【模型关联预览】，确认所有 Expected KeyID 和可关联设备。\n"
+            "建议先执行【可关联清单】，确认所有 Expected KeyID 和可关联设备。\n"
             "真正执行模型关联时，程序会重新检查数据库及预览有效性，然后复制所有选中 G 文件到 Workspace/g_output，只修改副本。原始 G 文件绝不修改。\n\n"
             "CBreakerDis / ZhaiWaiJieDiDaoZha 回写：\n"
             "app=6500000, voltype=数据库设备BV_ID, p_ReportType=1, state=41, keyid=Expected KeyID\n\n"
@@ -1384,7 +1376,7 @@ class MainWindow(QMainWindow):
             "•【设备明细】只显示 G 文件实际存在的 RMU 设备图元，并展示逻辑设备名称、数据库 CODE、当前 KeyID 和实际所属环网柜。\n"
             "• RMU 数据库记录异常时，已有人为 KeyID 的设备仍继续校验；未关联设备则直接阻断自动关联。\n"
             "• 当选择图上文字模式时，报告中的逻辑设备名称 表示用于校验的逻辑 图上逻辑名称，不是 XML 原属性。\n"
-            "• 每次模型校验、关联预览和关联完成都会自动生成对应 HTML / CSV；Workspace 历史按软件保留策略自动清理。"
+            "• 每次模型校验、校验候选和关联完成都会自动生成对应 HTML / CSV；Workspace 历史按软件保留策略自动清理。"
         )
         reports_text.setWordWrap(True)
         reports_layout.addWidget(reports_text)
@@ -1480,7 +1472,6 @@ class MainWindow(QMainWindow):
 
         module = self.modules[module_id]
         self.validate_btn.setEnabled(module.supports("VALIDATE"))
-        self.preview_btn.setEnabled(module.supports("PREVIEW_ASSOCIATION"))
 
         has_preview = bool(
             self.current_preview
@@ -1515,10 +1506,6 @@ class MainWindow(QMainWindow):
         self.validate_btn.setEnabled(
             bool(enabled and module and module.supports("VALIDATE"))
         )
-        self.preview_btn.setEnabled(
-            bool(enabled and module and module.supports("PREVIEW_ASSOCIATION"))
-        )
-
         if not enabled:
             self.apply_btn.setEnabled(False)
         else:
@@ -1814,7 +1801,6 @@ class MainWindow(QMainWindow):
             module = self.modules[module_id]
             operation_labels = {
                 "VALIDATE": "模型校验",
-                "PREVIEW_ASSOCIATION": "模型关联预览",
             }
             operation_label = operation_labels.get(operation, operation)
 
@@ -1978,7 +1964,7 @@ class MainWindow(QMainWindow):
             else:
                 self.apply_btn.setEnabled(change_count > 0)
                 self.log(
-                    f"关联预览已生成：可回写设备 {change_count} 个。"
+                    f"模型校验已生成可关联清单：可回写设备 {change_count} 个。"
                 )
         else:
             self.apply_btn.setEnabled(False)
@@ -1986,9 +1972,7 @@ class MainWindow(QMainWindow):
 
         self.progress_bar.setValue(100)
         self.progress_message.setText(
-            "模型校验完成，报告已生成"
-            if self.current_task_type == "validation"
-            else "模型关联预览完成，预览报告已生成"
+            "模型校验完成，报告和可关联清单已生成"
         )
         self.workspace_status.setText("任务执行完成")
         apply_status_style(self.workspace_status, True)
@@ -2025,11 +2009,7 @@ class MainWindow(QMainWindow):
             self.log(f"保存 console.log 失败：{exc}")
 
         self.statusBar().showMessage(
-            (
-                "模型校验完成，校验报告已生成。"
-                if self.current_task_type == "validation"
-                else "模型关联预览完成，预览报告已生成。"
-            ),
+            "模型校验完成，校验报告和可关联清单已生成。",
             5000,
         )
 
@@ -2490,7 +2470,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "模型关联",
-                "当前没有可执行的模型校验/关联预览结果，请先执行模型校验。",
+                "当前没有可执行的模型校验结果，请先执行模型校验。",
             )
             return
 
@@ -2618,10 +2598,12 @@ class MainWindow(QMainWindow):
                 if Path(p).exists()
             ]
 
-            if module_id == "RMU":
-                # RMU execution report is intentionally operation-scoped:
-                # selected RMUs/devices only.  Do NOT rerun a full G-file
-                # validation loop after write-back.
+            if module_id in {"RMU", "FEEDER"}:
+                # Execution reports are intentionally operation-scoped:
+                # only the rows explicitly selected by the user are included.
+                # The full drawing is NOT scanned/validated again after
+                # write-back.  Database/file safety is rechecked inside each
+                # module immediately before the selected XML IDs are written.
                 reports = result_bundle.get(
                     "operation_reports",
                     [],
@@ -2640,8 +2622,15 @@ class MainWindow(QMainWindow):
                     "正在生成本次模型关联执行报告……"
                 )
                 self.log(
-                    "已完成已选设备的轻量数据库复核与精确回写；"
-                    "不再对整张 G 图重新循环校验。"
+                    (
+                        "已完成已选馈线段的轻量数据库复核、剩余段重算与精确回写；"
+                        "不再对整张 G 图重新循环校验。"
+                    )
+                    if module_id == "FEEDER"
+                    else (
+                        "已完成已选设备的轻量数据库复核与精确回写；"
+                        "不再对整张 G 图重新循环校验。"
+                    )
                 )
             else:
                 if not copied_files:
@@ -2690,6 +2679,11 @@ class MainWindow(QMainWindow):
                 self.progress_bar.setValue(94)
                 self.progress_message.setText(
                     "正在生成模型关联完成报告……"
+                )
+
+            if module_id in {"RMU", "FEEDER"} and not reports:
+                raise RuntimeError(
+                    "模型关联已执行，但没有生成本次选中对象的执行报告。"
                 )
 
             report_dir = (

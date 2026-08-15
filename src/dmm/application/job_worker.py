@@ -43,17 +43,16 @@ class JobWorker(QThread):
             preview_data = None
 
             if self.operation == "VALIDATE":
-                # RMU validation also builds an in-memory association candidate
-                # set.  This DOES NOT write any G file.  It allows the desktop
-                # UI to show the validated device-detail table immediately
-                # after model validation and lets the user explicitly choose
-                # which valid devices should be associated/re-associated.
+                # One analysis pass serves both purposes:
+                #   1) generate the validation HTML/CSV;
+                #   2) build the in-memory selectable association candidates.
                 #
-                # Database truth remains authoritative: only rows already
-                # marked association_ready=YES + writeback_needed=YES by the
-                # RMU validator become selectable.
+                # There is no separate user-facing "association preview" task.
+                # preview_association() is retained only as an internal
+                # candidate-builder so RMU/FEEDER validation does not need to
+                # duplicate the same database/topology analysis.
                 if (
-                    self.module.module_id == "RMU"
+                    self.module.module_id in {"RMU", "FEEDER"}
                     and self.module.supports("PREVIEW_ASSOCIATION")
                 ):
                     preview_data = self.module.preview_association(
@@ -80,25 +79,14 @@ class JobWorker(QThread):
                             str(message),
                         ),
                     )
-
-            elif self.operation == "PREVIEW_ASSOCIATION":
-                preview_data = self.module.preview_association(
-                    db,
-                    self.files,
-                    self.settings,
-                    lambda msg: self.log.emit(str(msg)),
-                    lambda percent, message="": self.progress.emit(int(percent), str(message)),
-                )
-                reports = preview_data.get("reports", [])
-                summary = preview_data.get("summary", {})
-                rules = preview_data.get("rules", {})
-
             else:
-                raise RuntimeError("模型关联回写必须基于已经确认的关联预览执行。")
+                raise RuntimeError(
+                    "当前后台任务只接受模型校验；模型关联由工作区中"
+                    "已经校验并勾选的结果直接执行。"
+                )
 
             report_context = {
                 "VALIDATE": ("validation", "validation_report"),
-                "PREVIEW_ASSOCIATION": ("preview", "association_preview_report"),
             }.get(self.operation, ("result", "report"))
 
             self.progress.emit(96, "正在生成 HTML / CSV 报告……")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "distribution-model-manager"
-version = "3.6.7"
+version = "3.6.9"
 description = "Distribution G-file model validation and safe association manager"
 requires-python = ">=3.11"
 dependencies = [

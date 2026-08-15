@@ -14,7 +14,7 @@ class FeederModelModule(ModelModule):
     module_id = "FEEDER"
     display_name = "馈线模型"
     description = (
-        "馈线模型校验、关联预览及安全回写。单馈线图和组合大图统一"
+        "馈线模型校验、候选选择及安全回写。单馈线图和组合大图统一"
         "使用可信 RMU、FEEDER_ID 与 G 图连接拓扑确定 FeedLine 归属；"
         "馈线名称不参与自动关联判断。"
     )
@@ -271,7 +271,7 @@ class FeederModelModule(ModelModule):
         section; selecting both returns both to the allocation pool.
         """
         if not preview_data:
-            raise RuntimeError("没有可执行的馈线模型关联预览。")
+            raise RuntimeError("没有可执行的馈线模型校验候选结果。")
 
         current_snapshot = {
             "feeder_table_id": int(settings.get("feeder_table_id", 13500)),
@@ -281,7 +281,7 @@ class FeederModelModule(ModelModule):
         }
         if current_snapshot != preview_data.get("settings_snapshot", {}):
             raise RuntimeError(
-                "馈线模型配置在关联预览后发生变化，请重新生成预览。"
+                "馈线模型配置在模型校验后发生变化，请重新执行模型校验。"
             )
 
         if not output_g_dir:
@@ -504,15 +504,157 @@ class FeederModelModule(ModelModule):
                 f"修改FeedLine数={result['applied_count']}"
             )
 
+        # Build an operation-scoped report from the already validated
+        # topology snapshot plus the lightweight execution refresh above.
+        # Do NOT rerun the whole drawing after write-back.
+        operation_report_map = {}
+
+        def _report_key(source_file, change):
+            return (
+                str(source_file),
+                str(change.get("region_index", "") or ""),
+                str(change.get("feeder_id", "") or ""),
+            )
+
+        def _ensure_operation_report(source_file, change):
+            key = _report_key(source_file, change)
+            if key in operation_report_map:
+                return operation_report_map[key]
+
+            original = report_lookup.get(key, {}) or {}
+            report = {
+                k: v
+                for k, v in original.items()
+                if k != "feedline_rows"
+            }
+            report["report_type"] = "FEEDER"
+            report["g_file"] = str(source_file)
+            report["file_name"] = Path(source_file).name
+            report["feedline_rows"] = []
+            report["reason"] = "ASSOCIATION_EXECUTION_RESULT"
+            report["status"] = "PASS"
+            report["severity"] = "PASS"
+            operation_report_map[key] = report
+            return report
+
+        applied_lookup = {}
+        for source_file, changes in recalculated.items():
+            for change in changes:
+                applied_lookup[
+                    (
+                        str(source_file),
+                        str(change.get("xml_id", "") or ""),
+                    )
+                ] = change
+
+        for source_file, selected_changes in changes_by_file.items():
+            for selected in selected_changes or []:
+                report = _ensure_operation_report(
+                    source_file,
+                    selected,
+                )
+                applied = applied_lookup.get(
+                    (
+                        str(source_file),
+                        str(selected.get("xml_id", "") or ""),
+                    )
+                )
+                if applied is not None:
+                    row = dict(
+                        applied.get("validated_row", {}) or {}
+                    )
+                    row.update({
+                        "status": "PASS",
+                        "severity": "PASS",
+                        "reason": "ASSOCIATION_EXECUTED_SUCCESS",
+                        "model_linked": "YES",
+                        "model_link_correct": "YES",
+                        "current_keyid": applied.get(
+                            "expected_keyid",
+                            row.get("expected_keyid", ""),
+                        ),
+                        "current_device_id": applied.get(
+                            "device_id",
+                            row.get("assigned_device_id", ""),
+                        ),
+                        "current_feeder_id": applied.get(
+                            "feeder_id",
+                            row.get("current_feeder_id", ""),
+                        ),
+                        "current_table_id": section_table_id,
+                        "current_domain": section_domain,
+                        "current_section_name": applied.get(
+                            "section_name",
+                            row.get("assigned_section_name", ""),
+                        ),
+                        "current_bv_id": (
+                            applied.get("attributes", {}) or {}
+                        ).get("voltype", row.get("assigned_bv_id", "")),
+                        "association_ready": "NO",
+                        "writeback_needed": "NO",
+                        "_execution_result": "SUCCESS",
+                    })
+                else:
+                    reason = next(
+                        (
+                            why
+                            for change, why in skipped
+                            if (
+                                str(change.get("xml_id", ""))
+                                == str(selected.get("xml_id", ""))
+                                and str(
+                                    change.get("region_index", "")
+                                )
+                                == str(
+                                    selected.get("region_index", "")
+                                )
+                                and str(change.get("feeder_id", ""))
+                                == str(selected.get("feeder_id", ""))
+                            )
+                        ),
+                        "ASSOCIATION_EXECUTION_SKIPPED",
+                    )
+                    row = dict(
+                        selected.get("validated_row", {}) or {}
+                    )
+                    row.update({
+                        "status": "FAIL",
+                        "severity": "ERROR",
+                        "reason": reason,
+                        "association_ready": "NO",
+                        "writeback_needed": "NO",
+                        "_execution_result": "SKIPPED",
+                    })
+                    report["status"] = "WARN"
+                    report["severity"] = "PARTIAL"
+                    report["reason"] = (
+                        "ASSOCIATION_EXECUTION_PARTIAL_OR_SKIPPED"
+                    )
+
+                report["feedline_rows"].append(row)
+
+        applied_count = sum(
+            int(item.get("applied_count", 0))
+            for item in results
+        )
+        selected_count = sum(
+            len(v) for v in changes_by_file.values()
+        )
+
+        log_callback(
+            f"本次馈线模型关联完成：选中={selected_count}，"
+            f"成功={applied_count}，跳过={len(skipped)}。"
+        )
+
         return {
             "output_g_dir": str(output_g_dir),
             "copied_files": [str(value) for value in copied.values()],
             "results": results,
-            "selected_count": sum(
-                len(v) for v in changes_by_file.values()
-            ),
+            "selected_count": selected_count,
             "skipped_count": len(skipped),
-            "applied_count": sum(
-                int(item.get("applied_count", 0)) for item in results
+            "applied_count": applied_count,
+            "operation_reports": list(
+                operation_report_map.values()
             ),
+            "rules": dict(preview_data.get("rules", {}) or {}),
         }

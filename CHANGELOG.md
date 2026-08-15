@@ -1,6 +1,44 @@
 
 
 
+
+## [3.6.9] - 2026-08-15
+
+### Simplified model-association workflow
+- Removed the user-facing `模型关联预览` button.
+- The workspace now exposes only:
+  `模型校验` -> select validated candidates -> `执行模型关联`.
+- RMU and feeder validation each perform one analysis pass and immediately
+  populate the selectable association table from the same validated snapshot.
+- The former `preview_association()` module function is retained only as an
+  internal candidate builder; it is no longer a separate user task.
+
+### Faster selected execution
+- `执行模型关联` consumes the current validation snapshot and only the rows
+  explicitly checked by the user.
+- Source-file fingerprints and current database facts are still rechecked
+  immediately before write-back.
+- RMU execution continues to avoid a second full-drawing validation pass.
+- Feeder execution now also avoids a second full-drawing validation pass:
+  selected topology regions refresh the current `dms_section_device` pool,
+  protect unselected valid links, recalculate only selected FeedLine targets,
+  write exact selected XML IDs, and build an operation-scoped report directly.
+- Association result HTML/CSV contains only the objects selected in this
+  execution, including selected rows skipped because execution-time facts
+  changed.
+
+### UI wording
+- Startup workflow text is now:
+  `模型校验 -> 勾选可关联对象 -> 执行模型关联`.
+- Removed user-facing wording that implied a separate association-preview step.
+
+## [3.6.8] - 2026-08-15
+
+### RMU HTML report
+- Removed the `环网柜档案` section from RMU HTML only.
+- `环网柜档案.csv` remains generated independently and unchanged.
+- All other model validation, association, database, feeder and UI logic remains unchanged.
+
 ## [3.6.7] - 2026-08-13
 
 ### Startup fix

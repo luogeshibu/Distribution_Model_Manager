@@ -810,14 +810,6 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules):
         "rmu_status",
         selectable=True,
     )
-    rmu_profile_rows = flatten_rmu_profile_rows(reports)
-    rmu_profile_table = _table_html(
-        rmu_profile_rows,
-        RMU_PROFILE_FIELDS,
-        RMU_PROFILE_LABELS,
-        "rmu_status",
-        selectable=True,
-    )
     device_fields = ["file_name"] + DEVICE_FIELDS
     device_table = _table_html(device_rows, device_fields, DEVICE_LABELS, "status", selectable=True)
 
@@ -901,12 +893,6 @@ thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}
         <span>数据库当前事实无法安全确定目标，例如 RMU 0/多条、当前 RMU 内 CODE 0/多条、CODE 与图上逻辑名称不一致、目标设备不属于当前 RMU、Expected KeyID 或 BV_ID 无效。</span>
       </div>
     </div>
-  </div>
-
-  <div class="card">
-    <h2>环网柜档案</h2>
-    <p>每个环网柜仅一行，集中展示柜名、柜型、是否智能、数据库唯一性以及设备完整性。</p>
-    {rmu_profile_table}
   </div>
 
   <div class="card">
@@ -1023,7 +1009,7 @@ td.select-col{{background:inherit}}
       </div>
       <div class="status-item warn" style="background:#FFF8DE">
         <strong>黄色 WARN</strong>
-        <span>当前 FeedLine 尚未关联，但已经分配到可用数据库馈线段，可以进入关联预览。</span>
+        <span>当前 FeedLine 尚未关联，但已经分配到可用数据库馈线段，可以在工作区勾选后执行模型关联。</span>
       </div>
       <div class="status-item fail" style="background:#FFF0F0">
         <strong>红色 FAIL</strong>

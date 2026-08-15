@@ -19,7 +19,7 @@ from dmm.infrastructure.gfile.writeback import GWriteBackService
 class RmuModelModule(ModelModule):
     module_id = "RMU"
     display_name = "RMU 环网柜模型"
-    description = "RMU 环网柜模型校验、关联预览及安全回写。"
+    description = "RMU 环网柜模型校验、候选选择及安全回写。"
     SUPPORTED_OPERATIONS = ("VALIDATE", "PREVIEW_ASSOCIATION", "APPLY_ASSOCIATION")
 
     def _new_validator(self, db, settings, log_callback):
