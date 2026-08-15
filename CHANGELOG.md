@@ -2,6 +2,32 @@
 
 
 
+
+## [3.7.0] - 2026-08-15
+
+### Unified RMU summary report
+- Removed the separate `环网柜档案.csv`.
+- Merged the former RMU profile information directly into
+  `环网柜汇总.csv`.
+- The unified RMU summary now includes, in one row per RMU:
+  cabinet type, type source, Y/Q type, devref type, cross-check result,
+  SMART/SMR information, database record count, database uniqueness,
+  RMU ID, G-device count, uniquely matched device count, device completeness,
+  association status and existing validation/block information.
+- The RMU HTML `环网柜汇总` uses the same unified fields, so the CSV and
+  HTML summary represent the same RMU-level information.
+
+### UI cleanup
+- Removed the `打开环网柜档案 CSV` button.
+- Removed the `rmu_profile_csv` artifact and console-log entry.
+- RMU report export now returns only:
+  `环网柜汇总.csv` and `设备明细.csv`.
+
+### Scope
+- No RMU recognition, switch-name recognition, type recognition, SMART/SMR,
+  database matching, KeyID/BV_ID, write-back, feeder, or association logic
+  was changed.
+
 ## [3.6.9] - 2026-08-15
 
 ### Simplified model-association workflow

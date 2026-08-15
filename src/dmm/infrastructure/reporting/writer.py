@@ -128,7 +128,7 @@ RMU_FIELDS = [
     "rmu_type_consistent", "rmu_type_check_status", "rmu_type_check_reason",
     "rmu_is_smart", "rmu_smart_marker_types",
     "rmu_status", "rmu_severity", "rmu_reason",
-    "rmu_db_count", "rmu_id",
+    "rmu_db_count", "database_unique", "rmu_id",
     "device_count", "matched_device_count", "device_complete",
     "linked_correct_count", "unlinked_count",
     "linked_wrong_count", "association_eligible",
@@ -136,56 +136,6 @@ RMU_FIELDS = [
     "inventory_issues", "db_integrity_issues",
 ]
 
-
-RMU_PROFILE_FIELDS = [
-    "file_name",
-    "frame_index",
-    "frame_xml_id",
-    "rmu_name",
-    "rmu_type",
-    "rmu_type_source",
-    "rmu_type_text",
-    "rmu_type_devref",
-    "rmu_type_consistent",
-    "rmu_type_check_status",
-    "rmu_type_check_reason",
-    "rmu_is_smart",
-    "rmu_smart_marker_types",
-    "rmu_db_count",
-    "database_unique",
-    "rmu_id",
-    "device_count",
-    "matched_device_count",
-    "device_complete",
-    "rmu_status",
-    "rmu_reason",
-]
-
-RMU_PROFILE_LABELS = {
-    "file_name": "G文件",
-    "frame_index": "环网柜序号",
-    "frame_xml_id": "矩形框XML ID",
-    "rmu_name": "环网柜名称",
-    "rmu_type": "环网柜类型",
-    "rmu_type_source": "类型识别来源",
-    "rmu_type_text": "柜内Y/Q文字类型",
-    "rmu_type_devref": "devref类型",
-    "rmu_type_consistent": "类型交叉校验",
-    "rmu_type_check_status": "柜型校验状态",
-    "rmu_type_check_reason": "柜型交叉校验说明",
-    "rmu_is_smart": "是否智能",
-    "rmu_smart_marker_types": "智能标识",
-    "rmu_db_count": "数据库记录数",
-    "database_unique": "数据库是否唯一",
-    "rmu_id": "环网柜ID",
-    "device_count": "G图设备数",
-    "matched_device_count": "数据库唯一匹配设备数",
-    "device_complete": "设备是否完整",
-    "matched_device_count": "数据库唯一匹配设备数",
-    "device_complete": "环网柜设备是否完整",
-    "rmu_status": "校验状态",
-    "rmu_reason": "说明",
-}
 
 DEVICE_LABELS = {
     "file_name": "G文件",
@@ -259,8 +209,11 @@ RMU_LABELS = {
     "rmu_severity": "状态类型",
     "rmu_reason": "说明",
     "rmu_db_count": "数据库记录数",
+    "database_unique": "数据库是否唯一",
     "rmu_id": "环网柜ID",
-    "device_count": "已处理图元数",
+    "device_count": "G图设备数",
+    "matched_device_count": "数据库唯一匹配设备数",
+    "device_complete": "环网柜设备是否完整",
     "linked_correct_count": "已正确关联设备数",
     "unlinked_count": "未关联设备数",
     "linked_wrong_count": "关联错误设备数",
@@ -454,6 +407,9 @@ def flatten_rmu_rows(reports):
                 "rmu_severity": severity,
                 "rmu_reason": reason,
                 "rmu_db_count": db_count,
+                "database_unique": (
+                    "YES" if db_count == 1 else "NO"
+                ),
                 # Duplicate RMU: intentionally DO NOT list multiple IDs.
                 "rmu_id": unique_record.get("id", "") if db_count == 1 else "",
                 "device_count": len(device_rows),
@@ -493,19 +449,6 @@ def flatten_rmu_rows(reports):
         ),
     )
 
-
-
-def flatten_rmu_profile_rows(reports):
-    """Compact one-row-per-RMU inventory required for field review."""
-    rows = flatten_rmu_rows(reports)
-    result = []
-    for row in rows:
-        item = dict(row)
-        item["database_unique"] = (
-            "YES" if int(item.get("rmu_db_count") or 0) == 1 else "NO"
-        )
-        result.append(item)
-    return result
 
 
 def flatten_device_rows(reports):
@@ -704,16 +647,7 @@ def export_csv_bundle(reports, export_path):
         DEVICE_LABELS,
     )
 
-    profile_path = base.with_name(
-        base.name + "_环网柜档案.csv"
-    )
-    _write_csv(
-        profile_path,
-        flatten_rmu_profile_rows(reports),
-        RMU_PROFILE_FIELDS,
-        RMU_PROFILE_LABELS,
-    )
-    return [rmu_path, dev_path, profile_path]
+    return [rmu_path, dev_path]
 
 def _table_html(
     rows,
@@ -785,7 +719,8 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules):
         if is_operation_report
         else (
             "环网柜汇总严格按照 G 文件环网柜序号排列，"
-            "每个环网柜只展示一行。"
+            "每个环网柜只展示一行；柜型、智能标识、数据库唯一性、"
+            "设备完整性及关联状态统一汇总在本表中。"
         )
     )
     device_intro = (

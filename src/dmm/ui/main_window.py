@@ -892,7 +892,6 @@ class MainWindow(QMainWindow):
         self.open_html_btn = QPushButton("打开 HTML")
         self.open_rmu_csv_btn = QPushButton("打开环网柜 CSV")
         self.open_device_csv_btn = QPushButton("打开设备 CSV")
-        self.open_rmu_profile_csv_btn = QPushButton("打开环网柜档案 CSV")
         self.open_report_dir_btn = QPushButton("打开本次运行目录")
 
         copy_log_btn.clicked.connect(self.copy_log)
@@ -900,17 +899,12 @@ class MainWindow(QMainWindow):
         self.open_html_btn.clicked.connect(lambda: self.open_artifact("html"))
         self.open_rmu_csv_btn.clicked.connect(lambda: self.open_artifact("rmu_csv"))
         self.open_device_csv_btn.clicked.connect(lambda: self.open_artifact("device_csv"))
-        self.open_rmu_profile_csv_btn.clicked.connect(
-            lambda: self.open_artifact("rmu_profile_csv")
-        )
         self.open_report_dir_btn.clicked.connect(self.open_current_run_dir)
 
         for button in (
             self.open_html_btn,
             self.open_rmu_csv_btn,
             self.open_device_csv_btn,
-            self.open_rmu_profile_csv_btn,
-            self.open_rmu_profile_csv_btn,
             self.open_report_dir_btn,
         ):
             button.setEnabled(False)
@@ -922,7 +916,6 @@ class MainWindow(QMainWindow):
         log_actions.addWidget(self.open_html_btn)
         log_actions.addWidget(self.open_rmu_csv_btn)
         log_actions.addWidget(self.open_device_csv_btn)
-        log_actions.addWidget(self.open_rmu_profile_csv_btn)
         log_actions.addWidget(self.open_report_dir_btn)
         log_layout.addLayout(log_actions)
 
@@ -1564,13 +1557,11 @@ class MainWindow(QMainWindow):
         self.open_html_btn.setText(html_text)
         self.open_rmu_csv_btn.setText(first_csv_text)
         self.open_device_csv_btn.setText(second_csv_text)
-        self.open_rmu_profile_csv_btn.setText("打开环网柜档案 CSV")
 
         for key, button in (
             ("html", self.open_html_btn),
             ("rmu_csv", self.open_rmu_csv_btn),
             ("device_csv", self.open_device_csv_btn),
-            ("rmu_profile_csv", self.open_rmu_profile_csv_btn),
             ("run_dir", self.open_report_dir_btn),
         ):
             value = self.current_artifacts.get(key, "")
@@ -1988,10 +1979,6 @@ class MainWindow(QMainWindow):
         else:
             self.log(f"环网柜 CSV：{self.current_artifacts.get('rmu_csv', '')}")
             self.log(f"设备 CSV：{self.current_artifacts.get('device_csv', '')}")
-            self.log(
-                f"环网柜档案 CSV："
-                f"{self.current_artifacts.get('rmu_profile_csv', '')}"
-            )
 
         # 保存完整的本次 Console 日志到当前任务的实际报告目录。
         try:
@@ -2711,11 +2698,6 @@ class MainWindow(QMainWindow):
                 ),
                 "device_csv": (
                     str(csv_paths[1]) if len(csv_paths) > 1 else ""
-                ),
-                "rmu_profile_csv": (
-                    str(csv_paths[2])
-                    if module.module_id == "RMU" and len(csv_paths) > 2
-                    else ""
                 ),
                 "g_output_dir": str(output_dir),
             }

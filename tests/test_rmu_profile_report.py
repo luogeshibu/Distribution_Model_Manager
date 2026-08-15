@@ -58,12 +58,14 @@ def _reports():
     }]
 
 
-def test_rmu_csv_bundle_contains_dedicated_profile_csv(tmp_path):
+def test_rmu_csv_bundle_merges_profile_into_summary(tmp_path):
     paths = export_csv_bundle(_reports(), tmp_path / "report.csv")
-    assert len(paths) == 3
-    profile = paths[2]
-    assert profile.name.endswith("_环网柜档案.csv")
-    text = profile.read_text(encoding="utf-8-sig")
+    assert len(paths) == 2
+
+    summary = paths[0]
+    assert summary.name.endswith("_环网柜汇总.csv")
+    text = summary.read_text(encoding="utf-8-sig")
+
     assert "环网柜名称" in text
     assert "环网柜类型" in text
     assert "是否智能" in text
@@ -73,6 +75,8 @@ def test_rmu_csv_bundle_contains_dedicated_profile_csv(tmp_path):
     assert "2L1T" in text
     assert "SMART, SMR" in text
     assert "YES" in text
+
+    assert not list(tmp_path.glob("*环网柜档案.csv"))
 
 
 def test_rmu_html_contains_smart_but_not_profile_section(tmp_path):
