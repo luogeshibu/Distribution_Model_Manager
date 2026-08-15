@@ -30,21 +30,37 @@ class RmuValidator:
         db: OracleClient,
         parser: GParser,
         device_rules: Dict[str, Dict[str, Any]],
-        breaker_name_source: str = "P_NAME_STRING",
+        breaker_name_source: str = "GRAPHICAL_TEXT",
         log=None,
     ):
         self.db = db
         self.parser = parser
         self.device_rules = device_rules
-        self.breaker_name_source = breaker_name_source
+        # Field rule: switch names are always taken from visible G text.
+        # The XML p_NameString attribute is never a device-name source.
+        # Keep the constructor argument only for backward compatibility with
+        # older callers/settings, but intentionally ignore its value.
+        self.breaker_name_source = "GRAPHICAL_TEXT"
         self.log = log or (lambda msg: None)
 
-    def _resolve_rmu_name(self, parsed, frame: RmuFrame, positions: Sequence[str]):
-        all_candidates = self.parser.find_label_candidates(
-            parsed,
-            frame,
-            positions,
-        )
+    def _resolve_rmu_name(
+        self,
+        parsed,
+        frame: RmuFrame,
+        positions: Sequence[str],
+        preassigned_candidates=None,
+    ):
+        frame_key = (frame.frame.xml_index, frame.frame.xml_id)
+        if preassigned_candidates is None:
+            all_candidates = self.parser.find_label_candidates(
+                parsed,
+                frame,
+                positions,
+            )
+        else:
+            all_candidates = list(
+                preassigned_candidates.get(frame_key, [])
+            )
         frame.label_candidates = all_candidates
 
         if not all_candidates:
@@ -164,7 +180,7 @@ class RmuValidator:
             "rmu_id": rmu_id,
             "object_type": elem.tag,
             "xml_id": elem.xml_id,
-            "p_name_string": elem.p_name,
+            "logical_code": "",
             "graphical_name": "",
             "selected_name_source": "",
             "selected_device_name": "",
@@ -241,7 +257,7 @@ class RmuValidator:
         Correctable stale/wrong existing model.
 
         The current database target has already passed all hard rules:
-        unique RMU, CODE == logical p_NameString, unique device in this RMU,
+        unique RMU, CODE == logical CODE, unique device in this RMU,
         correct RMU ownership and a valid Expected KeyID.
         """
         row["status"] = "RELINK"
@@ -259,7 +275,7 @@ class RmuValidator:
         Correctable existing model that currently points to another RMU.
 
         Because the current target device in the UNIQUE expected RMU has
-        already been uniquely resolved from CODE/p_NameString, the old
+        already been uniquely resolved from CODE/图上逻辑CODE, the old
         cross-RMU KeyID can be safely replaced.
         """
         row["status"] = "RMU_RELINK"
@@ -357,7 +373,7 @@ class RmuValidator:
         """
         Hard one-to-one rule inside one G-file RMU.
 
-        - one logical p_NameString may correspond to only one G target row;
+        - one logical CODE may correspond to only one G target row;
         - one database device ID may be consumed by only one G target row;
         - missing database device is allowed to exist as a data-quality
           condition, but the corresponding G row remains FAIL and therefore
@@ -373,7 +389,7 @@ class RmuValidator:
         by_device_id = defaultdict(list)
 
         for row in rows:
-            logical_name = norm(row.get("p_name_string"))
+            logical_name = norm(row.get("logical_code"))
             if logical_name:
                 by_logical_name[logical_name].append(row)
 
@@ -390,8 +406,8 @@ class RmuValidator:
                 for row in mapped_rows
             )
             issue = (
-                "G_PNAME_NOT_ONE_TO_ONE: "
-                f"p_NameString={logical_name} 在同一环网柜内被多个G图元使用；"
+                "G_LOGICAL_CODE_NOT_ONE_TO_ONE: "
+                f"逻辑CODE={logical_name} 在同一环网柜内被多个G图元使用；"
                 f"XML_ID={xml_ids}"
             )
             rmu_result["inventory_issues"].append(issue)
@@ -436,9 +452,9 @@ class RmuValidator:
 
         Hard truth comes from the current database:
         - RMU name resolved uniquely;
-        - logical p_NameString / selected name resolved;
+        - logical CODE / selected name resolved;
         - exactly one CODE match exists inside that RMU;
-        - CODE == logical p_NameString;
+        - CODE == logical CODE;
         - matched database device belongs to the current RMU;
         - Expected KeyID is valid.
 
@@ -591,7 +607,7 @@ class RmuValidator:
                 f"旧KeyID设备所属环网柜={current_rmu_name or '-'}；"
                 f"旧combined_id={current_combined_id}；"
                 f"目标combined_id={expected_rmu_id}；"
-                "数据库当前目标设备已通过CODE/p_NameString及RMU归属校验，允许强制重新关联"
+                "数据库当前目标设备已通过CODE/图上逻辑CODE及RMU归属校验，允许强制重新关联"
             )
             return
 
@@ -676,7 +692,7 @@ class RmuValidator:
         Device policy:
         - no current KeyID -> hard FAIL, automatic association forbidden;
         - current KeyID exists -> inspect the manual link instead of discarding it;
-        - current linked CODE must equal the logical p_NameString;
+        - current linked CODE must equal the logical CODE;
         - current linked device must belong to an RMU whose NAME equals the
           current G-file RMU name;
         - a correct existing manual link is allowed to remain even though the
@@ -797,11 +813,11 @@ class RmuValidator:
 
         expected_code = (
             norm(row.get("selected_device_name"))
-            or norm(row.get("p_name_string"))
+            or norm(row.get("logical_code"))
         )
 
         if not expected_code:
-            self._set_fail(row, "P_NAME_STRING_EMPTY")
+            self._set_fail(row, "LOGICAL_CODE_EMPTY")
             return
 
         if not row.get("db_code"):
@@ -812,7 +828,7 @@ class RmuValidator:
             self._set_fail(
                 row,
                 "CURRENT_LINK_CODE_MISMATCH: "
-                f"CODE={row.get('db_code')}, PNAME={expected_code}"
+                f"CODE={row.get('db_code')}, LOGICAL_CODE={expected_code}"
             )
             return
 
@@ -990,25 +1006,20 @@ class RmuValidator:
         grounds = elements_by_tag.get("ZhaiWaiJieDiDaoZha", [])
         buses = elements_by_tag.get("BusDis", [])
 
-        graph_names = {}
-        if self.breaker_name_source == "GRAPHICAL_TEXT":
-            graph_names = self.parser.resolve_breaker_graphical_names(
-                parsed,
-                frame,
-                breakers,
-            )
+        graph_names = self.parser.resolve_breaker_graphical_names(
+            parsed,
+            frame,
+            breakers,
+        )
 
         breaker_names = {}
         for br in breakers:
-            if self.breaker_name_source == "GRAPHICAL_TEXT":
-                info = graph_names.get(br.xml_id, {})
-                breaker_names[br.xml_id] = (
-                    norm(info.get("name"))
-                    if info.get("status") == "PASS"
-                    else ""
-                )
-            else:
-                breaker_names[br.xml_id] = br.p_name
+            info = graph_names.get(br.xml_id, {})
+            breaker_names[br.xml_id] = (
+                norm(info.get("name"))
+                if info.get("status") == "PASS"
+                else ""
+            )
 
         ground_to_breaker = self.parser.pair_objects_nearest(
             grounds,
@@ -1028,31 +1039,28 @@ class RmuValidator:
 
         for elem in breakers:
             row = make_row(elem)
-            if self.breaker_name_source == "GRAPHICAL_TEXT":
-                info = graph_names.get(elem.xml_id, {})
-                selected = (
-                    norm(info.get("name"))
-                    if info.get("status") == "PASS"
-                    else ""
+            info = graph_names.get(elem.xml_id, {})
+            selected = (
+                norm(info.get("name"))
+                if info.get("status") == "PASS"
+                else ""
+            )
+            row["selected_name_source"] = "GRAPHICAL_TEXT"
+            row["graphical_name"] = selected
+            # Internal compatibility field: this is the logical name derived
+            # from visible G text, not from any raw XML naming attribute.
+            row["logical_code"] = selected
+            row["selected_device_name"] = selected
+            if not selected:
+                self._set_fail(
+                    row,
+                    info.get(
+                        "reason",
+                        "GRAPHICAL_NAME_NOT_RESOLVED",
+                    ),
                 )
-                row["selected_name_source"] = "GRAPHICAL_TEXT"
-                row["graphical_name"] = selected
-                row["p_name_string"] = selected
-                row["selected_device_name"] = selected
-                if not selected:
-                    self._set_fail(
-                        row,
-                        info.get(
-                            "reason",
-                            "GRAPHICAL_NAME_NOT_RESOLVED",
-                        ),
-                    )
-                    rmu_result["device_rows"].append(row)
-                    continue
-            else:
-                row["selected_name_source"] = "P_NAME_STRING"
-                row["p_name_string"] = elem.p_name
-                row["selected_device_name"] = elem.p_name
+                rmu_result["device_rows"].append(row)
+                continue
 
             self._inspect_current_link_without_unique_rmu(
                 row,
@@ -1074,10 +1082,9 @@ class RmuValidator:
             row["paired_breaker_name"] = breaker_name
             row["selected_device_name"] = expected_code
 
-            if self.breaker_name_source == "GRAPHICAL_TEXT":
-                row["p_name_string"] = expected_code
-            else:
-                row["p_name_string"] = elem.p_name
+            # Ground-disconnector logical name is always derived from the
+            # paired graphical breaker name: breaker + D.
+            row["logical_code"] = expected_code
 
             if not breaker_name:
                 self._set_fail(
@@ -1094,14 +1101,9 @@ class RmuValidator:
 
         for elem in buses:
             row = make_row(elem)
-            if self.breaker_name_source == "GRAPHICAL_TEXT":
-                row["selected_name_source"] = "FIXED_BUS"
-                row["p_name_string"] = "BUS"
-                row["selected_device_name"] = "BUS"
-            else:
-                row["selected_name_source"] = "P_NAME_STRING"
-                row["p_name_string"] = elem.p_name
-                row["selected_device_name"] = elem.p_name
+            row["selected_name_source"] = "FIXED_BUS"
+            row["logical_code"] = "BUS"
+            row["selected_device_name"] = "BUS"
 
             self._inspect_current_link_without_unique_rmu(
                 row,
@@ -1126,25 +1128,35 @@ class RmuValidator:
         row["selected_device_name"] = selected_name
 
         # In graphical-name mode, the visible G-file text becomes the logical
-        # p_NameString used by every downstream comparison.  The XML attribute
-        # p_NameString is intentionally ignored in this mode.
-        if self.breaker_name_source == "GRAPHICAL_TEXT":
-            effective_p_name = selected_name
-        else:
-            effective_p_name = elem.p_name
-        row["p_name_string"] = effective_p_name
+        # logical CODE used by every downstream comparison. The raw XML naming attribute is intentionally ignored.
+        logical_code = selected_name
+        row["logical_code"] = logical_code
 
         if not selected_name:
-            self._set_fail(row, "BREAKER_NAME_NOT_RESOLVED")
+            self._set_fail(
+                row,
+                "BREAKER_GRAPHICAL_NAME_NOT_RESOLVED: "
+                "未能从环网柜内图上文字唯一识别开关名称，请检查该环网柜命名方式",
+            )
             return
 
         matches = self._find_by_code(db_set["rows"], selected_name)
         row["db_match_count"] = len(matches)
         if len(matches) == 0:
-            self._set_fail(row, f"DEVICE_NOT_FOUND: CODE={selected_name}; 数据库中不存在该设备")
+            self._set_fail(
+                row,
+                f"BREAKER_GRAPHICAL_NAME_DB_CODE_NOT_FOUND: "
+                f"图上名称={selected_name}；数据库中不存在对应 CODE；"
+                "请检查该环网柜开关命名方式",
+            )
             return
         if len(matches) > 1:
-            self._set_fail(row, f"DEVICE_CODE_DUPLICATE: CODE={row.get('selected_device_name')}; 数据库中存在多条匹配设备")
+            self._set_fail(
+                row,
+                f"BREAKER_GRAPHICAL_NAME_DB_CODE_DUPLICATE: "
+                f"图上名称={row.get('selected_device_name')}；"
+                "数据库存在多条相同 CODE，请检查该环网柜命名方式或数据库设备",
+            )
             return
 
         dev = matches[0]
@@ -1154,11 +1166,11 @@ class RmuValidator:
         if not code:
             self._set_fail(row, "DB_CODE_EMPTY")
             return
-        if not effective_p_name:
-            self._set_fail(row, "P_NAME_STRING_EMPTY")
+        if not logical_code:
+            self._set_fail(row, "LOGICAL_CODE_EMPTY")
             return
-        if code != effective_p_name:
-            self._set_fail(row, f"CBREAKER_CODE_PNAME_MISMATCH (CODE={code}, PNAME={effective_p_name})")
+        if code != logical_code:
+            self._set_fail(row, f"CBREAKER_CODE_LOGICAL_MISMATCH (CODE={code}, LOGICAL_CODE={logical_code})")
             return
 
         device_id = int_or_none(dev.get("id"))
@@ -1184,14 +1196,11 @@ class RmuValidator:
         expected_code = (breaker_name + "D") if breaker_name else ""
         row["selected_device_name"] = expected_code
 
-        # When graphical-name mode is selected, the logical p_NameString of a
+        # When graphical-name mode is selected, the logical CODE of a
         # ground disconnector is derived only from its paired breaker: breaker+D.
-        # The G XML p_NameString attribute is not used for validation.
-        if self.breaker_name_source == "GRAPHICAL_TEXT":
-            effective_p_name = expected_code
-        else:
-            effective_p_name = elem.p_name
-        row["p_name_string"] = effective_p_name
+        # The raw G XML naming attribute is not used for validation.
+        logical_code = expected_code
+        row["logical_code"] = logical_code
 
         if not breaker_name:
             self._set_fail(row, "GROUND_BREAKER_PAIR_NOT_RESOLVED")
@@ -1215,11 +1224,11 @@ class RmuValidator:
         if code != expected_code:
             self._set_fail(row, f"GROUND_CODE_EXPECTED_MISMATCH (CODE={code}, EXPECTED={expected_code})")
             return
-        if not effective_p_name:
-            self._set_fail(row, "P_NAME_STRING_EMPTY")
+        if not logical_code:
+            self._set_fail(row, "LOGICAL_CODE_EMPTY")
             return
-        if code != effective_p_name:
-            self._set_fail(row, f"GROUND_CODE_PNAME_MISMATCH (CODE={code}, PNAME={effective_p_name})")
+        if code != logical_code:
+            self._set_fail(row, f"GROUND_CODE_LOGICAL_MISMATCH (CODE={code}, LOGICAL_CODE={logical_code})")
             return
 
         device_id = int_or_none(dev.get("id"))
@@ -1238,26 +1247,22 @@ class RmuValidator:
         self._evaluate_current_model(row, elem, device_id, rule, row.get("rmu_id"))
 
     def _validate_bus(self, row, elem, db_set, rule):
-        # In graphical-name mode BusDis does not read G p_NameString.  The
-        # business rule defines the logical p_NameString as the fixed value BUS.
-        if self.breaker_name_source == "GRAPHICAL_TEXT":
-            effective_p_name = "BUS"
-            row["selected_name_source"] = "FIXED_BUS"
-        else:
-            effective_p_name = elem.p_name
-            row["selected_name_source"] = "P_NAME_STRING"
+        # BusDis never reads the raw G XML naming attribute.  The
+        # business rule defines the logical CODE as the fixed value BUS.
+        logical_code = "BUS"
+        row["selected_name_source"] = "FIXED_BUS"
 
-        row["p_name_string"] = effective_p_name
-        row["selected_device_name"] = effective_p_name
+        row["logical_code"] = logical_code
+        row["selected_device_name"] = logical_code
 
-        if not effective_p_name:
-            self._set_fail(row, "P_NAME_STRING_EMPTY")
+        if not logical_code:
+            self._set_fail(row, "LOGICAL_CODE_EMPTY")
             return
 
-        matches = self._find_by_code(db_set["rows"], effective_p_name)
+        matches = self._find_by_code(db_set["rows"], logical_code)
         row["db_match_count"] = len(matches)
         if len(matches) == 0:
-            self._set_fail(row, f"DEVICE_NOT_FOUND: CODE={effective_p_name}; 数据库中不存在该设备")
+            self._set_fail(row, f"DEVICE_NOT_FOUND: CODE={logical_code}; 数据库中不存在该设备")
             return
         if len(matches) > 1:
             self._set_fail(row, f"DEVICE_CODE_DUPLICATE: CODE={row.get('selected_device_name')}; 数据库中存在多条匹配设备")
@@ -1269,8 +1274,8 @@ class RmuValidator:
         if not code:
             self._set_fail(row, "DB_CODE_EMPTY")
             return
-        if code != effective_p_name:
-            self._set_fail(row, f"BUS_CODE_PNAME_MISMATCH (CODE={code}, PNAME={effective_p_name})")
+        if code != logical_code:
+            self._set_fail(row, f"BUS_CODE_LOGICAL_MISMATCH (CODE={code}, LOGICAL_CODE={logical_code})")
             return
 
         device_id = int_or_none(dev.get("id"))
@@ -1291,6 +1296,19 @@ class RmuValidator:
     def validate_file(self, g_path: str | Path, positions: Sequence[str], progress_callback=None) -> Dict[str, Any]:
         parsed = self.parser.parse(g_path)
         frames = self.parser.find_rmu_frames(parsed)
+        preassigned_name_candidates = (
+            self.parser.assign_rmu_label_candidates_globally(
+                parsed,
+                frames,
+                positions,
+            )
+        )
+        preassigned_smart_markers = (
+            self.parser.assign_rmu_smart_markers_globally(
+                parsed,
+                frames,
+            )
+        )
 
         report = {
             "g_file": str(parsed.path),
@@ -1303,15 +1321,67 @@ class RmuValidator:
 
         for index, frame in enumerate(frames, start=1):
             if progress_callback:
-                progress_callback(index - 1, max(len(frames), 1), f"正在处理环网柜 {index}/{len(frames)}")
+                progress_callback(
+                    index - 1,
+                    max(len(frames), 1),
+                    f"正在处理环网柜 {index}/{len(frames)}",
+                )
+
+            type_info = self.parser.classify_rmu_type(parsed, frame)
+            smart_info = preassigned_smart_markers.get(
+                frame.frame.xml_id,
+                {
+                    "is_smart": False,
+                    "markers": [],
+                    "marker_types": [],
+                },
+            )
+
             self.log(
                 f"[{parsed.path.name}] 环网柜 {index}/{len(frames)}："
-                f"矩形框 XML ID={frame.frame.xml_id}"
+                f"矩形框 XML ID={frame.frame.xml_id}；"
+                f"类型={type_info.get('rmu_type', 'UNKNOWN')}；"
+                f"类型来源={type_info.get('source', 'UNRESOLVED')}；"
+                f"智能={'YES' if smart_info.get('is_smart') else 'NO'}；"
+                f"智能标识={','.join(smart_info.get('marker_types', [])) or '-'}"
             )
+            if not type_info.get("consistent", True):
+                self.log(
+                    f"  RMU类型交叉校验不一致："
+                    f"图内文字={type_info.get('text_type')}；"
+                    f"devref={type_info.get('devref_type')}；"
+                    "仍严格按柜内Y/Q文字结果。"
+                )
+
             rmu_result = {
                 "frame_index": index,
                 "frame_xml_id": frame.frame.xml_id,
                 "rmu_name": "",
+                "rmu_type": type_info.get("rmu_type", "UNKNOWN"),
+                "rmu_type_source": type_info.get("source", "UNRESOLVED"),
+                "rmu_type_text": type_info.get("text_type", "UNKNOWN"),
+                "rmu_type_devref": type_info.get("devref_type", "UNKNOWN"),
+                "rmu_type_consistent": "YES" if type_info.get("consistent") else "NO",
+                "rmu_type_check_status": (
+                    "PASS" if type_info.get("consistent") else "WARN"
+                ),
+                "rmu_type_check_reason": (
+                    ""
+                    if type_info.get("consistent")
+                    else (
+                        "RMU_TYPE_CROSS_CHECK_MISMATCH: "
+                        f"环网柜={{RMU_NAME}}；"
+                        f"柜内Y/Q文字类型={type_info.get('text_type', 'UNKNOWN')}；"
+                        f"devref类型={type_info.get('devref_type', 'UNKNOWN')}；"
+                        "最终仍采用Y/Q文字类型，请检查该环网柜的Y/Q命名方式及开关devref模板。"
+                    )
+                ),
+                "rmu_type_labels": ", ".join(type_info.get("text_labels", [])),
+                "rmu_is_smart": "YES" if smart_info.get("is_smart") else "NO",
+                "rmu_smart_marker_types": ", ".join(
+                    smart_info.get("marker_types", [])
+                ),
+                "rmu_smart_markers": smart_info.get("markers", []),
                 "rmu_status": "",
                 "rmu_severity": "",
                 "rmu_reason": "",
@@ -1332,7 +1402,12 @@ class RmuValidator:
             }
 
             try:
-                resolved = self._resolve_rmu_name(parsed, frame, positions)
+                resolved = self._resolve_rmu_name(
+                    parsed,
+                    frame,
+                    positions,
+                    preassigned_candidates=preassigned_name_candidates,
+                )
             except Exception as exc:
                 rmu_result["rmu_status"] = "FAIL"
                 rmu_result["rmu_reason"] = f"RMU_LOOKUP_ERROR: {exc}"
@@ -1353,6 +1428,17 @@ class RmuValidator:
                 display_candidate = resolved["candidate_rows"][0]
             if display_candidate:
                 rmu_result["rmu_name"] = display_candidate["name"]
+                if rmu_result.get("rmu_type_check_reason"):
+                    rmu_result["rmu_type_check_reason"] = (
+                        rmu_result["rmu_type_check_reason"].replace(
+                            "{RMU_NAME}",
+                            str(rmu_result["rmu_name"] or "-"),
+                        )
+                    )
+                    self.log(
+                        "  柜型交叉验证告警："
+                        + rmu_result["rmu_type_check_reason"]
+                    )
                 rmu_result["rmu_db_count"] = display_candidate["db_count"]
                 rmu_result["rmu_records"] = display_candidate["db_records"]
                 rmu_result["rmu_ids"] = [
@@ -1360,6 +1446,25 @@ class RmuValidator:
                     for rec in display_candidate["db_records"]
                     if int_or_none(rec.get("id")) is not None
                 ]
+
+            if (
+                rmu_result.get("rmu_type_check_reason")
+                and "{RMU_NAME}" in rmu_result["rmu_type_check_reason"]
+            ):
+                fallback_rmu_ref = (
+                    rmu_result.get("rmu_name")
+                    or f"矩形框XML={frame.frame.xml_id}"
+                )
+                rmu_result["rmu_type_check_reason"] = (
+                    rmu_result["rmu_type_check_reason"].replace(
+                        "{RMU_NAME}",
+                        str(fallback_rmu_ref),
+                    )
+                )
+                self.log(
+                    "  柜型交叉验证告警："
+                    + rmu_result["rmu_type_check_reason"]
+                )
 
             if resolved["status"] != "PASS":
                 self.log(
@@ -1472,20 +1577,21 @@ class RmuValidator:
             grounds = elements_by_tag.get("ZhaiWaiJieDiDaoZha", [])
             buses = elements_by_tag.get("BusDis", [])
 
-            graph_names = {}
-            if self.breaker_name_source == "GRAPHICAL_TEXT":
-                graph_names = self.parser.resolve_breaker_graphical_names(
-                    parsed, frame, breakers
-                )
+            graph_names = self.parser.resolve_breaker_graphical_names(
+                parsed,
+                frame,
+                breakers,
+            )
 
-            # Resolve authoritative breaker names.
+            # Visible text inside the RMU is the ONLY breaker-name source.
             breaker_names = {}
             for br in breakers:
-                if self.breaker_name_source == "GRAPHICAL_TEXT":
-                    info = graph_names.get(br.xml_id, {})
-                    breaker_names[br.xml_id] = norm(info.get("name")) if info.get("status") == "PASS" else ""
-                else:
-                    breaker_names[br.xml_id] = br.p_name
+                info = graph_names.get(br.xml_id, {})
+                breaker_names[br.xml_id] = (
+                    norm(info.get("name"))
+                    if info.get("status") == "PASS"
+                    else ""
+                )
 
             # Pair ground symbols to breakers by nearest one-to-one geometry.
             ground_to_breaker = self.parser.pair_objects_nearest(grounds, breakers)
@@ -1498,18 +1604,27 @@ class RmuValidator:
                 row = self._default_device_row(rmu_result["rmu_name"], rmu_id, elem, rule, db_set)
                 graphical_name = norm(graph_names.get(elem.xml_id, {}).get("name"))
                 selected_name = breaker_names.get(elem.xml_id, "")
-                if self.breaker_name_source == "GRAPHICAL_TEXT":
-                    info = graph_names.get(elem.xml_id, {})
-                    if info.get("status") != "PASS":
-                        row["selected_name_source"] = "GRAPHICAL_TEXT"
-                        row["graphical_name"] = graphical_name
-                        # Graphical mode never falls back to the XML p_NameString.
-                        row["p_name_string"] = ""
-                        self._set_fail(row, info.get("reason", "GRAPHICAL_NAME_NOT_RESOLVED"))
-                    else:
-                        self._validate_breaker(row, elem, db_set, rule, selected_name, graphical_name)
+                info = graph_names.get(elem.xml_id, {})
+                if info.get("status") != "PASS":
+                    row["selected_name_source"] = "GRAPHICAL_TEXT"
+                    row["graphical_name"] = graphical_name
+                    row["logical_code"] = ""
+                    self._set_fail(
+                        row,
+                        info.get(
+                            "reason",
+                            "GRAPHICAL_NAME_NOT_RESOLVED",
+                        ),
+                    )
                 else:
-                    self._validate_breaker(row, elem, db_set, rule, selected_name, graphical_name)
+                    self._validate_breaker(
+                        row,
+                        elem,
+                        db_set,
+                        rule,
+                        selected_name,
+                        graphical_name,
+                    )
                 rmu_result["device_rows"].append(row)
 
             # Ground disconnectors
@@ -1531,7 +1646,7 @@ class RmuValidator:
                 rmu_result["device_rows"].append(row)
 
             # Enforce hard one-to-one mapping after all G target rows have
-            # been resolved. This catches duplicate logical p_NameString values
+            # been resolved. This catches duplicate logical CODE values
             # or multiple G elements consuming the same database device.
             self._validate_one_to_one_device_mapping(rmu_result)
 
@@ -1636,6 +1751,13 @@ class RmuValidator:
                 rmu_result["rmu_status"] = "WARN"
                 rmu_result["rmu_severity"] = "ASSOCIATION_ACTION_REQUIRED"
                 rmu_result["rmu_reason"] = "RMU_ASSOCIATION_ACTION_REQUIRED"
+            elif rmu_result.get("rmu_type_check_status") == "WARN":
+                rmu_result["rmu_status"] = "WARN"
+                rmu_result["rmu_severity"] = "TYPE_CROSS_CHECK_WARNING"
+                rmu_result["rmu_reason"] = (
+                    rmu_result.get("rmu_type_check_reason")
+                    or "RMU_TYPE_CROSS_CHECK_MISMATCH"
+                )
             else:
                 rmu_result["rmu_status"] = "PASS"
                 rmu_result["rmu_severity"] = "PASS"

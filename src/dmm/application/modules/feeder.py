@@ -5,7 +5,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from dmm.application.modules.base import ModelModule
-from dmm.domain.feeder.validator import FeederValidator
+from dmm.domain.feeder.validator import FeederValidator, natural_section_key, int_or_none
 from dmm.domain.gfile.parser import GParser
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 
@@ -14,9 +14,9 @@ class FeederModelModule(ModelModule):
     module_id = "FEEDER"
     display_name = "馈线模型"
     description = (
-        "馈线模型校验、关联预览及安全回写。当前版本处理单馈线 G 图，"
-        "以 <Bus> 附近最近有效文字识别馈线，失败时回退到文件名；"
-        "馈线段图元使用 <FeedLine>。"
+        "馈线模型校验、关联预览及安全回写。单馈线图和组合大图统一"
+        "使用可信 RMU、FEEDER_ID 与 G 图连接拓扑确定 FeedLine 归属；"
+        "馈线名称不参与自动关联判断。"
     )
     SUPPORTED_OPERATIONS = (
         "VALIDATE",
@@ -80,20 +80,38 @@ class FeederModelModule(ModelModule):
             log_callback(
                 f"[{idx}/{len(files)}] 正在处理馈线模型：{g_file.name}"
             )
-            report = validator.validate_file(g_file)
-            reports.append(report)
-
-            feeder_text = (
-                f"馈线={report.get('feeder_name') or report.get('feeder_hint') or '-'}；"
-                f"FeedLine={len(report.get('feedline_rows', []))}；"
-                f"状态={report.get('status')}"
+            file_report = validator.validate_file(
+                g_file,
+                drawing_mode=settings.get("drawing_mode", "AUTO"),
             )
-            log_callback(f"[{g_file.name}] {feeder_text}")
+            region_reports = file_report.get("feeder_regions") or [file_report]
+            reports.extend(region_reports)
 
-            for key in aggregate:
-                aggregate[key] += int(
-                    report.get("summary", {}).get(key, 0)
+            drawing_type = file_report.get(
+                "drawing_type",
+                region_reports[0].get("drawing_type", "SINGLE_FEEDER")
+                if region_reports else "SINGLE_FEEDER",
+            )
+            log_callback(
+                f"[{g_file.name}] 图纸类型={drawing_type}；"
+                f"识别馈线区域={len(region_reports)}"
+            )
+            aggregate["feeder_files"] += 1
+            for report in region_reports:
+                feeder_text = (
+                    f"区域{report.get('region_index', 1)} "
+                    f"馈线={report.get('feeder_name') or report.get('feeder_hint') or '-'}；"
+                    f"FeedLine={len(report.get('feedline_rows', []))}；"
+                    f"状态={report.get('status')}"
                 )
+                log_callback(f"[{g_file.name}] {feeder_text}")
+
+                for key in aggregate:
+                    if key == "feeder_files":
+                        continue
+                    aggregate[key] += int(
+                        report.get("summary", {}).get(key, 0)
+                    )
 
             if progress_callback:
                 percent = 5 + int((idx / total) * 90)
@@ -173,9 +191,11 @@ class FeederModelModule(ModelModule):
                     "attributes": attrs,
                     "feeder_name": report.get("feeder_name", ""),
                     "feeder_id": report.get("feeder_id", ""),
+                    "region_index": report.get("region_index", ""),
                     "section_name": row.get("assigned_section_name", ""),
                     "device_id": row.get("assigned_device_id", ""),
                     "expected_keyid": row.get("expected_keyid", ""),
+                    "validated_row": dict(row),
                 }
                 changes_by_file[g_file].append(change)
 
@@ -225,6 +245,9 @@ class FeederModelModule(ModelModule):
                 "section_domain": int(
                     settings.get("section_domain", 1)
                 ),
+                "drawing_mode": str(
+                    settings.get("drawing_mode", "AUTO")
+                ).upper(),
             },
         }
 
@@ -237,24 +260,26 @@ class FeederModelModule(ModelModule):
         log_callback,
         output_g_dir=None,
     ):
+        """Apply ONLY the FeedLine rows selected by the user.
+
+        The validated topology/FEEDER_ID decision remains the authority. At
+        execution time the selected region's current dms_section_device pool
+        is refreshed and allocations are recalculated against UNSELECTED
+        existing links. This is especially important for duplicate links:
+        selecting one duplicate means the unselected duplicate keeps the old
+        section and the selected FeedLine is moved to another available
+        section; selecting both returns both to the allocation pool.
+        """
         if not preview_data:
             raise RuntimeError("没有可执行的馈线模型关联预览。")
 
         current_snapshot = {
-            "feeder_table_id": int(
-                settings.get("feeder_table_id", 13500)
-            ),
-            "section_table_id": int(
-                settings.get("section_table_id", 13503)
-            ),
-            "section_domain": int(
-                settings.get("section_domain", 1)
-            ),
+            "feeder_table_id": int(settings.get("feeder_table_id", 13500)),
+            "section_table_id": int(settings.get("section_table_id", 13503)),
+            "section_domain": int(settings.get("section_domain", 1)),
+            "drawing_mode": str(settings.get("drawing_mode", "AUTO")).upper(),
         }
-        if current_snapshot != preview_data.get(
-            "settings_snapshot",
-            {},
-        ):
+        if current_snapshot != preview_data.get("settings_snapshot", {}):
             raise RuntimeError(
                 "馈线模型配置在关联预览后发生变化，请重新生成预览。"
             )
@@ -262,13 +287,14 @@ class FeederModelModule(ModelModule):
         if not output_g_dir:
             raise RuntimeError("未提供安全 G 文件输出目录。")
 
+        changes_by_file = preview_data.get("changes_by_file", {}) or {}
+        if not changes_by_file:
+            raise RuntimeError("当前没有勾选任何可关联馈线段。")
+
         output_g_dir = Path(output_g_dir)
         output_g_dir.mkdir(parents=True, exist_ok=True)
 
-        for g_file, fingerprint in preview_data.get(
-            "file_fingerprints",
-            {},
-        ).items():
+        for g_file, fingerprint in preview_data.get("file_fingerprints", {}).items():
             path = Path(g_file)
             stat = path.stat()
             if (
@@ -276,54 +302,201 @@ class FeederModelModule(ModelModule):
                 or stat.st_mtime_ns != fingerprint.get("mtime_ns")
             ):
                 raise RuntimeError(
-                    "G 文件在关联预览后发生变化，禁止处理，请重新生成预览："
+                    "G 文件在模型校验后发生变化，禁止使用旧结果，请重新校验："
                     f"{g_file}"
                 )
 
-        changes_by_file = preview_data.get("changes_by_file", {})
+        validator = self._validator(db, settings, log_callback)
+        section_table_id = int(settings.get("section_table_id", 13503))
+        section_domain = int(settings.get("section_domain", 1))
 
+        # Report lookup lets execution see ALL rows in a topology region while
+        # changing only the selected XML IDs.
+        report_lookup = {}
+        for report in preview_data.get("reports", []) or []:
+            key = (
+                str(report.get("g_file", "") or ""),
+                str(report.get("region_index", "") or ""),
+                str(report.get("feeder_id", "") or ""),
+            )
+            report_lookup[key] = report
+
+        recalculated = defaultdict(list)
+        skipped = []
+
+        for source_file, changes in changes_by_file.items():
+            grouped = defaultdict(list)
+            for change in changes or []:
+                grouped[(
+                    str(change.get("region_index", "") or ""),
+                    str(change.get("feeder_id", "") or ""),
+                )].append(dict(change))
+
+            for (region_index, feeder_id_text), selected_changes in grouped.items():
+                feeder_id = int_or_none(feeder_id_text)
+                if feeder_id is None:
+                    for change in selected_changes:
+                        skipped.append((change, "EXEC_FEEDER_ID_INVALID"))
+                    continue
+
+                report = report_lookup.get((
+                    str(source_file), region_index, feeder_id_text,
+                ))
+                if report is None:
+                    for change in selected_changes:
+                        skipped.append((change, "EXEC_TOPOLOGY_REGION_NOT_FOUND"))
+                    continue
+
+                # The full validation already blocked inconsistent trusted-RMU
+                # regions. Never bypass that decision during selective write.
+                if not report.get("association_eligible"):
+                    for change in selected_changes:
+                        skipped.append((
+                            change,
+                            f"EXEC_REGION_BLOCKED: {report.get('reason', '')}",
+                        ))
+                    continue
+
+                _, section_rows = db.get_sections_by_feeder_id(
+                    feeder_id,
+                    table_id=section_table_id,
+                )
+                section_rows = sorted(section_rows, key=natural_section_key)
+
+                selected_xml_ids = {
+                    str(change.get("xml_id", "") or "")
+                    for change in selected_changes
+                }
+
+                # Reserve database records currently used by UNSELECTED G rows
+                # when their current KeyID still resolves to this feeder/table/
+                # domain. This gives duplicate selection intuitive semantics.
+                protected_ids = set()
+                for row in report.get("feedline_rows", []) or []:
+                    if str(row.get("xml_id", "") or "") in selected_xml_ids:
+                        continue
+                    did = int_or_none(row.get("current_device_id"))
+                    owner = int_or_none(row.get("current_feeder_id"))
+                    tab = int_or_none(row.get("current_table_id"))
+                    dom = int_or_none(row.get("current_domain"))
+                    if (
+                        did is not None
+                        and owner == feeder_id
+                        and tab == section_table_id
+                        and dom == section_domain
+                    ):
+                        protected_ids.add(did)
+
+                available = [
+                    section for section in section_rows
+                    if int_or_none(section.get("id")) not in protected_ids
+                ]
+                available.sort(key=natural_section_key)
+
+                selected_changes.sort(
+                    key=lambda change: int(
+                        (change.get("validated_row", {}) or {}).get(
+                            "order_index", 10**9
+                        )
+                    )
+                )
+
+                log_callback(
+                    f"馈线区域{region_index}：FEEDER_ID={feeder_id}；"
+                    f"勾选FeedLine={len(selected_changes)}；"
+                    f"未选中已占用数据库段={len(protected_ids)}；"
+                    f"当前可分配数据库段={len(available)}"
+                )
+
+                for pos, change in enumerate(selected_changes):
+                    if pos >= len(available):
+                        skipped.append((
+                            change,
+                            "EXEC_SECTION_NOT_AVAILABLE: 当前数据库剩余馈线段不足",
+                        ))
+                        continue
+
+                    section = available[pos]
+                    device_id = int_or_none(section.get("id"))
+                    if device_id is None:
+                        skipped.append((change, "EXEC_SECTION_DEVICE_ID_INVALID"))
+                        continue
+
+                    expected_keyid, verified_ok, _ = (
+                        validator._verify_expected_keyid(device_id)
+                    )
+                    bv_id = str(section.get("bv_id", "") or "").strip()
+                    if not bv_id:
+                        skipped.append((change, "EXEC_BV_ID_EMPTY"))
+                        continue
+                    if not verified_ok:
+                        skipped.append((change, "EXEC_EXPECTED_KEYID_VERIFY_FAILED"))
+                        continue
+
+                    row = dict(change.get("validated_row", {}) or {})
+                    row.update({
+                        "assigned_device_id": device_id,
+                        "assigned_section_name": str(section.get("name", "") or "").strip(),
+                        "assigned_bv_id": bv_id,
+                        "expected_keyid": expected_keyid,
+                        "expected_keyid_verified": "YES",
+                        "association_ready": "YES",
+                        "writeback_needed": "YES",
+                    })
+                    refreshed = dict(change)
+                    refreshed["device_id"] = device_id
+                    refreshed["section_name"] = row["assigned_section_name"]
+                    refreshed["expected_keyid"] = expected_keyid
+                    refreshed["validated_row"] = row
+                    refreshed["attributes"] = self._attributes_for_row(row)
+                    recalculated[str(source_file)].append(refreshed)
+
+        for change, reason in skipped:
+            log_callback(
+                f"跳过 FeedLine XML={change.get('xml_id')}: {reason}"
+            )
+
+        if not recalculated:
+            raise RuntimeError(
+                "所有勾选馈线段在执行时均被阻断，没有可安全写回的对象。"
+            )
+
+        # Copy only source files that contain selected executable changes.
+        source_map = {
+            str(Path(source).resolve()): Path(source)
+            for source in files
+        }
         copied = {}
-        for source in files:
-            source = Path(source)
+        for source_file in recalculated:
+            source = source_map.get(
+                str(Path(source_file).resolve()),
+                Path(source_file),
+            )
             target = output_g_dir / source.name
-
             if target.exists():
                 idx = 2
                 while True:
-                    candidate = output_g_dir / (
-                        f"{source.stem}_{idx}{source.suffix}"
-                    )
+                    candidate = output_g_dir / f"{source.stem}_{idx}{source.suffix}"
                     if not candidate.exists():
                         target = candidate
                         break
                     idx += 1
-
             shutil.copy2(source, target)
             copied[str(source.resolve())] = target
-            log_callback(
-                f"安全复制 G 文件：{source} -> {target}"
-            )
+            log_callback(f"安全复制 G 文件：{source} -> {target}")
 
         service = GWriteBackService(log=log_callback)
         results = []
-
-        for source_file, changes in changes_by_file.items():
-            source_path = Path(source_file)
-            target = copied.get(str(source_path.resolve()))
+        for source_file, changes in recalculated.items():
+            target = copied.get(str(Path(source_file).resolve()))
             if target is None:
-                raise RuntimeError(
-                    f"无法定位 G 文件安全副本：{source_file}"
-                )
-
-            if not changes:
-                continue
-
+                raise RuntimeError(f"无法定位 G 文件安全副本：{source_file}")
             result = service.apply_attribute_changes(
                 target,
                 changes,
                 create_backup=False,
             )
-            result["source_g_file"] = str(source_path)
+            result["source_g_file"] = str(source_file)
             result["output_g_file"] = str(target)
             results.append(result)
             log_callback(
@@ -333,13 +506,13 @@ class FeederModelModule(ModelModule):
 
         return {
             "output_g_dir": str(output_g_dir),
-            "copied_files": [
-                str(value)
-                for value in copied.values()
-            ],
+            "copied_files": [str(value) for value in copied.values()],
             "results": results,
+            "selected_count": sum(
+                len(v) for v in changes_by_file.values()
+            ),
+            "skipped_count": len(skipped),
             "applied_count": sum(
-                int(item.get("applied_count", 0))
-                for item in results
+                int(item.get("applied_count", 0)) for item in results
             ),
         }

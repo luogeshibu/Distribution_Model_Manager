@@ -19,7 +19,7 @@ def _validator():
         "CBreakerDis": {
             "table_id": 13502,
             "domain": 40,
-            "match_mode": "CODE_EQUALS_PNAME",
+            "match_mode": "CODE_EQUALS_LOGICAL_CODE",
         }
     }
     return RmuValidator(

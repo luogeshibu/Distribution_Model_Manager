@@ -1,4 +1,401 @@
-# 配网模型管理工具 v3.4.0
+# 配网模型管理工具 v3.6.7
+
+## RMU 设备业务字段
+
+业务层不再使用 `p_name_string` 这个容易误解的名字。
+
+统一使用：
+
+```text
+logical_code
+```
+
+含义是：
+
+```text
+图上规则得到的逻辑设备 CODE
+→ 与数据库 CODE 比较
+```
+
+具体为：
+
+```text
+CBreakerDis
+logical_code = 柜内图上开关文字
+
+ZhaiWaiJieDiDaoZha
+logical_code = 配对开关 logical_code + D
+
+BusDis
+logical_code = BUS
+```
+
+原始 XML 的 `p_NameString` 仅保留为解析层的
+`xml_p_name_string`，不参与 RMU 设备命名和数据库匹配。
+
+## 启动修复
+
+v3.6.6 帮助页残留的 `policy_text / policy_layout / policy`
+变量已清理，恢复为正确的 `naming_text / naming_layout / naming`。
+
+
+## RMU 设备名称
+
+开关名称来源已固定，不再提供模式选择：
+
+```text
+CBreakerDis
+→ 只读取 RMU 内图上文字
+
+ZhaiWaiJieDiDaoZha
+→ 配对开关图上名称 + D
+
+BusDis
+→ BUS
+```
+
+XML `p_NameString` 不再作为设备名称来源。
+
+图上逻辑名称必须与当前唯一 RMU 下数据库 CODE 唯一对应。识别失败、
+CODE 不存在或 CODE 重复时，报告会指出具体 RMU 并提示检查命名方式。
+
+## RMU 柜型
+
+```text
+规则一：
+Y1/Y2/Y3/... → L
+Q1/Q2/Q3/... → T
+文字优先
+
+规则二：
+完全没有 Y/Q 时才使用 devref
+Load_Breaker    → L
+Circuit_Breaker → T
+```
+
+两套结果同时存在时必须交叉验证。冲突时仍采用文字结果，但输出 WARN，
+并在 HTML / CSV / Console 中指出具体 RMU、文字柜型、devref 柜型及检查建议。
+
+
+## RMU 柜型 / 智能属性
+
+RMU 结构仍必须同时包含：
+
+```text
+CBreakerDis
+ZhaiWaiJieDiDaoZha
+BusDis
+```
+
+柜型规则：
+
+```text
+第一优先：柜内 Text/DText
+Y1,Y2,Y3,... -> L
+Q1,Q2,Q3,... -> T
+
+只要识别到任何 Y/Q：
+直接采用文字统计结果。
+
+只有完全没有 Y/Q：
+才使用 CBreakerDis.devref：
+Load_Breaker    -> L
+Circuit_Breaker -> T
+```
+
+智能 RMU：
+
+```text
+全局搜索 SMART / SMR
+→ 每个标识归属最近 RMU
+→ SMART 或 SMR 任意一个存在 = 智能
+→ SMART + SMR 同时存在仍是一个智能 RMU
+```
+
+报告新增：
+
+```text
+HTML：环网柜档案
+CSV：report_环网柜档案.csv
+```
+
+该 CSV 每个 RMU 一行，集中展示柜名、柜型、智能属性、数据库唯一性和设备完整性。
+
+
+## v3.6.4 RMU 类型识别
+
+RMU 结构识别完成后，程序自动识别柜型，例如 `2L1T`、`3L1T`。
+
+优先级：
+
+```text
+柜内 Text / DText：Y1/Y2/... -> L，Q1/Q2/... -> T
+    ↓ 优先
+CBreakerDis.devref：Load_Breaker -> L，Circuit_Breaker -> T
+```
+
+当柜内 Y/Q 文字能够完整覆盖该 RMU 内全部 CBreakerDis 时，以文字结果为准；文字不完整时使用 devref 兜底。两种来源都完整但结果不一致时，仍采用文字结果，并在报告中显示交叉校验不一致。该差异只用于图元模板检查，不阻断原有 RMU 关联逻辑。
+
+RMU 汇总报告增加：环网柜类型、类型识别来源、图内文字类型、devref 类型、类型交叉校验。馈线模块中的可信 RMU 日志也显示柜型。
+
+
+## 本版重点
+
+RMU 识别增加结构硬条件：只有矩形框内同时至少包含 `CBreakerDis + ZhaiWaiJieDiDaoZha + BusDis` 三类图元时，才进入环网柜名称识别。RMU 模块和馈线模块共用该条件。
+
+馈线模型校验完成后，工作区新增与 RMU 类似的“可关联馈线段选择”表格。`UNLINKED / RELINK / DUPLICATE_LINK` 中数据库事实唯一正确的 FeedLine 可以逐条勾选，执行模型关联只修改勾选的 XML 图元。
+
+重复关联处理：如果多个 FeedLine 当前使用同一个 `dms_section_device`，所有重复行都显示 `DUPLICATE_LINK`。只勾选其中一条时，未勾选行保留当前数据库段，勾选行从其它剩余馈线段重新分配；多条同时勾选时一起重新参与分配。
+
+馈线 HTML 的“馈线汇总”和“馈线段明细”继续保留人工标记复选框，勾选后整行持续高亮，不参与实际模型关联。
+
+
+## 馈线模型：可信 RMU + FEEDER_ID + 连接拓扑
+
+馈线模块不再使用图上馈线名称作为自动关联依据。
+
+统一处理链路：
+
+```text
+G 图
+→ 找 RMU
+→ 过滤可信 RMU
+→ 读取 dms_combined_device.FEEDER_ID
+→ 建立 FeedLine / ConnectLine / Bus 连接拓扑
+→ 检查同一连接区域所有可信 RMU 的 FEEDER_ID 是否一致
+→ 查询该 FEEDER_ID 下真实 dms_section_device
+→ 保留正确已有模型
+→ 未关联/错误旧模型使用剩余 SECxxx 从小到大分配
+→ Workspace 安全副本回写
+```
+
+### 可信 RMU
+
+只有同时满足以下条件才参与馈线判断：
+
+```text
+RMU 名称数据库唯一 1 条
+FEEDER_ID 有效
+至少存在一个可验证的当前 KeyID
+当前用于证明的模型属于该 RMU
+表号/域号正确
+不存在已关联到其它 RMU 的错误模型证据
+```
+
+未关联、数据库 0/多条、FEEDER_ID 为空或当前模型错误的 RMU 只报告，不作为参考。
+
+### FEEDER_ID 冲突
+
+同一个 G 拓扑连接区域：
+
+```text
+可信 RMU feeder_id 集合 = 空
+→ BLOCKED / NO_TRUSTED_RMU_REFERENCE
+
+可信 RMU feeder_id 集合 = {A}
+→ 确认该区域 FEEDER_ID=A
+→ 可以自动校验/关联 FeedLine
+
+可信 RMU feeder_id 集合 = {A,B,...}
+→ BLOCKED / FEEDER_RMU_CONFLICT
+→ 禁止自动关联
+→ 必须人工确认
+```
+
+程序不会使用多数投票。
+
+### FeedLine 分配
+
+确认 FEEDER_ID 后：
+
+```text
+SELECT ...
+FROM dms_section_device
+WHERE feeder_id = :feeder_id
+```
+
+使用数据库实际存在的 SEC 记录，不自行补号。
+
+正确已有模型先占用；剩余数据库记录按 SEC 自然数字顺序排序；未关联和 RELINK FeedLine 按 G 图从上到下、同高度从左到右排序，然后依次匹配。
+
+### HTML 人工标记
+
+馈线汇总和馈线段明细最左侧都有复选框。勾选后整行保持蓝色高亮，方便横向滚动查看长报告。复选框只用于报告阅读，不影响程序模型关联。
+
+
+## 多馈线组合图：先识别 G 标题，再用数据库确认
+
+v3.5.0 的组合图识别存在一个关键顺序问题：
+
+```text
+旧逻辑：
+G Text
+→ 必须先在数据库唯一匹配
+→ 才能成为馈线空间锚点
+```
+
+当数据库名称查询暂时无法唯一返回时，即使 G 图上已经清楚写着：
+
+```text
+ABH-03
+ABH-04
+ABH-05
+...
+```
+
+也会错误退化成：
+
+```text
+AMBIGUOUS
+识别馈线区域 = 1
+```
+
+v3.5.1 改为：
+
+```text
+G XML Text
+→ 提取馈线标题
+→ 建立空间锚点/区域
+→ 再逐区域用数据库确认
+→ 必要时再用已有 FeedLine KeyID 反向确认
+```
+
+因此数据库查询问题不会再把 G 图上已经存在的馈线标题“抹掉”。
+
+### 组合图标题识别
+
+支持：
+
+```text
+ABH-03
+AJWD-07
+ABH_08
+BAY NO + ABH-17
+```
+
+其中真正的独立标题优先级最高。
+
+### 已有关联 FeedLine 的第二确认
+
+当标题直接查数据库失败时：
+
+```text
+FeedLine.keyid
+→ device id
+→ dms_section_device.feeder_id
+→ dms_feeder_device
+→ 当前区域馈线
+```
+
+只有一个区域内已有关联设备全部指向同一馈线时才允许作为确认依据。
+
+### 你这张 ABH 大图
+
+对本次上传的 G XML 直接解析得到：
+
+```text
+FeedLine = 398
+原始馈线标题候选 = 50
+清洗后的独立顶部锚点 = 47
+```
+
+程序能直接读到：
+
+```text
+ABH-03
+ABH-04
+ABH-05
+...
+ABH-48
+ABH-49
+```
+
+另外源 G 图自身存在：
+
+```text
+ABH-26
+ABH-26
+```
+
+两个独立的干净标题，而没有独立 `ABH-27` 标题。
+
+程序不会擅自把第二个 ABH-26 猜成 ABH-27，而是把这两个区域标记为重复馈线标题，等待图纸/数据库事实确认。
+
+
+## 馈线模型支持单馈线与多馈线组合大图
+
+馈线模块现在支持：
+
+```text
+自动识别（推荐）
+单馈线图
+多馈线组合图
+```
+
+### 自动识别
+
+程序读取 G XML，不使用 OCR：
+
+```text
+Bus + Text/DText + FeedLine
+        ↓
+识别 Bus 上方馈线名称候选
+        ↓
+Oracle dms_feeder_device 唯一确认
+        ↓
+1 个有效锚点 → SINGLE_FEEDER
+2 个及以上有效锚点 → MULTI_FEEDER_COMPOSITE
+```
+
+组合大图中，长 Bus 下面可能对应多个被拼接的馈线，因此不再只取一个“最近 Text”。程序会保留长 Bus 上方范围内的多个馈线标题，并增加顶部标题带扫描，避免馈线标题刚好位于两个 Bus 段的拼接间隔时漏识别。
+
+### 多馈线区域
+
+已经数据库确认的馈线名称按 X 坐标排序：
+
+```text
+ABH-03        ABH-04        ABH-05
+   |             |             |
+   +------边界---+------边界---+
+```
+
+相邻馈线锚点中点作为区域边界，每个 `<FeedLine>` 先归属到一个馈线区域，然后在该区域内部独立执行原有数据库校验和关联逻辑。
+
+### 已关联 FeedLine
+
+```text
+FeedLine 当前 KeyID
+→ 反解 dms_section_device
+→ 检查 13503 / Domain=1
+→ 检查数据库 section.feeder_id
+→ 必须属于当前图形馈线区域
+```
+
+因此组合图中已经关联的 FeedLine 也可以判断“数据库实际所属馈线”和“图上空间所属馈线”是否一致。
+
+### 未关联 FeedLine
+
+每个馈线区域独立执行：
+
+```text
+排除已被当前正确模型占用的 section
+→ 数据库 section 按 SEC001/SEC002/... 自然排序
+→ G FeedLine 从上到下、从左到右排序
+→ 一一匹配
+→ Expected KeyID
+→ BV_ID -> voltype
+```
+
+### 连接关系
+
+程序增加 FeedLine/ConnectLine 端点连接分量检查，但连接关系只作为一致性辅助，不会自动把两个空间馈线区域合并。原因是后续大图可能存在跨馈线连接线，空间拼接区域仍是主边界。
+
+### 安全策略
+
+同一数据库馈线如果在组合图中出现两个独立空间锚点，不会把同一套数据库馈线段重复分配两次，而是阻断这两个区域并要求检查图纸。
+
+如果手工选择“多馈线组合图”，但程序无法唯一确认至少两个馈线名称，图纸状态为 `AMBIGUOUS`，禁止自动关联。
+
 
 ## RMU 执行模型关联改为“只处理勾选设备”
 

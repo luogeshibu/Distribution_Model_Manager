@@ -70,7 +70,8 @@ class GObject:
         return self.attrs.get("id", "")
 
     @property
-    def p_name(self) -> str:
+    def xml_p_name_string(self) -> str:
+        """Raw XML p_NameString value; parsing/debug only, never business naming."""
         return (self.attrs.get("p_NameString") or "").strip()
 
     @property
@@ -223,90 +224,347 @@ class GParser:
         final.sort(key=lambda o: (o.box.y, o.box.x, o.xml_index))
         return [RmuFrame(frame=o) for o in final]
 
-    def _text_value(self, obj: GObject) -> str:
-        return (obj.attrs.get("ts") or obj.attrs.get("p_NameString") or "").strip()
+    def classify_rmu_type(self, parsed: ParsedG, frame: RmuFrame | GObject) -> Dict[str, object]:
+        """Identify RMU cabinet type such as 2L1T.
 
-    def find_label_candidates(
+        Priority rule requested by the field workflow:
+        1. Read Text/DText labels INSIDE the RMU rectangle.  Y1/Y2/Y3...
+           represent load-breaker ways (L); Q1/Q2... represent circuit-breaker
+           ways (T).
+        2. Use CBreakerDis.devref as an independent/fallback source:
+           * contains Load_Breaker    -> L
+           * contains Circuit_Breaker -> T
+        3. If the text rule completely accounts for all CBreakerDis objects,
+           text is authoritative.  Otherwise devref is the fallback.
+        4. When both complete sources are available but disagree, keep the
+           text-derived type (higher priority) and expose the mismatch in the
+           returned diagnostics.  Type mismatch is descriptive only; it does
+           not change RMU database association eligibility.
+        """
+        rect = frame.frame if isinstance(frame, RmuFrame) else frame
+        inside = [
+            obj for obj in parsed.objects
+            if rect.box.center_contains(obj.box, tolerance=1.0)
+        ]
+
+        text_labels = []
+        for obj in inside:
+            if obj.tag.lower() not in {"text", "dtext"}:
+                continue
+            value = self._text_value(obj).strip().upper()
+            if re.fullmatch(r"Y\d+", value) or re.fullmatch(r"Q\d+", value):
+                text_labels.append(value)
+
+        # Avoid duplicate rendering labels for one way, and keep a stable
+        # engineering order: Y1,Y2,Y3... then Q1,Q2,Q3...
+        text_labels = list(dict.fromkeys(text_labels))
+        def _way_key(value: str):
+            prefix = 0 if value.startswith("Y") else 1
+            try:
+                number = int(value[1:])
+            except Exception:
+                number = 10**9
+            return (prefix, number)
+        text_labels = sorted(text_labels, key=_way_key)
+        text_l = sum(1 for value in text_labels if value.startswith("Y"))
+        text_t = sum(1 for value in text_labels if value.startswith("Q"))
+
+        breakers = [obj for obj in inside if obj.tag == "CBreakerDis"]
+        devref_l = 0
+        devref_t = 0
+        devref_unknown = []
+        for obj in breakers:
+            devref = (obj.attrs.get("devref") or "").strip()
+            lower = devref.lower()
+            if "load_breaker" in lower:
+                devref_l += 1
+            elif "circuit_breaker" in lower:
+                devref_t += 1
+            else:
+                devref_unknown.append({
+                    "xml_id": obj.xml_id,
+                    "xml_p_name_string": obj.xml_p_name_string,
+                    "devref": devref,
+                })
+
+        breaker_count = len(breakers)
+        text_found = (text_l + text_t) > 0
+        text_complete = text_found and (text_l + text_t) == breaker_count
+        devref_found = (devref_l + devref_t) > 0
+        devref_complete = devref_found and (devref_l + devref_t) == breaker_count
+
+        def fmt(l_count: int, t_count: int) -> str:
+            parts = []
+            if l_count:
+                parts.append(f"{l_count}L")
+            if t_count:
+                parts.append(f"{t_count}T")
+            return "".join(parts) or "UNKNOWN"
+
+        text_type = fmt(text_l, text_t)
+        devref_type = fmt(devref_l, devref_t)
+
+        # Field rule: Y1/Y2/Y3... and Q1/Q2/Q3... text is ALWAYS
+        # authoritative once any such labels are recognized inside the RMU.
+        # devref is used only when no Y/Q label can be recognized at all.
+        if text_found:
+            rmu_type = text_type
+            source = "TEXT_YQ"
+        elif devref_found:
+            rmu_type = devref_type
+            source = "DEVREF"
+        else:
+            rmu_type = "UNKNOWN"
+            source = "UNRESOLVED"
+
+        consistent = (
+            not (text_found and devref_found)
+            or text_type == devref_type
+        )
+        return {
+            "rmu_type": rmu_type,
+            "source": source,
+            "text_type": text_type,
+            "devref_type": devref_type,
+            "consistent": consistent,
+            "text_labels": text_labels,
+            "text_l_count": text_l,
+            "text_t_count": text_t,
+            "devref_l_count": devref_l,
+            "devref_t_count": devref_t,
+            "breaker_count": breaker_count,
+            "unknown_devrefs": devref_unknown,
+        }
+
+
+    def assign_rmu_smart_markers_globally(
         self,
         parsed: ParsedG,
-        frame: RmuFrame,
+        frames: Sequence[RmuFrame],
+    ) -> Dict[str, Dict[str, object]]:
+        """
+        Globally assign SMART / SMR markers to the nearest RMU.
+
+        Rules:
+        - SMART and SMR are searched across the entire G drawing.
+        - SMART is commonly inside the cabinet; SMR can be outside.
+        - There is no maximum-distance cutoff.
+        - Each SMART/SMR text belongs to exactly one nearest RMU.
+        - One or both marker types mean the RMU is smart.
+        """
+        result: Dict[str, Dict[str, object]] = {
+            frame.frame.xml_id: {
+                "is_smart": False,
+                "markers": [],
+                "marker_types": [],
+            }
+            for frame in frames
+        }
+        if not frames:
+            return result
+
+        def distance_to_rect(px: float, py: float, box: Box) -> float:
+            if px < box.left:
+                dx = box.left - px
+            elif px > box.right:
+                dx = px - box.right
+            else:
+                dx = 0.0
+
+            if py < box.top:
+                dy = box.top - py
+            elif py > box.bottom:
+                dy = py - box.bottom
+            else:
+                dy = 0.0
+
+            return (dx * dx + dy * dy) ** 0.5
+
+        markers = []
+        for obj in parsed.objects:
+            if obj.tag.lower() not in {"text", "dtext"}:
+                continue
+            value = self._text_value(obj).strip().upper()
+            if value not in {"SMART", "SMR"}:
+                continue
+            markers.append((obj, value))
+
+        for obj, marker_type in markers:
+            ranked = []
+            for order, frame in enumerate(frames):
+                box = frame.frame.box
+                distance = distance_to_rect(obj.box.cx, obj.box.cy, box)
+                center_distance = (
+                    (obj.box.cx - box.cx) ** 2
+                    + (obj.box.cy - box.cy) ** 2
+                ) ** 0.5
+                ranked.append(
+                    (
+                        distance,
+                        center_distance,
+                        order,
+                        frame,
+                    )
+                )
+
+            _, distance_center, _, owner = min(
+                ranked,
+                key=lambda item: (item[0], item[1], item[2]),
+            )
+            owner_box = owner.frame.box
+            edge_distance = distance_to_rect(
+                obj.box.cx,
+                obj.box.cy,
+                owner_box,
+            )
+            item = {
+                "type": marker_type,
+                "text": marker_type,
+                "xml_id": obj.xml_id,
+                "x": obj.box.x,
+                "y": obj.box.y,
+                "distance": round(edge_distance, 3),
+                "inside": owner_box.center_contains(
+                    obj.box,
+                    tolerance=1.0,
+                ),
+                "center_distance": round(distance_center, 3),
+            }
+            bucket = result[owner.frame.xml_id]
+            bucket["markers"].append(item)
+
+        for bucket in result.values():
+            marker_types = sorted(
+                {item["type"] for item in bucket["markers"]},
+                key=lambda value: (0 if value == "SMART" else 1, value),
+            )
+            bucket["marker_types"] = marker_types
+            bucket["is_smart"] = bool(marker_types)
+            bucket["markers"].sort(
+                key=lambda item: (
+                    item["distance"],
+                    item["center_distance"],
+                    item["xml_id"],
+                )
+            )
+
+        return result
+
+
+    def _text_value(self, obj: GObject) -> str:
+        return (obj.attrs.get("ts") or "").strip()
+
+    def _valid_rmu_name_text(self, obj: GObject) -> bool:
+        """Basic RMU cabinet-name candidate filter from GFileStudio.
+
+        Color is not a hard condition.  Exclude short labels that clearly
+        belong to RMU internal devices/status, while allowing numeric,
+        alphanumeric, hyphen, underscore and dot engineering cabinet names.
+        """
+        value = self._text_value(obj)
+        if not value or not any(ch.isalnum() for ch in value):
+            return False
+        if not self.label_re.fullmatch(value):
+            return False
+        compact = re.sub(r"\s+", "", value).upper()
+        if re.fullmatch(r"Y\d+", compact) or re.fullmatch(r"Q\d+", compact):
+            return False
+        if compact in {"SMART", "SMR", "G", "I"}:
+            return False
+        return True
+
+    def assign_rmu_label_candidates_globally(
+        self,
+        parsed: ParsedG,
+        frames: Sequence[RmuFrame],
         positions: Sequence[str],
-    ) -> List[LabelCandidate]:
+    ) -> Dict[tuple[int, str], List[LabelCandidate]]:
+        """Globally assign RMU name Text/DText objects to RMU frames.
+
+        Business rules:
+        1. ONLY user-selected directions participate.
+        2. Search the entire G drawing in those directions. There is NO
+           cabinet-name maximum-distance cut-off.
+        3. Every Text/DText has at most one RMU owner. Ownership goes to the
+           nearest geometrically compatible RMU across the whole drawing.
+        4. A text near a corner may match multiple selected directions for one
+           RMU; only that RMU's best direction is retained.
+        5. Color never affects ownership. Green is used later by the validator
+           only when one RMU owns multiple candidate names.
+
+        This mirrors the supplied GFileStudio global RMU-name assignment model,
+        while extending the selected-direction search to true global distance
+        as requested for merged/large drawings.
         """
-        Find RMU-name candidates owned by the current RMU frame.
+        normalized_positions = tuple(
+            str(position).strip().lower()
+            for position in positions
+            if str(position).strip().lower()
+            in {"top", "bottom", "left", "right"}
+        )
+        if not normalized_positions:
+            return {}
 
-        Critical ownership rule
-        -----------------------
-        A Text object may geometrically appear above/below more than one RMU
-        when rows of RMUs are vertically aligned.  The same text must NEVER be
-        reused by multiple RMU frames.
-
-        Therefore each candidate Text is first assigned to the nearest
-        compatible RMU frame in the selected direction.  Only the owner frame
-        can use that Text.
-
-        Color rule
-        ----------
-        - Green Text is allowed to be far from its owner RMU.
-        - Non-green Text keeps the legacy max-distance guard.
-        - After ownership filtering, green candidates are preferred by the
-          validator; if this RMU owns no green candidate, the nearest ordinary
-          label can be used.
-
-        This fixes the case where one green "15953" above frame 2000120 was
-        incorrectly reused by lower frame 2000155, whose own nearest label is
-        "8723".
-        """
-        result: List[LabelCandidate] = []
-        current_box = frame.frame.box
         tol = self.overlap_tolerance
-        maxd = self.max_distance
 
-        # All valid RMU frames are needed to decide ownership of a Text.
-        all_frames = self.find_rmu_frames(parsed)
-
-        def relation(r: Box, b: Box, direction: str, is_green: bool):
-            direction = direction.lower()
+        def relation(r: Box, b: Box, direction: str):
             score = None
             gap = None
+            axis_offset = None
 
             if direction == "top":
-                ok_axis = r.left - tol <= b.cx <= r.right + tol
                 gap = r.top - b.bottom
-                if ok_axis and gap >= -tol and (is_green or gap <= maxd):
-                    score = abs(gap) + abs(b.cx - r.cx) * 0.08
+                axis_offset = abs(b.cx - r.cx)
+                if (
+                    r.left - tol <= b.cx <= r.right + tol
+                    and b.cy < r.top
+                    and gap >= -tol
+                ):
+                    score = max(0.0, gap) + axis_offset * 0.08
 
             elif direction == "bottom":
-                ok_axis = r.left - tol <= b.cx <= r.right + tol
                 gap = b.top - r.bottom
-                if ok_axis and gap >= -tol and (is_green or gap <= maxd):
-                    score = abs(gap) + abs(b.cx - r.cx) * 0.08
+                axis_offset = abs(b.cx - r.cx)
+                if (
+                    r.left - tol <= b.cx <= r.right + tol
+                    and b.cy > r.bottom
+                    and gap >= -tol
+                ):
+                    score = max(0.0, gap) + axis_offset * 0.08
 
             elif direction == "left":
-                ok_axis = r.top - tol <= b.cy <= r.bottom + tol
                 gap = r.left - b.right
-                if ok_axis and gap >= -tol and (is_green or gap <= maxd):
-                    score = abs(gap) + abs(b.cy - r.cy) * 0.08
+                axis_offset = abs(b.cy - r.cy)
+                if (
+                    r.top - tol <= b.cy <= r.bottom + tol
+                    and b.cx < r.left
+                    and gap >= -tol
+                ):
+                    score = max(0.0, gap) + axis_offset * 0.08
 
             elif direction == "right":
-                ok_axis = r.top - tol <= b.cy <= r.bottom + tol
                 gap = b.left - r.right
-                if ok_axis and gap >= -tol and (is_green or gap <= maxd):
-                    score = abs(gap) + abs(b.cy - r.cy) * 0.08
+                axis_offset = abs(b.cy - r.cy)
+                if (
+                    r.top - tol <= b.cy <= r.bottom + tol
+                    and b.cx > r.right
+                    and gap >= -tol
+                ):
+                    score = max(0.0, gap) + axis_offset * 0.08
 
-            return score, gap
+            return score, gap, axis_offset
 
-        current_frame_key = (
-            frame.frame.xml_index,
-            frame.frame.xml_id,
-        )
+        result: Dict[tuple[int, str], List[LabelCandidate]] = {
+            (frame.frame.xml_index, frame.frame.xml_id): []
+            for frame in frames
+        }
 
         for obj in parsed.objects:
             if obj.tag.lower() not in ("text", "dtext"):
                 continue
 
             text = self._text_value(obj)
-            if not text or not self.label_re.fullmatch(text):
+            if not self._valid_rmu_name_text(obj):
                 continue
 
             b = obj.box
@@ -318,82 +576,95 @@ class GParser:
             is_green = _is_green_text(obj)
             color = _text_primary_color(obj)
 
-            for direction in positions:
-                direction = direction.lower()
-
-                current_score, current_gap = relation(
-                    current_box,
-                    b,
-                    direction,
-                    is_green,
-                )
-                if current_score is None:
-                    continue
-
-                # Determine the ONE nearest RMU that owns this text for the
-                # current direction.
-                owners = []
-                for candidate_frame in all_frames:
-                    score, gap = relation(
-                        candidate_frame.frame.box,
+            # Keep one best selected direction PER RMU for this text.
+            per_frame = []
+            for frame in frames:
+                best = None
+                for direction_index, direction in enumerate(normalized_positions):
+                    score, gap, axis_offset = relation(
+                        frame.frame.box,
                         b,
                         direction,
-                        is_green,
                     )
                     if score is None:
                         continue
-
-                    owners.append(
-                        (
-                            score,
-                            abs(gap or 0.0),
-                            candidate_frame.frame.xml_index,
-                            candidate_frame.frame.xml_id,
-                        )
+                    rank = (
+                        score,
+                        abs(float(gap or 0.0)),
+                        float(axis_offset or 0.0),
+                        direction_index,
                     )
-
-                if not owners:
-                    continue
-
-                owner = min(owners)
-                owner_key = (owner[2], owner[3])
-
-                if owner_key != current_frame_key:
-                    # This text belongs to another, nearer RMU frame.
-                    continue
-
-                result.append(
-                    LabelCandidate(
-                        text=text,
-                        direction=direction,
-                        score=current_score,
-                        obj=obj,
-                        is_green=is_green,
-                        color=color,
-                        gap=float(current_gap or 0.0),
+                    candidate = (
+                        rank,
+                        frame,
+                        direction,
+                        float(score),
+                        float(gap or 0.0),
                     )
-                )
+                    if best is None or rank < best[0]:
+                        best = candidate
+                if best is not None:
+                    per_frame.append(best)
 
-        uniq = {}
-        for c in result:
-            key = (
-                c.text,
-                c.direction,
-                c.obj.xml_id,
-                c.obj.xml_index,
+            if not per_frame:
+                continue
+
+            # Global one-owner rule: each text belongs to ONE nearest RMU.
+            owner = min(
+                per_frame,
+                key=lambda item: (
+                    item[0],
+                    item[1].frame.xml_index,
+                    item[1].frame.xml_id,
+                ),
             )
-            if key not in uniq or c.score < uniq[key].score:
-                uniq[key] = c
+            _rank, owner_frame, direction, score, gap = owner
+            owner_key = (
+                owner_frame.frame.xml_index,
+                owner_frame.frame.xml_id,
+            )
+            result.setdefault(owner_key, []).append(
+                LabelCandidate(
+                    text=text,
+                    direction=direction,
+                    score=score,
+                    obj=obj,
+                    is_green=is_green,
+                    color=color,
+                    gap=gap,
+                )
+            )
 
-        return sorted(
-            uniq.values(),
-            key=lambda c: (
-                0 if c.is_green else 1,
-                c.score,
-                c.text,
-                c.direction,
-            ),
+        for candidates in result.values():
+            candidates.sort(
+                key=lambda c: (
+                    c.score,
+                    c.obj.xml_index,
+                    c.text,
+                    c.direction,
+                )
+            )
+        return result
+
+    def find_label_candidates(
+        self,
+        parsed: ParsedG,
+        frame: RmuFrame,
+        positions: Sequence[str],
+    ) -> List[LabelCandidate]:
+        """Return globally-owned RMU name candidates for one frame.
+
+        Bulk callers should use :meth:`assign_rmu_label_candidates_globally`
+        once and reuse its result.
+        """
+        all_frames = self.find_rmu_frames(parsed)
+        assigned = self.assign_rmu_label_candidates_globally(
+            parsed,
+            all_frames,
+            positions,
         )
+        key = (frame.frame.xml_index, frame.frame.xml_id)
+        return list(assigned.get(key, []))
 
     def find_target_objects_in_frame(
         self,

@@ -198,23 +198,40 @@ class OracleClient:
             return row
         return None
 
-    def get_feeder_info(self, feeder_id: Any) -> Optional[Dict[str, Any]]:
+    def get_feeder_info(
+        self,
+        feeder_id: Any,
+        table_id: int = 13500,
+    ) -> Optional[Dict[str, Any]]:
         """
-        Resolve dms_combined_device.FEEDER_ID through table 13500.
+        Resolve one feeder master record by numeric feeder ID.
 
-        FEEDER_ID is a numeric foreign-key value in Oracle.  DBI may render a
-        human-readable value, but normal SQL returns the real numeric ID, so
-        the application resolves the referenced dms_feeder_device row itself.
+        Return the same station+feeder display_name used by
+        find_feeders_by_name_hint(), so an existing FeedLine KeyID can be used
+        to confirm a G title such as ABH-03 against JED NTH ABH 03.
         """
         if feeder_id in (None, ""):
             return None
 
         table_name = self.get_table_name(int(table_id))
+        station_table = self.get_table_name(405)
         rows = self._query(
             f"""
-            SELECT id, code, name, st_id, graph_name
-            FROM {table_name}
-            WHERE id = :feeder_id
+            SELECT
+                f.id,
+                f.code,
+                f.name,
+                f.st_id,
+                f.graph_name,
+                s.name AS station_name,
+                TRIM(
+                    NVL(s.name, '') || ' ' ||
+                    NVL(f.name, '')
+                ) AS display_name
+            FROM {table_name} f
+            LEFT JOIN {station_table} s
+              ON s.id = f.st_id
+            WHERE f.id = :feeder_id
             """,
             {"feeder_id": int(feeder_id)},
         )
@@ -223,8 +240,10 @@ class OracleClient:
             return None
 
         row = dict(rows[0])
-        row["_table_id"] = 13500
+        row["_table_id"] = int(table_id)
         row["_table_name"] = table_name
+        if not str(row.get("display_name") or "").strip():
+            row["display_name"] = str(row.get("name") or "").strip()
         return row
 
     def get_station_info(self, station_id: Any) -> Optional[Dict[str, Any]]:

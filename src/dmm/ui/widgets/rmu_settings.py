@@ -79,8 +79,8 @@ class RmuSettingsWidget(QWidget):
 
         info = QLabel(
             "RMU 环网柜通过 G 文件结构自动识别。开关设备名称可选择使用 "
-            "p_NameString，或使用环网柜内部、紧邻 CBreakerDis 的图上文字。"
-            "选择图上文字时，后续校验不再读取三类设备 XML 的 p_NameString："
+            "环网柜内部、紧邻 CBreakerDis 的图上文字。"
+            "设备命名规则固定使用图上文字，不再读取三类设备 XML 的 p_NameString："
             "CBreakerDis 使用图上名称，接地刀闸使用开关名+D，BusDis 固定使用 BUS。"
         )
         info.setWordWrap(True)
@@ -114,18 +114,18 @@ class RmuSettingsWidget(QWidget):
             self.pos_checks[pos] = cb
 
         rg.addWidget(QLabel("开关名称来源"), 3, 0)
-        self.breaker_source = NoWheelComboBox()
-        self.breaker_source.addItem("使用 p_NameString", "P_NAME_STRING")
-        self.breaker_source.addItem("使用环网柜内图上文字", "GRAPHICAL_TEXT")
-        saved_source = config.get("breaker_name_source", "P_NAME_STRING")
-        index = self.breaker_source.findData(saved_source)
-        self.breaker_source.setCurrentIndex(index if index >= 0 else 0)
-        rg.addWidget(self.breaker_source, 3, 1)
+        fixed_source = QLabel("环网柜内图上文字（固定）")
+        fixed_source.setStyleSheet(
+            "font-weight:700;color:#006B52;"
+            "background:#EAF8F2;border:1px solid #B9DACD;"
+            "border-radius:6px;padding:7px 9px;"
+        )
+        rg.addWidget(fixed_source, 3, 1)
 
         note = QLabel(
-            "图上文字模式使用框内文字与 CBreakerDis 的最近唯一空间关系；"
-            "无法唯一确定时直接报错。该模式下 CBreakerDis 的逻辑 p_NameString=图上名称，"
-            "接地刀闸=开关名+D，BusDis=BUS。"
+            "开关名称不再读取 XML p_NameString。CBreakerDis 仅使用环网柜内"
+            "图上文字；接地刀闸逻辑名称=配对开关名+D；BusDis 固定为 BUS。"
+            "图上名称无法唯一识别，或与数据库 CODE 校验失败时，会明确告警对应环网柜。"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#60756d;")
@@ -184,7 +184,6 @@ class RmuSettingsWidget(QWidget):
             self.domain_spins[tag].setValue(int(rule["domain"]))
         for pos, value in DEFAULT_NAME_POSITIONS.items():
             self.pos_checks[pos].setChecked(bool(value))
-        self.breaker_source.setCurrentIndex(0)
 
     def collect_settings(self):
         positions = {
@@ -215,7 +214,7 @@ class RmuSettingsWidget(QWidget):
 
         return {
             "rmu_name_positions": positions,
-            "breaker_name_source": self.breaker_source.currentData(),
+            "breaker_name_source": "GRAPHICAL_TEXT",
             "device_rules": saved_rules,
             "_runtime_rules": runtime_rules,
         }

@@ -97,7 +97,7 @@ def test_apply_association_writes_only_selected_xml_and_reports_only_selected(
                         "rmu_id": 9001,
                         "object_type": "CBreakerDis",
                         "xml_id": "117000001",
-                        "p_name_string": "Y1",
+                        "logical_code": "Y1",
                         "selected_device_name": "Y1",
                         "db_code": "Y1",
                         "db_device_id": 6000,
@@ -226,7 +226,7 @@ def test_execution_skips_selected_device_if_database_becomes_ambiguous(
                     "rmu_name": "29802",
                     "object_type": "CBreakerDis",
                     "xml_id": "117000001",
-                    "p_name_string": "Y1",
+                    "logical_code": "Y1",
                 },
             }]
         },

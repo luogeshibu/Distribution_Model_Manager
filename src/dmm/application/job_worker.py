@@ -119,6 +119,11 @@ class JobWorker(QThread):
                 "html": str(html_path),
                 "rmu_csv": str(csv_paths[0]) if len(csv_paths) > 0 else "",
                 "device_csv": str(csv_paths[1]) if len(csv_paths) > 1 else "",
+                "rmu_profile_csv": (
+                    str(csv_paths[2])
+                    if self.module.module_id == "RMU" and len(csv_paths) > 2
+                    else ""
+                ),
                 "g_output_dir": str(self.run_dir / "g_output"),
             }
 

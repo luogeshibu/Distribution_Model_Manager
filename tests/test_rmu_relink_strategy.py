@@ -252,7 +252,7 @@ def test_rmu_html_has_row_selection_and_new_status_legend(tmp_path):
                 "rmu_id": 500,
                 "object_type": "CBreakerDis",
                 "xml_id": "117000001",
-                "p_name_string": "Y1",
+                "logical_code": "Y1",
                 "db_match_count": 1,
                 "db_device_id": 2000,
                 "db_code": "Y1",

@@ -783,21 +783,22 @@ class MainWindow(QMainWindow):
         selection_layout.setContentsMargins(12, 16, 12, 12)
         selection_layout.setSpacing(8)
 
-        selection_tip = QLabel(
+        self.association_selection_tip = QLabel(
             "模型校验完成后，这里展示 G 文件设备明细。"
             "只有数据库当前事实已经唯一确定、并且需要关联或重新关联的设备"
             "才允许勾选。PASS / FAIL / BLOCKED 行不会被误关联。"
             "执行模型关联时只处理你勾选的设备。"
         )
-        selection_tip.setWordWrap(True)
-        selection_tip.setStyleSheet(
+        self.association_selection_tip.setWordWrap(True)
+        self.association_selection_tip.setStyleSheet(
             "color:#315B4F; background:#F3F8F6; "
             "border:1px solid #D0E2DA; border-radius:6px; padding:7px 9px;"
         )
-        selection_layout.addWidget(selection_tip)
+        selection_layout.addWidget(self.association_selection_tip)
 
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("环网柜名称筛选"))
+        self.association_filter_label = QLabel("环网柜名称筛选")
+        filter_row.addWidget(self.association_filter_label)
         self.rmu_filter_edit = QLineEdit()
         self.rmu_filter_edit.setPlaceholderText(
             "输入环网柜名称快速筛选，例如：17613 / RMU-42646"
@@ -839,7 +840,7 @@ class MainWindow(QMainWindow):
             "环网柜序号",
             "环网柜名称",
             "G图元类型",
-            "p_NameString / 逻辑名称",
+            "逻辑设备名称（图上规则）",
             "数据库CODE",
             "状态",
             "当前关联",
@@ -891,6 +892,7 @@ class MainWindow(QMainWindow):
         self.open_html_btn = QPushButton("打开 HTML")
         self.open_rmu_csv_btn = QPushButton("打开环网柜 CSV")
         self.open_device_csv_btn = QPushButton("打开设备 CSV")
+        self.open_rmu_profile_csv_btn = QPushButton("打开环网柜档案 CSV")
         self.open_report_dir_btn = QPushButton("打开本次运行目录")
 
         copy_log_btn.clicked.connect(self.copy_log)
@@ -898,12 +900,17 @@ class MainWindow(QMainWindow):
         self.open_html_btn.clicked.connect(lambda: self.open_artifact("html"))
         self.open_rmu_csv_btn.clicked.connect(lambda: self.open_artifact("rmu_csv"))
         self.open_device_csv_btn.clicked.connect(lambda: self.open_artifact("device_csv"))
+        self.open_rmu_profile_csv_btn.clicked.connect(
+            lambda: self.open_artifact("rmu_profile_csv")
+        )
         self.open_report_dir_btn.clicked.connect(self.open_current_run_dir)
 
         for button in (
             self.open_html_btn,
             self.open_rmu_csv_btn,
             self.open_device_csv_btn,
+            self.open_rmu_profile_csv_btn,
+            self.open_rmu_profile_csv_btn,
             self.open_report_dir_btn,
         ):
             button.setEnabled(False)
@@ -915,6 +922,7 @@ class MainWindow(QMainWindow):
         log_actions.addWidget(self.open_html_btn)
         log_actions.addWidget(self.open_rmu_csv_btn)
         log_actions.addWidget(self.open_device_csv_btn)
+        log_actions.addWidget(self.open_rmu_profile_csv_btn)
         log_actions.addWidget(self.open_report_dir_btn)
         log_layout.addLayout(log_actions)
 
@@ -1050,25 +1058,31 @@ class MainWindow(QMainWindow):
             return """
             <h2>馈线模型帮助</h2>
 
-            <h3>1. 馈线识别规则</h3>
-            <p>当前版本按单馈线 G 图处理。</p>
+            <h3>1. 馈线归属：RMU 拓扑规则</h3>
+            <p><b>核心原则：</b>馈线模型不再通过馈线名称判断归属，而是先利用已经能够可靠确认的 RMU 作为锚点，从 RMU 的数据库 FEEDER_ID 反推出当前连接区域所属馈线，再处理该区域内的 FeedLine。</p>
             <ol>
-              <li>优先扫描 G 文件中的 <b>&lt;Bus&gt;</b> 元素。</li>
-              <li>在 Bus 周围寻找距离最近的有效工程文字，例如 <b>AJWD-07</b>。</li>
-              <li>如果 Bus 周围无法可靠识别馈线名称，再从 G 文件名中提取类似 AJWD-07 / ABN-02 的馈线标识。</li>
-              <li>名称比较时统一忽略横线、下划线和空格并转为大写。例如 AJWD-07 → AJWD07。</li>
-              <li>数据库可读馈线名称由程序内部自动组合并匹配；馈线主表不作为用户配置项。</li>
+              <li>单馈线图和组合大图使用完全相同的算法，不再依赖 ABH-03 / AJWD-07 等馈线文字。</li>
+              <li>程序先解析 G 图中的 RMU、FeedLine、ConnectLine、Bus 及主要开关图元，建立连接拓扑区域。</li>
+              <li><b>RMU 结构硬条件：</b>候选矩形框内部必须同时至少存在 1 个 CBreakerDis、1 个 ZhaiWaiJieDiDaoZha、1 个 BusDis，缺少任意一类都不识别为环网柜。</li>
+              <li>馈线模块复用 RMU 模块同一套柜型识别：柜内 Y1/Y2/Y3/Y4… 每个计 1 个 L，Q1/Q2/Q3/Q4… 每个计 1 个 T；<b>只要识别到任何 Y/Q 文字，就绝对以文字结果为准</b>。只有完全识别不到 Y/Q 时才使用 devref 中 Load_Breaker / Circuit_Breaker 兜底。</li>
+              <li>SMART / SMR 在整张 G 图全局识别，并分别归属最近的 RMU；任意一个标识命中即为智能环网柜，SMART 与 SMR 同时命中仍记为一个“智能环网柜”。馈线可信 RMU 日志同时显示柜型和智能属性。</li>
+              <li>RMU 柜名与 RMU 模块使用完全相同的识别结果：严格只看用户勾选方向，在整张 G 图全局寻找 Text / DText；每个文字只归属最近一个 RMU，不再使用旧的 120 坐标单位距离上限。</li>
+              <li>只有数据库名称唯一、存在 FEEDER_ID、并且已有模型 KeyID 能正确证明其设备属于当前 RMU 的环网柜，才属于<b>可信环网柜参考</b>。</li>
+              <li>未关联 RMU、数据库0/多条、FEEDER_ID 为空或已有错误模型的 RMU 只在报告中告警，不参与馈线归属判断。</li>
+              <li>同一连接区域中，所有可信 RMU 的 FEEDER_ID 必须完全一致。</li>
+              <li>没有可信 RMU：<b>NO_TRUSTED_RMU_REFERENCE</b>，禁止自动关联。</li>
+              <li>出现两个及以上不同 FEEDER_ID：<b>FEEDER_RMU_CONFLICT</b>，整个区域阻断，必须人工确认。</li>
             </ol>
 
             <h3>2. FeedLine 关联规则</h3>
             <ul>
-              <li>G 馈线段图元类型：<b>&lt;FeedLine&gt;</b>。</li>
-              <li>馈线段数据库表默认：<b>13503 / dms_section_device</b>，Domain 默认：<b>1</b>。</li>
-              <li>已有关联时：反解当前 KeyID，检查表号、域号以及实际数据库馈线段是否属于当前识别馈线；正确则保留，不重复写回。</li>
-              <li>未关联时：先排除已经被现有正确模型占用的数据库馈线段。</li>
-              <li>剩余数据库馈线段按照 SEC001、SEC002、SEC003… 自然顺序排列。</li>
-              <li>G 中未关联 FeedLine 按照<b>从上到下、从左到右</b>排序，并依次匹配剩余数据库馈线段。</li>
-              <li>已经关联错误的 KeyID 不自动覆盖，只在报告中报错。</li>
+              <li>连接区域唯一确认 FEEDER_ID 后，直接查询该 FEEDER_ID 下真实存在的 <b>dms_section_device</b>；数据库事实唯一、正确时，允许修复 G 文件中的旧关联错误。</li>
+              <li>馈线段数据库表：<b>13503 / dms_section_device</b>，Domain：<b>1</b>。</li>
+              <li>已有正确模型先占用数据库馈线段，保持不变。</li>
+              <li>未关联、旧关联属于其它 feeder、设备已重建导致 ID/KeyID 变化、表号/域号错误等情况，只要当前数据库目标能够唯一确定，都进入可关联/RELINK 候选，而不是直接 FAIL。</li>
+              <li>同一个 dms_section_device 被多个 FeedLine 重复使用时，所有重复行统一标记 <b>DUPLICATE_LINK</b> 并允许勾选修复；只勾选其中一条时，未勾选行保留原数据库段，勾选行改分配到其它剩余段；多条一起勾选时一起重新参与排序分配。</li>
+              <li>未关联和需要 RELINK 的 FeedLine 按<b>从上到下、同高度从左到右</b>排序。</li>
+              <li>剩余数据库馈线段按 SEC001、SEC002… 的实际自然顺序从小到大分配；不会自行生成数据库不存在的 SEC 编号。</li>
             </ul>
 
             <h3>3. FeedLine 安全回写</h3>
@@ -1081,8 +1095,9 @@ class MainWindow(QMainWindow):
             </pre>
             <p>原始 G 文件永不修改，只修改 Workspace 中的安全副本。</p>
 
-            <h3>4. 报告</h3>
-            <p>馈线模块独立生成【馈线汇总】和【馈线段明细】HTML / CSV。</p>
+            <h3>4. 工作区选择与报告</h3>
+            <p>模型校验完成后，工作区会出现“可关联馈线段选择”表格，可逐条勾选 UNLINKED / RELINK / DUPLICATE_LINK FeedLine；执行关联时只处理勾选行。</p>
+            <p>馈线汇总会展示可信/忽略 RMU、FEEDER_ID 一致性和阻断原因；馈线段明细展示当前/目标模型。HTML 两张表都带复选框，勾选后整行持续高亮，仅用于人工标记，不参与程序关联逻辑。</p>
             """
 
         return """
@@ -1090,37 +1105,50 @@ class MainWindow(QMainWindow):
 
         <h3>1. 环网柜识别</h3>
         <ul>
-          <li>通过矩形框和 RMU 内三类目标设备图元识别环网柜。</li>
-          <li>环网柜名称按照当前页面勾选的方向读取：上方 / 下方 / 左侧 / 右侧。</li>
-          <li>同一方向只有一个候选名称时直接取最近名称，不判断颜色；只有多个候选名称时才优先使用绿色文字消歧。</li>
+          <li><b>结构硬条件：</b>矩形框内必须同时包含 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元（每类至少 1 个），缺少任意一类不识别为 RMU。</li>
+          <li><b>RMU 类型识别：</b>首先读取矩形框内部 Text / DText。Y1/Y2/Y3/Y4… 每个计为 1 个 L，Q1/Q2/Q3/Q4… 每个计为 1 个 T，例如 Y1、Y2、Q1 → <b>2L1T</b>。编号按自然递增顺序展示。</li>
+          <li><b>文字是绝对第一优先级：</b>只要柜内识别到至少一个 Y* 或 Q*，最终柜型就使用柜内文字统计结果；不会因为文字数量与 CBreakerDis 数量不一致而改用 devref。</li>
+          <li>只有柜内<b>完全识别不到任何 Y/Q 文字</b>时，才使用 CBreakerDis.devref 兜底：包含 <b>Load_Breaker</b> 计 L，包含 <b>Circuit_Breaker</b> 计 T。若两套信息都存在，devref 仅用于交叉检查，不覆盖文字结果。</li>
+          <li>如果文字类型与 devref 类型不一致，报告中显示“类型交叉校验=NO”，但不改变 RMU 数据库关联资格，供人工检查图元模板。</li>
+          <li><b>智能环网柜识别：</b>在整张 G 图全局寻找 Text / DText 中精确的 SMART 和 SMR，并把每个标识唯一归属给距离最近的 RMU。SMART 通常在柜内、SMR 可以在柜外，因此不设置最大距离限制。</li>
+          <li>一个 RMU 只要命中 SMART 或 SMR 任意一种就标记“是否智能=YES”；若 SMART 和 SMR 都归属于同一个柜，仍然只表示该柜为智能环网柜，并在“智能标识”中记录 <b>SMART, SMR</b>。</li>
+          <li>环网柜名称严格只按照当前页面勾选的方向读取：上方 / 下方 / 左侧 / 右侧；未勾选方向绝不参与。</li>
+          <li>在所选方向对整张 G 图执行全局搜索，不再使用旧的 120 坐标单位柜名距离上限；较远的普通文字和绿色文字都可参与。</li>
+          <li>每个 Text / DText 全局只归属距离最近的一个环网柜，避免同一名称被相邻环网柜重复使用。</li>
+          <li>一个环网柜只有一个候选名称时直接使用，不判断颜色；拥有多个候选名称时才优先使用最近的绿色文字消歧，否则取最近候选。</li>
           <li>名称始终按照字符串处理，支持数字、字母、横线、下划线等常见工程名称。</li>
         </ul>
 
-        <h3>2. 设备名称规则</h3>
-        <p><b>使用 p_NameString：</b></p>
+        <h3>2. 设备名称规则（固定）</h3>
         <ul>
-          <li>CBreakerDis：使用自身 p_NameString。</li>
-          <li>ZhaiWaiJieDiDaoZha：与 CBreakerDis 空间配对，目标 CODE=开关名+D，并要求 p_NameString 与 CODE 一致。</li>
-          <li>BusDis：使用自身 p_NameString。</li>
+          <li><b>CBreakerDis：</b>只使用环网柜内部、与开关图元空间对应的图上文字作为设备名称。XML <code>p_NameString</code> 完全不参与设备命名。</li>
+          <li><b>ZhaiWaiJieDiDaoZha：</b>与 CBreakerDis 做最近唯一空间配对，逻辑设备名称=配对开关图上名称+D。</li>
+          <li><b>BusDis：</b>逻辑设备名称固定为 <b>BUS</b>。</li>
+          <li>上述逻辑设备名称必须与当前 RMU 下数据库设备 <b>CODE</b> 唯一对应；NAME 不参与判断。</li>
+          <li>开关图上文字无法唯一识别、数据库不存在相同 CODE 或同 CODE 存在多条记录时，报告会明确指出对应环网柜并提示检查开关命名方式。</li>
         </ul>
 
-        <p><b>使用环网柜内图上文字：</b></p>
+        <h3>2.1 RMU 柜型两套规则与交叉验证</h3>
         <ul>
-          <li>CBreakerDis：使用识别到的图上名称作为逻辑 p_NameString。</li>
-          <li>ZhaiWaiJieDiDaoZha：逻辑 p_NameString=配对开关名称+D。</li>
-          <li>BusDis：逻辑 p_NameString 固定为 BUS。</li>
+          <li><b>规则一（主规则）：</b>柜内 Y1/Y2/Y3/Y4… 每个计 1 个 L，Q1/Q2/Q3/Q4… 每个计 1 个 T。只要识别到任何 Y/Q 文字，最终柜型就采用文字结果。</li>
+          <li><b>规则二（兜底规则）：</b>只有完全识别不到 Y/Q 文字时，才用 CBreakerDis.devref 判断：Load_Breaker=L，Circuit_Breaker=T。</li>
+          <li><b>全面验证：</b>当文字结果和 devref 结果同时存在时，两套结果必须进行交叉验证。</li>
+          <li>若两套结果冲突，最终仍采用规则一的文字柜型，但该 RMU 会产生 WARN，并在 HTML / CSV / Console 中输出：环网柜名称、文字柜型、devref 柜型和“请检查该环网柜 Y/Q 命名方式及开关 devref 模板”。</li>
+          <li>柜型交叉验证告警本身不阻断已经由数据库唯一事实确定的设备关联。</li>
         </ul>
 
-        <h3>3. 强制校验</h3>
+        <h3>3. 强制校验与可修复原则</h3>
+        <p><b>核心原则：</b>数据库当前事实正确且能够唯一确定时，允许程序修复 G 文件中的旧关联、错关联、旧 KeyID、错误 Domain 等问题；只有数据库事实本身无法唯一确定时才阻断。</p>
         <ul>
           <li>环网柜数据库记录必须唯一；0 条或多条时环网柜汇总直接 FAIL。</li>
-          <li>设备 CODE 必须与当前用于校验的 p_NameString 一致；NAME 不参与判断。</li>
-          <li>RMU 唯一后，每个 G 设备独立判断：当前 RMU 内 CODE 必须与逻辑 p_NameString 唯一对应，并且目标数据库设备必须属于当前 RMU。</li>
+          <li>设备 CODE 必须与当前图上逻辑设备名称 一致；NAME 不参与判断。</li>
+          <li>RMU 唯一后，每个 G 设备独立判断：当前 RMU 内 CODE 必须与逻辑设备名称 唯一对应，并且目标数据库设备必须属于当前 RMU。</li>
           <li>已有 KeyID 只用于判断当前模型是否需要修复：旧设备 ID、表号、域号或 KeyID 错误，不再作为数据库当前正确目标的硬阻断条件。</li>
-          <li>如果旧设备被删除后重新创建并产生新 ID，只要当前 CODE/p_NameString 仍能唯一确定本 RMU 内的新设备，就允许重新关联。</li>
+          <li>如果旧设备被删除后重新创建并产生新 ID，只要当前 CODE/图上逻辑名称 仍能唯一确定本 RMU 内的新设备，就允许重新关联。</li>
           <li>如果当前 KeyID 指向其他环网柜，但本 RMU 内已经唯一确定正确目标设备，则标记为 RMU_RELINK，并允许重新关联到当前环网柜。</li>
           <li>同一 RMU 内某些设备不符合条件时，只阻断这些设备；其它符合条件的设备仍可以正常关联。</li>
-          <li>模型校验完成后，工作区会展示设备明细选择表；只有数据库事实已唯一确定且需要写回的设备可勾选。执行关联时只处理勾选设备。</li>
+          <li>模型校验完成后，工作区会展示设备明细选择表，并可按环网柜名称快速筛选；只有数据库事实已唯一确定且需要写回的设备可勾选。</li>
+          <li>执行模型关联时直接使用校验阶段已确定并由用户勾选的设备，只处理本次勾选记录，不再重新全量循环所有环网柜；本次关联报告也只记录本次实际选择和写回结果。</li>
           <li>RMU 模块不进行任何馈线判断。</li>
         </ul>
 
@@ -1270,12 +1298,13 @@ class MainWindow(QMainWindow):
         rmu_naming = QGroupBox("环网柜名称识别规则")
         rmu_naming_layout = QVBoxLayout(rmu_naming)
         rmu_naming_text = QLabel(
-            "• 环网柜仍然通过矩形框 + 三类目标设备图元自动识别。\n"
-            "• 环网柜名称按照用户勾选的方向读取：上方 / 下方 / 左侧 / 右侧。\n"
-            "• 同一方向只有一个名称时直接取最近名称，不判断颜色；只有存在多个名称时才使用绿色文字消歧。\n"
-            "• 绿色依据 G 文件属性判断：lc=0,255,0 或 lcc=#00ff00；实际名称读取 Text 的 ts 属性。\n"
-            "• 绿色名称不受旧的 120 坐标单位搜索距离限制，因此名称离环网柜较远也可以识别。\n"
-            "• 如果所选方向没有绿色名称，才回退到普通名称识别规则。\n"
+            "• 环网柜只有在矩形框内同时存在 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元时才识别为 RMU。\n"
+            "• RMU 柜型规则一：柜内 Y* 每个计 1L、Q* 每个计 1T，文字绝对优先；规则二：完全识别不到 Y/Q 时才用 devref（Load_Breaker=L、Circuit_Breaker=T）兜底。两套结果同时存在时必须交叉验证，冲突则 WARN 并指出具体环网柜。\n"
+            "• 环网柜名称严格只按照用户勾选的方向读取：上方 / 下方 / 左侧 / 右侧；未勾选方向绝不参与。\n"
+            "• 对所选方向执行整张 G 图全局搜索，柜名不再受旧的 120 坐标单位距离上限限制。\n"
+            "• 每个 Text / DText 全局只分配给距离最近的一个环网柜，避免同一个名字被两个柜重复使用。\n"
+            "• 一个环网柜只有一个名称候选时直接使用；多个候选时才优先最近绿色名称，否则取最近候选。\n"
+            "• 绿色依据 G 文件属性判断：lc=0,255,0 或 lcc=#00ff00；实际名称读取 Text / DText 的 ts 属性。\n"
             "• 环网柜名称始终按字符串处理，支持 42646、RMU-42646、ABC_123、JED-RMU-01、ABC.01 等常见工程名称，不会强制转换成数字。"
         )
         rmu_naming_text.setWordWrap(True)
@@ -1285,43 +1314,31 @@ class MainWindow(QMainWindow):
         naming = QGroupBox("设备名称判断规则")
         naming_layout = QVBoxLayout(naming)
         naming_text = QLabel(
-            "【使用 p_NameString】\n"
-            "• CBreakerDis：直接使用 G 图元 p_NameString。\n"
-            "• ZhaiWaiJieDiDaoZha：通过空间关系配对 CBreakerDis，数据库目标 CODE=开关名+D，"
-            "同时要求 G 图元 p_NameString=该 CODE。\n"
-            "• BusDis：直接使用 G 图元 p_NameString。\n\n"
-            "【使用环网柜内图上文字】\n"
-            "• CBreakerDis：完全不使用该图元 XML 的 p_NameString；将识别到的图上设备名作为逻辑 p_NameString。\n"
-            "• ZhaiWaiJieDiDaoZha：完全不使用自身 XML 的 p_NameString；逻辑 p_NameString=配对开关名称+D。\n"
-            "• BusDis：完全不使用 XML 的 p_NameString；逻辑 p_NameString 固定为 BUS。\n"
-            "• 图上文字无法唯一识别时直接 FAIL，不猜测设备名称。"
+            "【设备名称规则（固定）】\n"
+            "• CBreakerDis：只使用环网柜内图上文字；XML p_NameString 完全不参与设备命名。\n"
+            "• ZhaiWaiJieDiDaoZha：逻辑名称=配对开关图上名称+D。\n"
+            "• BusDis：逻辑名称固定为 BUS。\n"
+            "• 图上开关名称必须与当前 RMU 下数据库 CODE 唯一对应；失败时明确告警对应环网柜并提示检查命名方式。\n\n"
+            "【RMU 柜型识别】\n"
+            "• 第一套：柜内 Y1/Y2/Y3... 每个计 L；Q1/Q2/Q3... 每个计 T，文字优先。\n"
+            "• 第二套：完全识别不到 Y/Q 时才用 devref 兜底：Load_Breaker=L，Circuit_Breaker=T。\n"
+            "• 两套结果都存在时必须交叉验证；冲突时最终仍采用文字柜型，同时产生 WARN 并指出具体环网柜。\n\n"
+"• 环网柜数据库记录为 0 条或多条时，环网柜汇总直接 FAIL。若 G 设备未关联，禁止自动关联。\n"
+            "• 环网柜数据库记录为 0 条或多条，但 G 设备已经有人为 KeyID 时，不丢弃该模型：继续反解当前设备并校验 CODE/图上逻辑名称 和实际所属环网柜。\n"
+            "• 唯一 RMU 下，若旧 KeyID 实际属于其它环网柜，使用紫色 RMU_RELINK 标记，可以覆盖旧模型并重新关联到当前 RMU；只有 RMU 本身不唯一时才继续作为硬阻断。\n"
+            "• RMU 模块中的馈线判断已完全关闭；馈线模型关联由独立的【馈线模型】模块处理。\n"
+            "• 唯一 RMU 下以当前数据库为准：CODE/图上逻辑名称 和目标设备 RMU 归属通过后，即使旧设备 ID、表号、域号、KeyID 已失效，也允许重新关联。"
         )
         naming_text.setWordWrap(True)
         naming_layout.addWidget(naming_text)
         layout.addWidget(naming)
 
-        policy = QGroupBox("关联前强制校验策略")
-        policy_layout = QVBoxLayout(policy)
-        policy_text = QLabel(
-            "• CBreakerDis：CODE 不得为空；CODE 必须等于当前用于校验的 p_NameString，NAME 不参与判断。\n"
-            "• ZhaiWaiJieDiDaoZha：与 CBreakerDis 空间配对；用于校验的 p_NameString=开关名+D；CODE 必须与其一致，NAME 不参与判断。\n"
-            "• BusDis：CODE 不得为空；CODE 必须等于当前用于校验的 p_NameString；图上文字模式固定为 BUS，NAME 不参与判断。\n"
-            "• 环网柜数据库记录为 0 条或多条时，环网柜汇总直接 FAIL。若 G 设备未关联，禁止自动关联。\n"
-            "• 环网柜数据库记录为 0 条或多条，但 G 设备已经有人为 KeyID 时，不丢弃该模型：继续反解当前设备并校验 CODE/p_NameString 和实际所属环网柜。\n"
-            "• 唯一 RMU 下，若旧 KeyID 实际属于其它环网柜，使用紫色 RMU_RELINK 标记，可以覆盖旧模型并重新关联到当前 RMU；只有 RMU 本身不唯一时才继续作为硬阻断。\n"
-            "• RMU 模块中的馈线判断已完全关闭；馈线模型关联由独立的【馈线模型】模块处理。\n"
-            "• 唯一 RMU 下以当前数据库为准：CODE/p_NameString 和目标设备 RMU 归属通过后，即使旧设备 ID、表号、域号、KeyID 已失效，也允许重新关联。"
-        )
-        policy_text.setWordWrap(True)
-        policy_layout.addWidget(policy_text)
-        layout.addWidget(policy)
-
         db_rule = QGroupBox("数据库强制校验")
         db_layout = QVBoxLayout(db_rule)
         db_text = QLabel(
-            "• 13502 / CBreakerDis：CODE 不得为空，且 CODE 必须等于当前用于校验的 p_NameString；NAME 不参与判断。\n"
-            "• 13514 / ZhaiWaiJieDiDaoZha：CODE 不得为空，且 CODE 必须等于当前用于校验的 p_NameString（开关名称+D）；NAME 不参与判断。\n"
-            "• 13506 / BusDis：CODE 不得为空，且 CODE 必须等于当前用于校验的 p_NameString；图上文字模式固定为 BUS；NAME 不参与判断。\n"
+            "• 13502 / CBreakerDis：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称；NAME 不参与判断。\n"
+            "• 13514 / ZhaiWaiJieDiDaoZha：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称（开关名称+D）；NAME 不参与判断。\n"
+            "• 13506 / BusDis：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称；图上文字模式固定为 BUS；NAME 不参与判断。\n"
             "• 设备校验以 G 文件实际存在的图元为准，只查询这些图元最终需要的 CODE。\n"
             "• 数据库中与 G 图元 CODE 无关的其它设备记录忽略，不参与数量比较。\n"
             "• G 图元需要的 CODE 不存在，或同一 CODE 匹配到多条记录时，才作为设备模型错误并阻止关联。"
@@ -1338,7 +1355,7 @@ class MainWindow(QMainWindow):
             "黄色 WARN：设备当前未关联，但数据库当前目标唯一有效，可以关联。\n"
             "橙色 RELINK：旧设备 ID、KeyID、表号或域号已过期/错误，或旧设备被删除重建；数据库当前目标唯一有效，可以重新关联。\n"
             "紫色 RMU_RELINK：旧 KeyID 指向其他环网柜，但当前 RMU 内已唯一确定正确设备，可以强制重新关联。\n"
-            "红色 FAIL：数据库当前事实无法唯一确定安全目标，例如 RMU 0/多条、CODE 0/多条、CODE/p_NameString 不一致、目标设备不属于当前 RMU、Expected KeyID/BV_ID 无效。\n"
+            "红色 FAIL：数据库当前事实无法唯一确定安全目标，例如 RMU 0/多条、CODE 0/多条、CODE/图上逻辑名称 不一致、目标设备不属于当前 RMU、Expected KeyID/BV_ID 无效。\n"
             "RMU 报告不输出馈线状态；馈线模块使用独立报告。"
         )
         colors_text.setWordWrap(True)
@@ -1354,7 +1371,7 @@ class MainWindow(QMainWindow):
             "app=6500000, voltype=数据库设备BV_ID, p_ReportType=1, state=41, keyid=Expected KeyID\n\n"
             "BusDis 回写：\n"
             "app=6500000, voltype=数据库设备BV_ID, p_ReportType=1, state=15, keyid=Expected KeyID\n\n"
-            "模型关联不会自动修改 p_NameString。馈线信息完全不参与判断；数据库当前唯一 RMU 和 CODE/p_NameString 匹配结果是关联依据。旧 KeyID 仅用于识别 PASS / RELINK / RMU_RELINK，不会阻止修复已经过期的模型关联。"
+            "模型关联不会修改图上设备名称，也不会读取 XML p_NameString 作为设备名称。馈线信息完全不参与判断；数据库当前唯一 RMU 和 CODE/图上逻辑名称 匹配结果是关联依据。旧 KeyID 仅用于识别 PASS / RELINK / RMU_RELINK，不会阻止修复已经过期的模型关联。"
         )
         assoc_text.setWordWrap(True)
         assoc_layout.addWidget(assoc_text)
@@ -1364,9 +1381,9 @@ class MainWindow(QMainWindow):
         reports_layout = QVBoxLayout(reports)
         reports_text = QLabel(
             "•【环网柜汇总】严格按 G 文件环网柜序号排列，每个 G 环网柜只显示一行；数据库 0 条或多条直接 FAIL，不展开多个 ID。\n"
-            "•【设备明细】只显示 G 文件实际存在的 RMU 设备图元，并展示逻辑 p_NameString、数据库 CODE、当前 KeyID 和实际所属环网柜。\n"
+            "•【设备明细】只显示 G 文件实际存在的 RMU 设备图元，并展示逻辑设备名称、数据库 CODE、当前 KeyID 和实际所属环网柜。\n"
             "• RMU 数据库记录异常时，已有人为 KeyID 的设备仍继续校验；未关联设备则直接阻断自动关联。\n"
-            "• 当选择图上文字模式时，报告中的 p_NameString 表示用于校验的逻辑 p_NameString，不是 XML 原属性。\n"
+            "• 当选择图上文字模式时，报告中的逻辑设备名称 表示用于校验的逻辑 图上逻辑名称，不是 XML 原属性。\n"
             "• 每次模型校验、关联预览和关联完成都会自动生成对应 HTML / CSV；Workspace 历史按软件保留策略自动清理。"
         )
         reports_text.setWordWrap(True)
@@ -1560,11 +1577,13 @@ class MainWindow(QMainWindow):
         self.open_html_btn.setText(html_text)
         self.open_rmu_csv_btn.setText(first_csv_text)
         self.open_device_csv_btn.setText(second_csv_text)
+        self.open_rmu_profile_csv_btn.setText("打开环网柜档案 CSV")
 
         for key, button in (
             ("html", self.open_html_btn),
             ("rmu_csv", self.open_rmu_csv_btn),
             ("device_csv", self.open_device_csv_btn),
+            ("rmu_profile_csv", self.open_rmu_profile_csv_btn),
             ("run_dir", self.open_report_dir_btn),
         ):
             value = self.current_artifacts.get(key, "")
@@ -1839,6 +1858,7 @@ class MainWindow(QMainWindow):
                 "feeder_table_id",
                 "section_table_id",
                 "section_domain",
+                "drawing_mode",
             ):
                 if key in settings:
                     self.cfg[key] = settings[key]
@@ -1936,16 +1956,24 @@ class MainWindow(QMainWindow):
                 for v in self.current_preview["changes_by_file"].values()
             )
 
-            if (
-                str(self.module_combo.currentData() or "").upper() == "RMU"
-            ):
+            current_module = str(
+                self.module_combo.currentData() or ""
+            ).upper()
+            if current_module in {"RMU", "FEEDER"}:
                 self._populate_association_table(self.current_preview)
-                self.log(
-                    f"模型校验已生成可关联设备清单："
-                    f"可关联/重新关联设备 {change_count} 个。"
-                    "请在工作区表格中勾选需要处理的设备。"
-                )
-                # Explicit selection is required before Apply is enabled.
+                if current_module == "FEEDER":
+                    self.log(
+                        f"模型校验已生成可关联馈线段清单："
+                        f"可关联/重新关联 FeedLine {change_count} 个。"
+                        "请在工作区表格中勾选需要处理的馈线段。"
+                    )
+                else:
+                    self.log(
+                        f"模型校验已生成可关联设备清单："
+                        f"可关联/重新关联设备 {change_count} 个。"
+                        "请在工作区表格中勾选需要处理的设备。"
+                    )
+                # Both modules require explicit row selection.
                 self.apply_btn.setEnabled(False)
             else:
                 self.apply_btn.setEnabled(change_count > 0)
@@ -1976,6 +2004,10 @@ class MainWindow(QMainWindow):
         else:
             self.log(f"环网柜 CSV：{self.current_artifacts.get('rmu_csv', '')}")
             self.log(f"设备 CSV：{self.current_artifacts.get('device_csv', '')}")
+            self.log(
+                f"环网柜档案 CSV："
+                f"{self.current_artifacts.get('rmu_profile_csv', '')}"
+            )
 
         # 保存完整的本次 Console 日志到当前任务的实际报告目录。
         try:
@@ -2036,7 +2068,7 @@ class MainWindow(QMainWindow):
             self.association_table.clearContents()
             self.association_table.setRowCount(0)
             self._association_candidate_keys = set()
-            self.selection_count_label.setText("已选择 0 个设备")
+            self.selection_count_label.setText("已选择 0 个对象")
             if hasattr(self, "rmu_filter_edit"):
                 self.rmu_filter_edit.blockSignals(True)
                 self.rmu_filter_edit.clear()
@@ -2084,6 +2116,8 @@ class MainWindow(QMainWindow):
             "PASS": "#EAF8F2",
             "WARN": "#FFF8DE",
             "RELINK": "#FFE8CC",
+            "DUPLICATE_LINK": "#FFF1CC",
+            "UNLINKED": "#FFF8DE",
             "RMU_RELINK": "#F0E7FF",
             "FAIL": "#FFF0F0",
             "RMU_LINK": "#FFF0F0",
@@ -2093,41 +2127,82 @@ class MainWindow(QMainWindow):
         return QBrush(QColor(value)) if value else None
 
     def _populate_association_table(self, preview_data):
-        """
-        Show ALL RMU G-device detail rows after validation.
-
-        Only rows that the validated preview already marked as safe write-back
-        candidates are checkable.  This is deliberately UI-only filtering:
-        the validator remains the authority for database uniqueness and
-        CODE/p_NameString/RMU ownership rules.
-        """
+        """Show selectable association candidates for RMU or FeedLine models."""
         self._clear_association_table()
+        if not preview_data:
+            return
 
-        if (
-            str(self.module_combo.currentData() or "").upper() != "RMU"
-            or not preview_data
-        ):
+        module_id = str(self.module_combo.currentData() or "").upper()
+        if module_id not in {"RMU", "FEEDER"}:
             return
 
         candidate_lookup = self._candidate_change_lookup(preview_data)
         reports = preview_data.get("reports", []) or []
         display_rows = []
 
-        # Build frame-index lookup while preserving G/RMU/device report order.
-        for report in reports:
-            source_file = str(report.get("g_file", "") or "")
-            file_name = str(report.get("file_name", "") or Path(source_file).name)
-            for rmu in report.get("rmu_results", []) or []:
-                frame_index = rmu.get("frame_index", "")
-                for row in rmu.get("device_rows", []) or []:
+        if module_id == "RMU":
+            self.association_selection_box.setTitle(
+                "可关联设备选择（模型校验结果）"
+            )
+            self.association_selection_tip.setText(
+                "模型校验完成后，这里展示 G 文件设备明细。只有数据库当前事实已经唯一确定、"
+                "并且需要关联或重新关联的设备才允许勾选。执行模型关联时只处理你勾选的设备。"
+            )
+            self.association_filter_label.setText("环网柜名称筛选")
+            self.rmu_filter_edit.setPlaceholderText(
+                "输入环网柜名称快速筛选，例如：17613 / RMU-42646"
+            )
+            headers = [
+                "选择", "G文件", "环网柜序号", "环网柜名称", "G图元类型",
+                "逻辑设备名称（图上规则）", "数据库CODE", "状态", "当前关联",
+                "目标设备ID", "Expected KeyID", "处理说明",
+            ]
+            for report in reports:
+                source_file = str(report.get("g_file", "") or "")
+                file_name = str(report.get("file_name", "") or Path(source_file).name)
+                for rmu in report.get("rmu_results", []) or []:
+                    frame_index = rmu.get("frame_index", "")
+                    for row in rmu.get("device_rows", []) or []:
+                        if not row.get("xml_id"):
+                            continue
+                        item = dict(row)
+                        item["_source_file"] = source_file
+                        item["_file_name"] = file_name
+                        item["_frame_index"] = frame_index
+                        display_rows.append(item)
+        else:
+            self.association_selection_box.setTitle(
+                "可关联馈线段选择（模型校验结果）"
+            )
+            self.association_selection_tip.setText(
+                "模型校验完成后，这里展示 FeedLine 明细。数据库 FEEDER_ID 与馈线段事实唯一正确时，"
+                "未关联、旧关联错误以及 DUPLICATE_LINK 重复关联行允许勾选。"
+                "只处理你勾选的 FeedLine；未勾选对象保持原样。"
+            )
+            self.association_filter_label.setText("馈线段快速筛选")
+            self.rmu_filter_edit.setPlaceholderText(
+                "输入 FEEDER_ID / 馈线名称 / FeedLine XML ID / 目标馈线段名称"
+            )
+            headers = [
+                "选择", "G文件", "连接区域", "FEEDER_ID", "FeedLine序号",
+                "图元XML ID", "当前关联", "状态", "目标馈线段",
+                "目标设备ID", "Expected KeyID", "处理说明",
+            ]
+            for report in reports:
+                source_file = str(report.get("g_file", "") or "")
+                file_name = str(report.get("file_name", "") or Path(source_file).name)
+                for row in report.get("feedline_rows", []) or []:
                     if not row.get("xml_id"):
                         continue
                     item = dict(row)
                     item["_source_file"] = source_file
                     item["_file_name"] = file_name
-                    item["_frame_index"] = frame_index
+                    item["_region_index"] = report.get("region_index", "")
+                    item["_feeder_id"] = report.get("feeder_id", "")
+                    item["_feeder_name"] = report.get("feeder_name", "")
                     display_rows.append(item)
 
+        self.association_table.setHorizontalHeaderLabels(headers)
         self._association_table_populating = True
         try:
             self.association_table.setRowCount(len(display_rows))
@@ -2137,10 +2212,7 @@ class MainWindow(QMainWindow):
                 source_file = row["_source_file"]
                 key = self._association_change_key(
                     source_file,
-                    {
-                        "tag": row.get("object_type", ""),
-                        "xml_id": row.get("xml_id", ""),
-                    },
+                    {"tag": row.get("object_type", ""), "xml_id": row.get("xml_id", "")},
                 )
                 is_candidate = key in candidate_lookup
 
@@ -2148,91 +2220,70 @@ class MainWindow(QMainWindow):
                 check_item.setData(Qt.UserRole, key)
                 if is_candidate:
                     check_item.setFlags(
-                        Qt.ItemIsEnabled
-                        | Qt.ItemIsSelectable
-                        | Qt.ItemIsUserCheckable
+                        Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
                     )
-                    # Explicit user choice: nothing is pre-selected.
                     check_item.setCheckState(Qt.Unchecked)
                     check_item.setToolTip(
-                        "数据库当前事实已唯一确定该设备，可以选择关联/重新关联。"
+                        "数据库当前事实唯一正确，可选择执行关联/重新关联。"
                     )
                 else:
-                    check_item.setFlags(
-                        Qt.ItemIsEnabled | Qt.ItemIsSelectable
-                    )
+                    check_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                     check_item.setText("—")
-                    check_item.setToolTip(
-                        "当前记录无需回写或被数据库事实校验阻断。"
-                    )
-                self.association_table.setItem(
-                    row_index,
-                    0,
-                    check_item,
-                )
+                    check_item.setToolTip("当前记录无需回写或已被校验阻断。")
+                self.association_table.setItem(row_index, 0, check_item)
 
-                current_text = str(
-                    row.get("model_link_status", "")
-                    or (
-                        "已关联"
-                        if row.get("model_linked") == "YES"
-                        else "未关联"
+                if module_id == "RMU":
+                    current_text = str(
+                        row.get("model_link_status", "")
+                        or ("已关联" if row.get("model_linked") == "YES" else "未关联")
                     )
-                )
-
-                values = [
-                    row["_file_name"],
-                    row["_frame_index"],
-                    row.get("rmu_name", ""),
-                    row.get("object_type", ""),
-                    row.get("p_name_string", "")
-                    or row.get("selected_device_name", ""),
-                    row.get("db_code", ""),
-                    self._row_status_text(row),
-                    current_text,
-                    row.get("db_device_id", ""),
-                    row.get("expected_keyid", ""),
-                    row.get("reason", ""),
-                ]
+                    values = [
+                        row["_file_name"], row["_frame_index"], row.get("rmu_name", ""),
+                        row.get("object_type", ""),
+                        row.get("logical_code", "") or row.get("selected_device_name", ""),
+                        row.get("db_code", ""), self._row_status_text(row), current_text,
+                        row.get("db_device_id", ""), row.get("expected_keyid", ""),
+                        row.get("reason", ""),
+                    ]
+                else:
+                    current_text = (
+                        f"KeyID={row.get('current_keyid')} / {row.get('current_db_name') or '-'}"
+                        if row.get("model_linked") == "YES" else "未关联"
+                    )
+                    status_text = (
+                        str(row.get("severity", ""))
+                        if str(row.get("severity", "")) in {"DUPLICATE_LINK", "RELINK", "UNLINKED"}
+                        else str(row.get("status", ""))
+                    )
+                    values = [
+                        row["_file_name"], row["_region_index"], row["_feeder_id"],
+                        row.get("order_index", ""), row.get("xml_id", ""), current_text,
+                        status_text, row.get("assigned_section_name", ""),
+                        row.get("assigned_device_id", ""), row.get("expected_keyid", ""),
+                        row.get("reason", ""),
+                    ]
 
                 brush = self._association_status_brush(
-                    row.get("status", "")
-                )
+                    row.get("severity", "") if module_id == "FEEDER" else row.get("status", "")
+                ) or self._association_status_brush(row.get("status", ""))
 
                 for col_offset, value in enumerate(values, start=1):
-                    cell = QTableWidgetItem(
-                        "" if value is None else str(value)
-                    )
-                    cell.setToolTip(
-                        "" if value is None else str(value)
-                    )
+                    cell = QTableWidgetItem("" if value is None else str(value))
+                    cell.setToolTip("" if value is None else str(value))
                     if brush is not None:
                         cell.setBackground(brush)
-                    self.association_table.setItem(
-                        row_index,
-                        col_offset,
-                        cell,
-                    )
-
+                    self.association_table.setItem(row_index, col_offset, cell)
                 if brush is not None:
                     check_item.setBackground(brush)
 
-            # Keep every row at the same fixed height. Long text is
-            # elided and remains fully available through the cell tooltip.
             for table_row in range(self.association_table.rowCount()):
                 self.association_table.setRowHeight(table_row, 38)
-
-            self.association_selection_box.setVisible(
-                bool(display_rows)
-            )
+            self.association_selection_box.setVisible(bool(display_rows))
         finally:
             self._association_table_populating = False
 
         self._update_association_selection_state()
-        if hasattr(self, "rmu_filter_edit"):
-            self._apply_rmu_name_filter(
-                self.rmu_filter_edit.text()
-            )
+        self._apply_rmu_name_filter(self.rmu_filter_edit.text())
 
     def _selected_association_keys(self):
         if not hasattr(self, "association_table"):
@@ -2272,9 +2323,14 @@ class MainWindow(QMainWindow):
                 if filter_text
                 else ""
             )
+            unit = (
+                "个馈线段"
+                if str(self.module_combo.currentData() or "").upper() == "FEEDER"
+                else "个设备"
+            )
             self.selection_count_label.setText(
-                f"已选择 {selected_count} 个设备 / "
-                f"可关联 {total_candidates} 个{suffix}"
+                f"已选择 {selected_count} {unit} / "
+                f"可关联 {total_candidates} {unit}{suffix}"
             )
 
         module_id = str(self.module_combo.currentData() or "")
@@ -2296,28 +2352,27 @@ class MainWindow(QMainWindow):
         self._update_association_selection_state()
 
     def _apply_rmu_name_filter(self, text=""):
-        """
-        Filter the RMU device-selection table by RMU name.
-
-        This is display-only:
-        - it never changes checkbox state;
-        - it never changes association eligibility;
-        - clearing the filter restores all rows exactly as before.
-        """
+        """Display-only filter for RMU or FeedLine association tables."""
         if not hasattr(self, "association_table"):
             return
 
         needle = str(text or "").strip().casefold()
+        module_id = str(self.module_combo.currentData() or "").upper()
         visible_count = 0
 
         for row in range(self.association_table.rowCount()):
-            item = self.association_table.item(row, 3)
-            rmu_name = (
-                item.text().strip().casefold()
-                if item is not None
-                else ""
+            if module_id == "FEEDER":
+                # FEEDER_ID, XML ID, target section and explanation are all
+                # useful quick-filter keys for large topology reports.
+                columns = (3, 5, 8, 11)
+            else:
+                columns = (3,)
+            haystack = " ".join(
+                self.association_table.item(row, col).text().strip().casefold()
+                for col in columns
+                if self.association_table.item(row, col) is not None
             )
-            visible = (not needle) or (needle in rmu_name)
+            visible = (not needle) or (needle in haystack)
             self.association_table.setRowHidden(row, not visible)
             if visible:
                 visible_count += 1
@@ -2327,15 +2382,13 @@ class MainWindow(QMainWindow):
             total_candidates = len(
                 getattr(self, "_association_candidate_keys", set())
             )
-            suffix = (
-                f"；当前显示 {visible_count} 行"
-                if needle
-                else ""
-            )
+            suffix = f"；当前显示 {visible_count} 行" if needle else ""
+            unit = "个馈线段" if module_id == "FEEDER" else "个设备"
             self.selection_count_label.setText(
-                f"已选择 {selected_count} 个设备 / "
-                f"可关联 {total_candidates} 个{suffix}"
+                f"已选择 {selected_count} {unit} / "
+                f"可关联 {total_candidates} {unit}{suffix}"
             )
+
 
     def _select_all_association_candidates(self):
         self._association_table_populating = True
@@ -2443,7 +2496,7 @@ class MainWindow(QMainWindow):
 
         module_id = str(self.module_combo.currentData() or "")
 
-        if module_id.upper() == "RMU":
+        if module_id.upper() in {"RMU", "FEEDER"}:
             execution_preview = self._selected_association_preview()
             if not execution_preview or not execution_preview.get(
                 "changes_by_file"
@@ -2451,8 +2504,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     "模型关联",
-                    "请先在“可关联设备选择”表格中勾选至少一个需要关联"
-                    "或重新关联的设备。",
+                    (
+                        "请先在“可关联馈线段选择”表格中勾选至少一个需要关联或重新关联的FeedLine。"
+                        if module_id.upper() == "FEEDER"
+                        else "请先在“可关联设备选择”表格中勾选至少一个需要关联或重新关联的设备。"
+                    ),
                 )
                 return
         else:
@@ -2475,6 +2531,15 @@ class MainWindow(QMainWindow):
                 "程序只会对这些设备所属环网柜和设备做轻量数据库复核，"
                 "然后按 XML ID 精确写回 Workspace 安全副本。\n\n"
                 "最终 HTML / CSV 只汇报本次选中的环网柜和设备。\n\n"
+                "是否确认执行？"
+            )
+        elif module_id.upper() == "FEEDER":
+            message = (
+                f"本次将只处理已勾选的 {change_count} 个FeedLine 图元。\n\n"
+                "程序会基于模型校验已确认的可信RMU/FEEDER_ID拓扑区域，"
+                "重新计算未勾选FeedLine当前占用的数据库馈线段，再只给勾选行分配剩余段。\n"
+                "DUPLICATE_LINK 行可以只选其中一条重新分配，也可以多条一起重新分配。\n\n"
+                "原始 G 文件不会被修改，只修改 Workspace 安全副本。\n\n"
                 "是否确认执行？"
             )
         else:
@@ -2508,7 +2573,7 @@ class MainWindow(QMainWindow):
             settings = self.module_widgets[module_id].collect_settings()
             files = self.resolve_files(self.input_edit.text().strip())
 
-            if module_id == "RMU":
+            if module_id in {"RMU", "FEEDER"}:
                 selected_source_files = {
                     str(Path(p).resolve())
                     for p in execution_preview.get(
@@ -2652,6 +2717,11 @@ class MainWindow(QMainWindow):
                 ),
                 "device_csv": (
                     str(csv_paths[1]) if len(csv_paths) > 1 else ""
+                ),
+                "rmu_profile_csv": (
+                    str(csv_paths[2])
+                    if module.module_id == "RMU" and len(csv_paths) > 2
+                    else ""
                 ),
                 "g_output_dir": str(output_dir),
             }

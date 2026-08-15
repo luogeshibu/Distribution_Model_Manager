@@ -1,3 +1,230 @@
+
+
+
+## [3.6.7] - 2026-08-13
+
+### Startup fix
+- Fixed the Help page startup crash:
+  `NameError: name 'policy_text' is not defined`.
+- The broken leftover variables `policy_text`, `policy_layout`, and `policy`
+  were removed.
+- The device-name help group now correctly uses its own
+  `naming_text`, `naming_layout`, and `naming` widgets.
+
+### Business naming refactor
+- Renamed the RMU device business field from `p_name_string` to
+  `logical_code`.
+- `logical_code` now has one clear meaning:
+  the logical device CODE derived from the visible G drawing and used to
+  compare with the database `CODE`.
+- `CBreakerDis.logical_code` = resolved graphical switch text.
+- `ZhaiWaiJieDiDaoZha.logical_code` = paired graphical breaker code + `D`.
+- `BusDis.logical_code` = `BUS`.
+- The default RMU row no longer seeds any logical value from the raw XML
+  `p_NameString` attribute.
+- Renamed `CODE_EQUALS_PNAME` to `CODE_EQUALS_LOGICAL_CODE`.
+- Renamed PNAME-oriented validation/error identifiers to logical-CODE
+  terminology.
+
+### Raw XML isolation
+- The G parser raw XML accessor is now explicitly named
+  `xml_p_name_string`.
+- It exists only for parsing/debug compatibility and is not used by RMU
+  business naming.
+- Generic RMU/feeder visible-text recognition now reads `Text/DText.ts`
+  instead of falling back to raw XML `p_NameString`.
+
+### UI / report readability
+- RMU work-table and reports use `逻辑CODE（图上规则）`.
+- Internal association execution reads `logical_code`.
+- `p_NameString` remains mentioned only in help text that explicitly says
+  the raw XML attribute is ignored.
+
+### Regression
+- Added startup-help regression checks for the removed `policy_*` variables.
+- Added a test proving the default RMU device row never copies XML
+  `p_NameString` into `logical_code`.
+- Added a source-level regression check ensuring the RMU business layer no
+  longer contains the old `p_name_string` field.
+
+## [3.6.6] - 2026-08-13
+
+### Switch naming is graphical-text-only
+- Removed the user-selectable `p_NameString` / graphical-text switch-name mode.
+- `CBreakerDis` device names now ALWAYS come from visible text inside the RMU.
+- XML `CBreakerDis.p_NameString` is never used as a device-name source.
+- `ZhaiWaiJieDiDaoZha` logical name is always:
+  `paired graphical breaker name + D`.
+- `BusDis` logical name is always `BUS`.
+- RMU settings UI now displays the fixed rule:
+  `环网柜内图上文字（固定）`.
+- Old persisted `P_NAME_STRING` configuration values are ignored safely.
+
+### Graphical device-name database validation
+- Every graphical breaker name is checked against database CODE under the
+  current uniquely resolved RMU.
+- A graphical name that cannot be resolved, has no corresponding CODE, or
+  matches duplicate CODE rows produces an explicit device error telling the
+  user to check that RMU's switch naming.
+- Device report wording now uses `图上逻辑名称` instead of presenting the
+  internal compatibility field as an XML p_NameString.
+
+### RMU type two-stage recognition
+- Rule 1 (authoritative):
+  use cabinet Text/DText Y1/Y2/Y3/... and Q1/Q2/Q3/... .
+  Each Y = one L; each Q = one T.
+- Rule 2 (fallback only):
+  if NO Y/Q text is recognized at all, use CBreakerDis.devref:
+  `Load_Breaker => L`, `Circuit_Breaker => T`.
+- When both rule outputs are available, they are ALWAYS cross-checked.
+- A mismatch never overrides the text-derived type and does not by itself
+  block a database-valid model association.
+
+### Explicit type cross-check warning
+- Added `柜型校验状态` and `柜型交叉校验说明` to RMU HTML/CSV reports.
+- If text type and devref type differ:
+  - status = WARN when no more severe RMU/device issue exists;
+  - the report names the RMU (or rectangle XML ID if the RMU name cannot be
+    resolved);
+  - the report includes both type values;
+  - the message asks the user to inspect Y/Q naming and switch devref template.
+- Console prints the same targeted warning.
+
+### Help/UI
+- RMU help now documents one fixed device-name source only.
+- RMU help documents the two-stage cabinet-type algorithm and mandatory
+  cross-validation.
+- Feeder trusted-RMU processing uses the same graphical-text-only RMU device
+  naming behavior.
+
+## [3.6.5] - 2026-08-13
+
+### RMU type recognition: Y/Q text is absolutely authoritative
+- RMU cabinet type is determined first from Text/DText located inside the RMU:
+  - Y1/Y2/Y3/Y4/... => one L each
+  - Q1/Q2/Q3/Q4/... => one T each
+- Y/Q labels are naturally ordered as Y1,Y2,... then Q1,Q2,...
+- As long as at least one Y/Q label is recognized, the text-derived type is
+  the final type.
+- `CBreakerDis.devref` is now only a fallback when NO Y/Q label can be
+  recognized at all.
+- When both text and devref are available, devref is only cross-check data and
+  never overrides the text result.
+
+### Smart RMU recognition
+- Added global SMART/SMR recognition across the entire G drawing.
+- Every exact SMART or SMR Text/DText marker is assigned to the nearest RMU.
+- There is no maximum-distance cutoff, because SMART is commonly inside the
+  cabinet while SMR may be outside.
+- Either SMART or SMR makes the RMU smart.
+- If both SMART and SMR belong to one RMU, it is still one smart RMU and the
+  marker field records `SMART, SMR`.
+- Feeder trusted-RMU diagnostics reuse the same smart metadata.
+
+### RMU reports
+- RMU HTML summary now includes:
+  - cabinet type;
+  - type source;
+  - text/devref cross-check;
+  - smart YES/NO;
+  - SMART/SMR marker types;
+  - database/device completeness.
+- Added a new compact HTML `环网柜档案` table.
+
+### New RMU profile CSV
+- Every RMU validation/association report now creates:
+  `report_环网柜档案.csv`.
+- Exactly one row per RMU containing:
+  - G file;
+  - RMU sequence and rectangle XML ID;
+  - RMU name;
+  - RMU type and source;
+  - smart status and SMART/SMR markers;
+  - database record count;
+  - whether the RMU database record is unique;
+  - RMU ID;
+  - G device count;
+  - uniquely matched database device count;
+  - whether RMU devices are complete;
+  - validation status and explanation.
+- `设备是否完整=YES` means the RMU itself is database-unique and every G
+  device participating in validation uniquely resolves to a database device
+  under the same RMU. Old/wrong G KeyID does not by itself make database
+  inventory incomplete.
+
+### UI and help
+- Added `打开环网柜档案 CSV` result button.
+- RMU and feeder help pages now document strict Y/Q priority, devref fallback,
+  SMART/SMR global nearest-RMU assignment, and the RMU profile report.
+
+### Regression
+- Existing tests updated to the final field rule: partial Y/Q text still wins
+  over devref.
+- Added SMART+SMR nearest-RMU tests and RMU profile CSV/HTML tests.
+- Actual `JED-CTL-AJWD-26.sln.pic.g` regression:
+  - 37 structural RMUs detected;
+  - 11 RMUs receive SMART markers;
+  - RMU `25583` (Rect XML ID 2000567) => `2L1T`,
+    source `TEXT_YQ`, labels `Y1,Y2,Q1`, devref cross-check `2L1T`.
+
+## [3.6.4] - 2026-08-13
+
+### RMU type recognition
+- Added RMU cabinet type recognition such as `2L1T` and `3L1T`.
+- Primary rule reads Y/Q Text or DText inside the RMU rectangle: each `Y*` is one L and each `Q*` is one T.
+- Added devref cross-check/fallback: `Load_Breaker` -> L and `Circuit_Breaker` -> T.
+- Complete Y/Q text is authoritative; devref is used when text is incomplete.
+- Text/devref mismatch is reported but does not block existing RMU association eligibility.
+- RMU summary HTML/CSV now exposes type, recognition source and consistency.
+- Feeder trusted-RMU diagnostics now include the RMU type.
+- Updated RMU and feeder module help pages with the new rules.
+
+### Uploaded AJWD-26 regression
+- Verified RMU `25583` (frame XML ID `2000567`) as `2L1T`.
+- Its G XML contains Y1, Y2, Q1 and devrefs with two Load_Breaker plus one Circuit_Breaker; both rules agree.
+- Across the uploaded file, 35 RMUs resolve to `2L1T` and 2 RMUs resolve to `3L1T`; text and devref results agree for all detected RMUs.
+
+# Changelog
+
+## [3.6.3] - 2026-08-13
+
+- 同步更新 RMU 环网柜模型帮助：补充三类图元结构硬条件、数据库事实优先修复原则、环网柜筛选与仅执行勾选设备规则。
+- 同步更新馈线模型帮助：明确不依赖馈线名称，使用可信 RMU + FEEDER_ID + 拓扑区域确定馈线归属。
+- 补充 FeedLine 未关联、旧关联、设备重建、表号/域号错误以及 DUPLICATE_LINK 的可选择修复说明。
+- 帮助页与 v3.6.x 当前实际校验/关联逻辑保持一致。
+
+
+## [3.6.2] - 2026-08-13
+
+### RMU structural hard rule
+- RMU recognition now explicitly requires the candidate rectangle to contain all three core G object types: `CBreakerDis`, `ZhaiWaiJieDiDaoZha`, and `BusDis` (at least one of each).
+- Missing any one of the three types means the rectangle is not an RMU candidate.
+- The same structural rule is used by the standalone RMU module and by the feeder module when it discovers RMUs as topology references.
+- Existing selected-direction/global Text/DText cabinet-name recognition remains unchanged.
+
+### FeedLine selectable association table
+- The feeder model now uses the same explicit-selection interaction as the RMU model.
+- After feeder validation, the workspace shows `可关联馈线段选择（模型校验结果）`.
+- Rows can be filtered by FEEDER_ID, FeedLine XML ID, target section name, or explanation text.
+- Only database-safe `UNLINKED`, `RELINK`, or `DUPLICATE_LINK` rows are checkable.
+- Execution processes only the FeedLine rows selected by the user; unselected FeedLines remain untouched.
+- The table keeps a fixed 38 px row height and tooltip access to full long text.
+
+### Duplicate FeedLine repair
+- When multiple FeedLines use the same valid `dms_section_device`, ALL duplicated rows are now reported as `DUPLICATE_LINK` rather than treating the first row as PASS.
+- Duplicate rows are repairable when the topology region has one confirmed FEEDER_ID and the database section pool is unique.
+- If the user selects only one duplicated row, unselected duplicate rows reserve their current database section and the selected row is reassigned to another available section.
+- If multiple duplicate rows are selected, they re-enter the region allocation pool together and are assigned in FeedLine top-to-bottom / left-to-right order from currently available sections.
+- Execution refreshes the current `dms_section_device` pool before write-back and writes only selected XML IDs.
+
+### HTML report
+- Feeder summary and FeedLine detail tables continue to provide report-only checkboxes.
+- Checking a report row keeps the entire row highlighted while horizontally scrolling; these HTML checkboxes never change model association behavior.
+
+### Regression
+- Added tests confirming that an RMU rectangle missing one of the three required G device types is rejected.
+- Added tests confirming that all repeated FeedLine links are exposed as selectable duplicate-repair candidates.
+
 # Changelog
 
 All notable changes to Distribution Model Manager are documented here.
@@ -32,6 +259,172 @@ All notable changes to Distribution Model Manager are documented here.
 
 
 
+
+
+
+
+## [3.6.0] - 2026-08-13
+
+### Feeder model: RMU-topology architecture
+- Replaced feeder-name/spatial-title association as the automatic feeder source.
+- Single-feeder and merged overview G drawings now use one unified pipeline:
+  `trusted RMU -> RMU.FEEDER_ID -> G topology component -> dms_section_device`.
+- FeedLine ownership no longer depends on ABH-xx / AJWD-xx text.
+
+### Trusted RMU reference rules
+- An RMU can be used as a feeder reference only when:
+  - its G RMU name resolves to exactly one dms_combined_device record;
+  - RMU ID and FEEDER_ID are valid;
+  - at least one existing RMU device KeyID can be verified;
+  - every currently linked RMU device used as evidence resolves to its expected table/domain and belongs to that same RMU.
+- The following RMUs are reported but ignored as feeder references:
+  - no current model link;
+  - database RMU name 0/multiple records;
+  - missing FEEDER_ID;
+  - existing incorrect/cross-RMU model links.
+
+### Topology consistency guard
+- G XML network objects are grouped by connection geometry using FeedLine, ConnectLine, Bus and major electrical switch objects.
+- RMU frames bridge the network branches that physically enter the cabinet.
+- A topology region with no trusted RMU is `NO_TRUSTED_RMU_REFERENCE` and cannot auto-associate.
+- If trusted RMUs in one connected region expose different FEEDER_ID values, the whole region is blocked as `FEEDER_RMU_CONFLICT` and requires manual confirmation.
+- No majority vote is used.
+- Disconnected fragments independently confirmed to the same FEEDER_ID are consolidated into one allocation pool, preventing duplicate SECxxx assignment.
+
+### FeedLine allocation
+- Once one FEEDER_ID is confirmed, the validator queries the real rows from dms_section_device for that FEEDER_ID.
+- Correct existing FeedLine links reserve their database section first.
+- Wrong-feeder, wrong table/domain or duplicate old links become RELINK candidates.
+- Unlinked + RELINK FeedLines are ordered top-to-bottom, then left-to-right.
+- Remaining database sections are naturally ordered by actual SEC number and assigned from smallest to largest.
+- Database section numbers are never generated by the application.
+- Expected KeyID remains table 13503 / domain 1 and voltype remains dms_section_device.BV_ID.
+
+### Feeder HTML report row markers
+- Added a checkbox column to both `馈线汇总` and `馈线段明细` HTML tables.
+- Checking a row keeps the entire row highlighted while horizontally scrolling.
+- These checkboxes are report-only manual markers and do not participate in validation or write-back.
+- Feeder summary now exposes trusted RMU count, ignored RMU count, trusted RMU names, trusted FEEDER_ID values and ignored-RMU reasons.
+
+### UI
+- Removed the meaningful distinction between single/multi feeder processing modes.
+- Feeder page now shows the fixed mode `RMU 拓扑自动识别（固定）` because the same topology algorithm handles both drawing forms.
+- Updated current-module help to document RMU trust, FEEDER_ID consistency and blocking rules.
+
+### Tests
+- Added topology tests covering:
+  - two trusted RMUs with the same FEEDER_ID;
+  - conflicting FEEDER_ID values blocking the whole connected region;
+  - unlinked RMU ignored while a trusted peer still confirms the region;
+  - existing correct section reservation + smallest remaining SEC allocation;
+  - HTML checkbox/highlight markers.
+
+## [3.5.1] - 2026-08-13
+
+### Composite feeder title recognition fix
+- Fixed a critical v3.5.0 design issue where a G feeder title had to be
+  uniquely resolved in Oracle BEFORE it could become a spatial feeder anchor.
+- G XML is now authoritative for feeder-title spatial detection:
+  - `<Text ts="ABH-03">` and similar engineering titles are extracted first;
+  - composite regions are built from the G titles even when the initial DB
+    title lookup returns zero or multiple rows;
+  - Oracle resolution now confirms the title after the region is established.
+- This prevents a large merged drawing from incorrectly collapsing to:
+  `AMBIGUOUS / 识别馈线区域=1`.
+
+### Feeder title cleanup
+- Added canonical feeder token extraction:
+  - `ABH-03` -> `ABH-03`
+  - `AJWD_07` -> `AJWD-07`
+  - `BAY NO + ABH-17` -> `ABH-17`
+- Clean standalone feeder titles have higher priority than nearby descriptive
+  `BAY NO ...` annotations.
+- A nearby low-quality annotation for the same feeder no longer creates an
+  extra region.
+- Two genuinely separate clean titles with the same feeder name are preserved
+  and flagged as duplicate composite anchors instead of being silently merged.
+
+### Existing-model reverse confirmation
+- When G-title -> Oracle feeder-name lookup cannot uniquely resolve a region,
+  the validator now uses existing linked FeedLine models as a second source:
+  `KeyID -> dms_section_device -> feeder_id -> dms_feeder_device`.
+- The fallback is accepted only when all resolvable linked FeedLines in the
+  region point to one feeder and that feeder name is compatible with the G
+  title.
+- If linked FeedLines in one spatial region resolve to multiple feeder IDs,
+  the region is reported as inconsistent and is not auto-associated.
+
+### Feeder database display-name consistency
+- `get_feeder_info()` now returns the same
+  `station.name + feeder.name` display name used by
+  `find_feeders_by_name_hint()`.
+- This makes reverse KeyID ownership checks compatible with titles such as
+  `ABH-03` versus database display names such as `JED NTH ABH 03`.
+
+### Diagnostics
+- Feeder validation console now logs:
+  - raw G title candidate count;
+  - cleaned G anchor count;
+  - database-uniquely-resolved anchor count;
+  - the actual cleaned G feeder-title list.
+
+### Actual uploaded ABH composite regression
+- The uploaded `JED-NTH-ABH.sln.pic.g` structure was inspected directly.
+- Its XML contains 398 FeedLine objects and clean top feeder titles including
+  ABH-03 through ABH-49.
+- The corrected detector identifies 47 clean title anchors in this source
+  layout instead of one unresolved region.
+- The source drawing contains two clean `ABH-26` titles and no clean `ABH-27`
+  title; both ABH-26 anchors are intentionally retained and reported as a
+  duplicate-title data issue.
+
+## [3.5.0] - 2026-08-13
+
+### Feeder composite-drawing support
+- Feeder model now supports three drawing modes in the desktop UI:
+  - `AUTO` / 自动识别（推荐）;
+  - `SINGLE` / 单馈线图;
+  - `MULTI` / 多馈线组合图.
+- AUTO mode detects a multi-feeder composite when two or more feeder-name anchors above/near Bus objects are uniquely confirmed by the Oracle feeder master data.
+- Single-feeder behavior remains backward-compatible: Bus-near text first, then filename fallback.
+
+### Multi-feeder recognition
+- Long horizontal Bus objects no longer contribute only one nearest Text. All plausible engineering labels immediately above the Bus span are retained as feeder-name candidates.
+- A top-band feeder-title scan is also used so feeder titles placed in the intentional gap between two Bus segments are not missed.
+- Candidate labels are confirmed against `dms_feeder_device`; device numbers and common labels such as SMART/Q1/Y1/BUS are not accepted as feeder anchors.
+- Feeder names continue to use punctuation-insensitive normalized matching, e.g. `ABH-06` -> `ABH06` and can match database display names such as `JED NTH ABH 06`.
+
+### FeedLine region assignment
+- Confirmed feeder anchors are sorted by X coordinate.
+- Composite drawings are partitioned into feeder regions using the midpoint between adjacent anchors.
+- Each `<FeedLine>` is assigned to the corresponding spatial feeder region before database validation.
+- Every feeder region independently performs the existing section validation and assignment logic:
+  - validate existing KeyID/table/domain/owner feeder;
+  - reserve correctly/currently referenced database sections;
+  - order unlinked FeedLine elements top-to-bottom then left-to-right;
+  - allocate remaining `dms_section_device` rows in natural SEC sequence.
+- Existing links are therefore checked against the feeder region in which the FeedLine is actually drawn.
+
+### Topology consistency guard
+- Added a lightweight endpoint-connectivity guard for FeedLine/ConnectLine geometry.
+- Topology is deliberately secondary to spatial regions: future drawings may intentionally connect two feeder regions, so a cross-region connection is reported and never used to merge two feeders automatically.
+- Feeder section reports expose topology component/cross-region metadata for troubleshooting.
+
+### Safety / ambiguous composite handling
+- If the same database feeder is detected at multiple independent composite anchors, both affected regions are blocked from automatic section allocation to prevent reusing the same database section sequence twice.
+- If the user explicitly chooses MULTI mode but fewer than two uniquely confirmed feeder anchors can be found, the file is marked `AMBIGUOUS` and automatic association is blocked.
+- Original G files remain unchanged; all write-back continues to target Workspace safety copies.
+
+### Reports
+- Feeder summary now includes drawing type, feeder-region sequence, and FeedLine assignment method.
+- FeedLine detail now includes drawing type, region sequence, spatial/topology assignment information, and cross-region connectivity flags.
+
+### Database fix
+- Fixed `OracleClient.get_feeder_info()` so feeder master table 13500 is correctly resolved instead of referencing an undefined local variable.
+
+### Validation
+- Added regression coverage for automatic multi-feeder detection, spatial FeedLine partitioning, independent per-feeder section allocation, and duplicate feeder-anchor blocking.
+- No smoke test added.
 
 ## [3.4.0] - 2026-08-13
 

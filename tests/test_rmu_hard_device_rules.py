@@ -24,7 +24,7 @@ def base_row(**kwargs):
     row = {
         "db_code": "Y1",
         "selected_device_name": "Y1",
-        "p_name_string": "Y1",
+        "logical_code": "Y1",
         "db_device_id": 100,
         "model_linked": "NO",
         "model_link_correct": "",
@@ -75,8 +75,8 @@ def test_same_database_device_used_by_two_g_elements_is_hard_error():
     v = validator()
     rmu = {
         "device_rows": [
-            base_row(xml_id="1", p_name_string="Y1", db_device_id=100),
-            base_row(xml_id="2", p_name_string="Y2", db_device_id=100),
+            base_row(xml_id="1", logical_code="Y1", db_device_id=100),
+            base_row(xml_id="2", logical_code="Y2", db_device_id=100),
         ],
         "inventory_issues": [],
         "db_integrity_issues": [],
@@ -93,7 +93,7 @@ def test_unrelated_extra_database_devices_are_not_part_of_one_to_one_rule():
     v = validator()
     rmu = {
         "device_rows": [
-            base_row(xml_id="1", p_name_string="Y1", db_device_id=100),
+            base_row(xml_id="1", logical_code="Y1", db_device_id=100),
         ],
         "inventory_issues": [],
         "db_integrity_issues": [],

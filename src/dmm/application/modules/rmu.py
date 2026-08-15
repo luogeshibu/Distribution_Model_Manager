@@ -25,7 +25,11 @@ class RmuModelModule(ModelModule):
     def _new_validator(self, db, settings, log_callback):
         rules = settings["_runtime_rules"]
         parser = GParser(
-            required_rmu_tags=rules.keys(),
+            # RMU structure is a hard rule: the rectangle must contain all
+            # three core G object types, regardless of configurable table IDs.
+            required_rmu_tags={
+                "CBreakerDis", "ZhaiWaiJieDiDaoZha", "BusDis"
+            },
             label_regex=RMU_LABEL_PATTERN,
             max_distance=RMU_LABEL_SEARCH_MAX_DISTANCE,
             overlap_tolerance=RMU_LABEL_EDGE_TOLERANCE,
@@ -34,7 +38,7 @@ class RmuModelModule(ModelModule):
             db,
             parser,
             rules,
-            breaker_name_source=settings.get("breaker_name_source", "P_NAME_STRING"),
+            breaker_name_source="GRAPHICAL_TEXT",
             log=log_callback,
         )
 
@@ -177,7 +181,7 @@ class RmuModelModule(ModelModule):
             "file_fingerprints": fingerprints,
             "settings_snapshot": {
                 "rmu_name_positions": dict(settings.get("rmu_name_positions", {})),
-                "breaker_name_source": settings.get("breaker_name_source", "P_NAME_STRING"),
+                "breaker_name_source": "GRAPHICAL_TEXT",
                 "device_rules": dict(settings.get("device_rules", {})),
             },
         }
@@ -203,15 +207,19 @@ class RmuModelModule(ModelModule):
         if not preview_data:
             raise RuntimeError("没有可执行的模型关联结果。")
 
-        expected_snapshot = preview_data.get("settings_snapshot", {})
+        expected_snapshot = dict(
+            preview_data.get("settings_snapshot", {}) or {}
+        )
+        # v3.6.6 removed the configurable switch-name source.  Normalize old
+        # preview/settings snapshots so legacy P_NAME_STRING values cannot
+        # falsely trigger a configuration-changed error.
+        expected_snapshot["breaker_name_source"] = "GRAPHICAL_TEXT"
+
         current_snapshot = {
             "rmu_name_positions": dict(
                 settings.get("rmu_name_positions", {})
             ),
-            "breaker_name_source": settings.get(
-                "breaker_name_source",
-                "P_NAME_STRING",
-            ),
+            "breaker_name_source": "GRAPHICAL_TEXT",
             "device_rules": dict(settings.get("device_rules", {})),
         }
         if current_snapshot != expected_snapshot:
@@ -298,7 +306,7 @@ class RmuModelModule(ModelModule):
                 ).strip()
                 tag = str(change.get("tag", "") or "")
                 logical_name = str(
-                    base_row.get("p_name_string")
+                    base_row.get("logical_code")
                     or change.get("device_name")
                     or ""
                 ).strip()
@@ -377,9 +385,9 @@ class RmuModelModule(ModelModule):
                     make_fail(
                         change,
                         base_row,
-                        f"EXEC_CODE_PNAME_MISMATCH: "
+                        f"EXEC_CODE_LOGICAL_MISMATCH: "
                         f"CODE={norm(dev.get('code'))}, "
-                        f"p_NameString={logical_name}",
+                        f"图上逻辑名称={logical_name}",
                     )
                     continue
 

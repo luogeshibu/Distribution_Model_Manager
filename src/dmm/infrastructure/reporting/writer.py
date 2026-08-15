@@ -15,7 +15,10 @@ from dmm.config.constants import APP_NAME, APP_VERSION
 
 
 FEEDER_FIELDS = [
-    "file_name",
+    "file_name", "drawing_type", "region_index",
+    "region_assignment_method",
+    "trusted_rmu_count", "ignored_rmu_count",
+    "trusted_rmu_names", "trusted_feeder_ids", "ignored_rmu_details",
     "feeder_hint", "feeder_hint_source",
     "feeder_normalized_hint",
     "feeder_db_count", "feeder_id", "feeder_name",
@@ -27,6 +30,8 @@ FEEDER_FIELDS = [
 
 FEEDLINE_FIELDS = [
     "file_name", "feeder_name",
+    "drawing_type", "region_index", "region_assignment_method",
+    "topology_component", "topology_cross_region",
     "order_index", "object_type", "xml_id",
     "model_linked", "model_link_correct",
     "current_keyid", "current_device_id",
@@ -41,6 +46,14 @@ FEEDLINE_FIELDS = [
 
 FEEDER_LABELS = {
     "file_name": "G文件",
+    "drawing_type": "图纸类型",
+    "region_index": "馈线区域序号",
+    "region_assignment_method": "FeedLine归属方式",
+    "trusted_rmu_count": "可信环网柜数",
+    "ignored_rmu_count": "忽略环网柜数",
+    "trusted_rmu_names": "可信环网柜",
+    "trusted_feeder_ids": "可信RMU的FEEDER_ID",
+    "ignored_rmu_details": "未作为依据的环网柜说明",
     "feeder_hint": "图上/文件馈线标识",
     "feeder_hint_source": "馈线名称来源",
     "feeder_normalized_hint": "标准化馈线标识",
@@ -61,6 +74,11 @@ FEEDER_LABELS = {
 FEEDLINE_LABELS = {
     "file_name": "G文件",
     "feeder_name": "馈线名称",
+    "drawing_type": "图纸类型",
+    "region_index": "馈线区域序号",
+    "region_assignment_method": "FeedLine归属方式",
+    "topology_component": "连接分量",
+    "topology_cross_region": "连接关系跨区域",
     "order_index": "FeedLine序号",
     "object_type": "G图元类型",
     "xml_id": "图元XML ID",
@@ -89,7 +107,7 @@ FEEDLINE_LABELS = {
 
 DEVICE_FIELDS = [
     "rmu_name", "rmu_id",
-    "object_type", "xml_id", "p_name_string", "graphical_name",
+    "object_type", "xml_id", "logical_code", "graphical_name",
     "selected_name_source", "selected_device_name", "paired_breaker_name",
     "table_id", "table_name", "configured_domain", "match_mode",
     "db_match_count", "db_device_id", "db_code", "db_name",
@@ -106,23 +124,87 @@ DEVICE_FIELDS = [
 
 RMU_FIELDS = [
     "file_name", "frame_index", "frame_xml_id", "rmu_name",
+    "rmu_type", "rmu_type_source", "rmu_type_text", "rmu_type_devref",
+    "rmu_type_consistent", "rmu_type_check_status", "rmu_type_check_reason",
+    "rmu_is_smart", "rmu_smart_marker_types",
     "rmu_status", "rmu_severity", "rmu_reason",
     "rmu_db_count", "rmu_id",
-    "device_count", "linked_correct_count", "unlinked_count",
+    "device_count", "matched_device_count", "device_complete",
+    "linked_correct_count", "unlinked_count",
     "linked_wrong_count", "association_eligible",
     "association_block_reasons", "device_block_reasons",
     "inventory_issues", "db_integrity_issues",
 ]
 
+
+RMU_PROFILE_FIELDS = [
+    "file_name",
+    "frame_index",
+    "frame_xml_id",
+    "rmu_name",
+    "rmu_type",
+    "rmu_type_source",
+    "rmu_type_text",
+    "rmu_type_devref",
+    "rmu_type_consistent",
+    "rmu_type_check_status",
+    "rmu_type_check_reason",
+    "rmu_is_smart",
+    "rmu_smart_marker_types",
+    "rmu_db_count",
+    "database_unique",
+    "rmu_id",
+    "device_count",
+    "matched_device_count",
+    "device_complete",
+    "rmu_status",
+    "rmu_reason",
+]
+
+RMU_PROFILE_LABELS = {
+    "file_name": "G文件",
+    "frame_index": "环网柜序号",
+    "frame_xml_id": "矩形框XML ID",
+    "rmu_name": "环网柜名称",
+    "rmu_type": "环网柜类型",
+    "rmu_type_source": "类型识别来源",
+    "rmu_type_text": "柜内Y/Q文字类型",
+    "rmu_type_devref": "devref类型",
+    "rmu_type_consistent": "类型交叉校验",
+    "rmu_type_check_status": "柜型校验状态",
+    "rmu_type_check_reason": "柜型交叉校验说明",
+    "rmu_is_smart": "是否智能",
+    "rmu_smart_marker_types": "智能标识",
+    "rmu_db_count": "数据库记录数",
+    "database_unique": "数据库是否唯一",
+    "rmu_id": "环网柜ID",
+    "device_count": "G图设备数",
+    "matched_device_count": "数据库唯一匹配设备数",
+    "device_complete": "设备是否完整",
+    "matched_device_count": "数据库唯一匹配设备数",
+    "device_complete": "环网柜设备是否完整",
+    "rmu_status": "校验状态",
+    "rmu_reason": "说明",
+}
+
 DEVICE_LABELS = {
     "file_name": "G文件",
     "rmu_name": "环网柜名称",
+    "rmu_type": "环网柜类型",
+    "rmu_type_source": "类型识别来源",
+    "rmu_type_text": "图内文字类型",
+    "rmu_type_devref": "devref类型",
+    "rmu_type_consistent": "类型交叉校验",
+    "rmu_type_check_status": "柜型校验状态",
+    "rmu_type_check_reason": "柜型交叉校验说明",
+    "rmu_is_smart": "是否智能",
+    "rmu_smart_marker_types": "智能标识",
     "rmu_id": "环网柜ID",
     "object_type": "G图元类型",
     "xml_id": "图元XML ID",
-    "p_name_string": "用于校验的p_NameString",
+    "logical_code": "逻辑CODE（图上规则）",
     "graphical_name": "图上名称",
-    "selected_name_source": "名称来源",
+    "selected_name_source": "设备名称来源",
     "selected_device_name": "最终设备名称",
     "paired_breaker_name": "配对开关名称",
     "table_id": "表号",
@@ -164,6 +246,15 @@ RMU_LABELS = {
     "frame_index": "环网柜序号",
     "frame_xml_id": "矩形框XML ID",
     "rmu_name": "环网柜名称",
+    "rmu_type": "环网柜类型",
+    "rmu_type_source": "类型识别来源",
+    "rmu_type_text": "图内文字类型",
+    "rmu_type_devref": "devref类型",
+    "rmu_type_consistent": "类型交叉校验",
+    "rmu_type_check_status": "柜型校验状态",
+    "rmu_type_check_reason": "柜型交叉校验说明",
+    "rmu_is_smart": "是否智能",
+    "rmu_smart_marker_types": "智能标识",
     "rmu_status": "状态",
     "rmu_severity": "状态类型",
     "rmu_reason": "说明",
@@ -316,21 +407,58 @@ def flatten_rmu_rows(reports):
                         "请检查数据库模型和单线图中的环网柜名称。"
                     )
 
+            device_rows = [
+                d for d in rmu.get("device_rows", [])
+                if d.get("xml_id")
+            ]
+            matched_device_count = sum(
+                1
+                for d in device_rows
+                if int(d.get("db_match_count") or 0) == 1
+                and (
+                    db_count != 1
+                    or str(d.get("db_combined_id", ""))
+                    == str(unique_record.get("id", ""))
+                )
+            )
+            device_complete = (
+                db_count == 1
+                and bool(device_rows)
+                and matched_device_count == len(device_rows)
+            )
+
             row = {
                 "file_name": file_name,
                 "frame_index": rmu.get("frame_index", ""),
                 "frame_xml_id": rmu.get("frame_xml_id", ""),
                 "rmu_name": rmu.get("rmu_name", ""),
+                "rmu_type": rmu.get("rmu_type", "UNKNOWN"),
+                "rmu_type_source": rmu.get("rmu_type_source", ""),
+                "rmu_type_text": rmu.get("rmu_type_text", ""),
+                "rmu_type_devref": rmu.get("rmu_type_devref", ""),
+                "rmu_type_consistent": rmu.get("rmu_type_consistent", ""),
+                "rmu_type_check_status": rmu.get(
+                    "rmu_type_check_status",
+                    "",
+                ),
+                "rmu_type_check_reason": rmu.get(
+                    "rmu_type_check_reason",
+                    "",
+                ),
+                "rmu_is_smart": rmu.get("rmu_is_smart", "NO"),
+                "rmu_smart_marker_types": rmu.get(
+                    "rmu_smart_marker_types",
+                    "",
+                ),
                 "rmu_status": status,
                 "rmu_severity": severity,
                 "rmu_reason": reason,
                 "rmu_db_count": db_count,
                 # Duplicate RMU: intentionally DO NOT list multiple IDs.
                 "rmu_id": unique_record.get("id", "") if db_count == 1 else "",
-                "device_count": len([
-                    d for d in rmu.get("device_rows", [])
-                    if d.get("xml_id")
-                ]),
+                "device_count": len(device_rows),
+                "matched_device_count": matched_device_count,
+                "device_complete": "YES" if device_complete else "NO",
                 "linked_correct_count": rmu.get(
                     "linked_correct_count", 0
                 ),
@@ -364,6 +492,20 @@ def flatten_rmu_rows(reports):
             _numeric_sequence(r.get("frame_index", "")),
         ),
     )
+
+
+
+def flatten_rmu_profile_rows(reports):
+    """Compact one-row-per-RMU inventory required for field review."""
+    rows = flatten_rmu_rows(reports)
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["database_unique"] = (
+            "YES" if int(item.get("rmu_db_count") or 0) == 1 else "NO"
+        )
+        result.append(item)
+    return result
 
 
 def flatten_device_rows(reports):
@@ -407,6 +549,16 @@ def flatten_feeder_rows(reports):
         feedline_rows = list(report.get("feedline_rows", []))
         rows.append({
             "file_name": report.get("file_name", ""),
+            "drawing_type": report.get("drawing_type", "SINGLE_FEEDER"),
+            "region_index": report.get("region_index", 1),
+            "region_assignment_method": report.get(
+                "region_assignment_method", "WHOLE_FILE"
+            ),
+            "trusted_rmu_count": report.get("trusted_rmu_count", 0),
+            "ignored_rmu_count": report.get("ignored_rmu_count", 0),
+            "trusted_rmu_names": report.get("trusted_rmu_names", ""),
+            "trusted_feeder_ids": report.get("trusted_feeder_ids", ""),
+            "ignored_rmu_details": report.get("ignored_rmu_details", ""),
             "feeder_hint": report.get("feeder_hint", ""),
             "feeder_hint_source": report.get("feeder_hint_source", ""),
             "feeder_normalized_hint": report.get(
@@ -551,7 +703,17 @@ def export_csv_bundle(reports, export_path):
         ["file_name"] + DEVICE_FIELDS,
         DEVICE_LABELS,
     )
-    return [rmu_path, dev_path]
+
+    profile_path = base.with_name(
+        base.name + "_环网柜档案.csv"
+    )
+    _write_csv(
+        profile_path,
+        flatten_rmu_profile_rows(reports),
+        RMU_PROFILE_FIELDS,
+        RMU_PROFILE_LABELS,
+    )
+    return [rmu_path, dev_path, profile_path]
 
 def _table_html(
     rows,
@@ -641,7 +803,21 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules):
         for tag, rule in domain_rules.items()
     )
 
-    rmu_table = _table_html(rmu_rows, RMU_FIELDS, RMU_LABELS, "rmu_status", selectable=True)
+    rmu_table = _table_html(
+        rmu_rows,
+        RMU_FIELDS,
+        RMU_LABELS,
+        "rmu_status",
+        selectable=True,
+    )
+    rmu_profile_rows = flatten_rmu_profile_rows(reports)
+    rmu_profile_table = _table_html(
+        rmu_profile_rows,
+        RMU_PROFILE_FIELDS,
+        RMU_PROFILE_LABELS,
+        "rmu_status",
+        selectable=True,
+    )
     device_fields = ["file_name"] + DEVICE_FIELDS
     device_table = _table_html(device_rows, device_fields, DEVICE_LABELS, "status", selectable=True)
 
@@ -706,7 +882,7 @@ thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}
       </div>
       <div class="status-item warn">
         <strong>黄色 UNLINKED</strong>
-        <span>当前 G 图元尚未关联；数据库 RMU 和目标设备均唯一且符合 CODE/p_NameString 与环网柜归属规则，可以关联。</span>
+        <span>当前 G 图元尚未关联；数据库 RMU 和目标设备均唯一且符合 CODE/图上逻辑名称与环网柜归属规则，可以关联。</span>
       </div>
       <div class="status-item relink" style="background:#FFE8CC">
         <strong>橙色 RELINK</strong>
@@ -714,7 +890,7 @@ thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}
       </div>
       <div class="status-item rmu-relink" style="background:#F0E7FF">
         <strong>紫色 RMU_RELINK</strong>
-        <span>当前 KeyID 指向了其他环网柜，但当前 RMU 唯一，并且本 RMU 内 CODE/p_NameString 已唯一确定正确设备；允许重新关联到当前环网柜。</span>
+        <span>当前 KeyID 指向了其他环网柜，但当前 RMU 唯一，并且本 RMU 内 CODE/图上逻辑名称已唯一确定正确设备；允许重新关联到当前环网柜。</span>
       </div>
       <div class="status-item blocked">
         <strong>蓝色 BLOCKED</strong>
@@ -722,9 +898,15 @@ thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}
       </div>
       <div class="status-item fail">
         <strong>红色 FAIL</strong>
-        <span>数据库当前事实无法安全确定目标，例如 RMU 0/多条、当前 RMU 内 CODE 0/多条、CODE 与逻辑 p_NameString 不一致、目标设备不属于当前 RMU、Expected KeyID 或 BV_ID 无效。</span>
+        <span>数据库当前事实无法安全确定目标，例如 RMU 0/多条、当前 RMU 内 CODE 0/多条、CODE 与图上逻辑名称不一致、目标设备不属于当前 RMU、Expected KeyID 或 BV_ID 无效。</span>
       </div>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>环网柜档案</h2>
+    <p>每个环网柜仅一行，集中展示柜名、柜型、是否智能、数据库唯一性以及设备完整性。</p>
+    {rmu_profile_table}
   </div>
 
   <div class="card">
@@ -773,12 +955,14 @@ def _export_feeder_html_bundle(reports, export_path, domain_rules):
         FEEDER_FIELDS,
         FEEDER_LABELS,
         "status",
+        selectable=True,
     )
     feedline_table = _table_html(
         feedline_rows,
         FEEDLINE_FIELDS,
         FEEDLINE_LABELS,
         "status",
+        selectable=True,
     )
 
     text = f"""<!doctype html>
@@ -805,6 +989,11 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
 .warn{{background:#FFF8DE}}
 .fail{{background:#FFF0F0}}
 .info{{background:#EAF3FF}}
+.row-selected td{{background:#DCEEFF !important;box-shadow:inset 0 1px #8AB8F5,inset 0 -1px #8AB8F5}}
+.select-col{{width:42px;min-width:42px;text-align:center;position:sticky;left:0;z-index:3}}
+th.select-col{{z-index:5;background:var(--green-dark)}}
+td.select-col{{background:inherit}}
+.row-check{{width:16px;height:16px;cursor:pointer}}
 .status-list{{display:flex;flex-direction:column;gap:8px;max-width:1100px}}
 .status-item{{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:14px;padding:9px 12px;border-radius:6px;border:1px solid var(--border)}}
 .meta{{color:#D7EEE5}}
@@ -845,16 +1034,23 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
 
   <div class="card">
     <h2>馈线汇总</h2>
-    <p>当前版本按单馈线图处理。优先读取 Bus 周围最近有效文字作为馈线名称；失败后再从文件名提取。名称比较会忽略横线、下划线和空格。</p>
+    <p>馈线归属不再依赖图上馈线名称。程序先构建 G 图连接拓扑，再使用“数据库唯一且已有正确模型证据”的环网柜作为可信参考。一个连接区域内可信环网柜的 FEEDER_ID 必须完全一致；若出现多个不同 FEEDER_ID，整个区域禁止自动关联并要求人工确认。未关联、数据库0/多条或已有错误模型的环网柜只报告，不参与馈线判定。</p>
     {feeder_table}
   </div>
 
   <div class="card">
     <h2>馈线段明细</h2>
-    <p>已经关联的 FeedLine 只检查当前 KeyID 是否属于本馈线。未关联 FeedLine 按从上到下、从左到右排序，并依次使用本馈线下尚未被占用的 dms_section_device 记录。</p>
+    <p>每个拓扑连接区域确认唯一 FEEDER_ID 后，程序查询该 FEEDER_ID 下真实存在的 dms_section_device。已正确关联的 FeedLine 先占用对应数据库记录；旧关联错误或未关联的 FeedLine 再按从上到下、同高度从左到右排序，并从剩余数据库馈线段按自然序号从小到大依次分配。表格左侧复选框仅用于人工标记，勾选后整行持续高亮，不参与任何模型关联逻辑。</p>
     {feedline_table}
   </div>
 </main>
+<script>
+function toggleSelectedRow(cb) {{
+  const row = cb.closest('tr');
+  if (!row) return;
+  row.classList.toggle('row-selected', cb.checked);
+}}
+</script>
 </body>
 </html>"""
 

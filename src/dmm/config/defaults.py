@@ -10,7 +10,7 @@ DEFAULT_DEVICE_RULES = {
     "CBreakerDis": {
         "table_id": 13502,
         "domain": 40,
-        "match_mode": "CODE_EQUALS_PNAME",
+        "match_mode": "CODE_EQUALS_LOGICAL_CODE",
         "description": "配网开关/断路器",
     },
     "ZhaiWaiJieDiDaoZha": {
@@ -22,7 +22,7 @@ DEFAULT_DEVICE_RULES = {
     "BusDis": {
         "table_id": 13506,
         "domain": 1,
-        "match_mode": "CODE_EQUALS_PNAME",
+        "match_mode": "CODE_EQUALS_LOGICAL_CODE",
         "description": "母线",
     },
 }
@@ -44,8 +44,9 @@ DEFAULT_SETTINGS = {
     "db": DEFAULT_DB_CONFIG,
     "rmu_name_positions": DEFAULT_NAME_POSITIONS,
     "device_rules": {},
-    "breaker_name_source": "P_NAME_STRING",
+    "breaker_name_source": "GRAPHICAL_TEXT",
     "feeder_table_id": 13500,
     "section_table_id": 13503,
     "section_domain": 1,
+    "drawing_mode": "AUTO",
 }

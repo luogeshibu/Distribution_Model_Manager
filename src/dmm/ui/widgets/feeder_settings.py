@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QGroupBox,
     QGridLayout, QSpinBox, QPushButton, QSizePolicy,
-    QAbstractSpinBox,
+    QAbstractSpinBox, QComboBox,
 )
 
 
@@ -97,9 +97,9 @@ class FeederSettingsWidget(QWidget):
         root.setSpacing(12)
 
         info = QLabel(
-            "馈线模型当前页面仅配置馈线段数据库表号和域号。"
-            "馈线识别方式、FeedLine 关联顺序、KeyID / BV_ID 回写规则，"
-            "请点击模型任务右侧的【当前模型帮助】查看。"
+            "馈线模型支持自动识别单馈线图和多馈线组合大图。"
+            "组合图会利用 Bus 上方馈线名称锚点及馈线之间的空间间隔"
+            "对 FeedLine 分区；详细规则请点击【当前模型帮助】。"
         )
         info.setWordWrap(True)
         info.setObjectName("moduleDescription")
@@ -108,6 +108,23 @@ class FeederSettingsWidget(QWidget):
             QSizePolicy.Preferred,
         )
         root.addWidget(info)
+
+        mode_box = QGroupBox("图纸类型识别")
+        mode_grid = QGridLayout(mode_box)
+        mode_grid.setContentsMargins(14, 18, 14, 14)
+        mode_grid.addWidget(QLabel("处理模式"), 0, 0)
+        self.drawing_mode = QComboBox()
+        self.drawing_mode.addItem("RMU 拓扑自动识别（固定）", "AUTO")
+        self.drawing_mode.setCurrentIndex(0)
+        self.drawing_mode.setEnabled(False)
+        self.drawing_mode.setToolTip(
+            "单馈线图和组合大图统一使用 RMU + 连接拓扑 + FEEDER_ID 识别，"
+            "不再依赖馈线名称或人工指定图纸类型。"
+        )
+        self.drawing_mode.setMinimumHeight(36)
+        mode_grid.addWidget(self.drawing_mode, 0, 1)
+        mode_grid.setColumnStretch(1, 1)
+        root.addWidget(mode_box)
 
         mapping = QGroupBox("馈线段数据库表与域配置")
         mapping.setSizePolicy(
@@ -162,6 +179,7 @@ class FeederSettingsWidget(QWidget):
         root.addWidget(mapping)
 
     def restore_defaults(self):
+        self.drawing_mode.setCurrentIndex(0)
         self.section_table.setValue(self.DEFAULT_SECTION_TABLE_ID)
         self.section_domain.setValue(self.DEFAULT_SECTION_DOMAIN)
 
@@ -171,4 +189,5 @@ class FeederSettingsWidget(QWidget):
             "feeder_table_id": self.DEFAULT_FEEDER_TABLE_ID,
             "section_table_id": int(self.section_table.value()),
             "section_domain": int(self.section_domain.value()),
+            "drawing_mode": str(self.drawing_mode.currentData() or "AUTO"),
         }
