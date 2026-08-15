@@ -75,11 +75,10 @@ def test_rmu_csv_bundle_merges_profile_into_summary(tmp_path):
     assert "2L1T" in text
     assert "SMART, SMR" in text
     assert "YES" in text
-
     assert not list(tmp_path.glob("*环网柜档案.csv"))
 
 
-def test_rmu_html_contains_smart_but_not_profile_section(tmp_path):
+def test_rmu_html_contains_unified_rmu_summary(tmp_path):
     html = tmp_path / "report.html"
     export_html_bundle(
         _reports(),
@@ -93,6 +92,8 @@ def test_rmu_html_contains_smart_but_not_profile_section(tmp_path):
     text = html.read_text(encoding="utf-8")
     assert "环网柜档案" not in text
     assert "环网柜汇总" in text
+    assert "数据库是否唯一" in text
+    assert "环网柜设备是否完整" in text
     assert "设备明细" in text
     assert "是否智能" in text
     assert "智能标识" in text
