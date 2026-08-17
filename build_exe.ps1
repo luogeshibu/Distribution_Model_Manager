@@ -3,8 +3,8 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectRoot
 
-$BuildScriptVersion = "3.7.1"
-$AppName = "Distribution_Model_Manager_v3.7.1"
+$BuildScriptVersion = "4.0.5"
+$AppName = "Distribution_Model_Manager_v4.0.5"
 
 $VenvDir = Join-Path $ProjectRoot ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
@@ -83,7 +83,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "[3/6] Verifying Python dependencies..."
 
-& $VenvPython -c "import getpass, ssl, socket, secrets, oracledb, cryptography, cffi, _cffi_backend, PySide6; print('Dependencies OK'); print('oracledb=', oracledb.__version__); print('cryptography=', cryptography.__version__)"
+& $VenvPython -c "import getpass, ssl, socket, secrets, oracledb, cryptography, cffi, _cffi_backend, PySide6, paramiko, bcrypt, nacl; print('Dependencies OK'); print('oracledb=', oracledb.__version__); print('cryptography=', cryptography.__version__)"
 if ($LASTEXITCODE -ne 0) {
     throw "Python dependency verification failed."
 }
@@ -127,13 +127,20 @@ Write-Host "[5/6] Building EXE..."
     --hidden-import "cryptography.hazmat.primitives" `
     --hidden-import "cryptography.hazmat.primitives.ciphers" `
     --hidden-import "cryptography.hazmat.primitives.kdf" `
+    --hidden-import "paramiko" `
+    --hidden-import "bcrypt" `
+    --hidden-import "nacl" `
     --hidden-import "dmm.application.modules.rmu" `
     --hidden-import "dmm.application.modules.feeder" `
     --collect-all "oracledb" `
     --collect-all "cryptography" `
     --collect-all "cffi" `
+    --collect-all "paramiko" `
+    --collect-all "bcrypt" `
+    --collect-all "nacl" `
     --copy-metadata "oracledb" `
     --copy-metadata "cryptography" `
+    --copy-metadata "paramiko" `
     app.py
 
 if ($LASTEXITCODE -ne 0) {
@@ -163,6 +170,13 @@ if (!$CryptoMatches -or $CryptoMatches.Count -eq 0) {
     throw "No cryptography files found in packaged output."
 }
 
+$ParamikoMatches = Get-ChildItem -Path $DistAppDir -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match "paramiko" }
+
+if (!$ParamikoMatches -or $ParamikoMatches.Count -eq 0) {
+    throw "No paramiko files found in packaged output."
+}
+
 $CffiMatches = Get-ChildItem -Path $DistAppDir -Recurse -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -match "cffi" }
 
@@ -178,6 +192,7 @@ if (!$CffiBackendMatches -or $CffiBackendMatches.Count -eq 0) {
 }
 
 Write-Host "oracledb packaged files     : $($OracleMatches.Count)"
+Write-Host "paramiko packaged files     : $($ParamikoMatches.Count)"
 Write-Host "cryptography packaged files : $($CryptoMatches.Count)"
 Write-Host "cffi packaged files         : $($CffiMatches.Count)"
 Write-Host "_cffi_backend binary files  : $($CffiBackendMatches.Count)"

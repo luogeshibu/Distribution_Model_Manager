@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QGroupBox,
     QGridLayout, QSpinBox, QPushButton, QSizePolicy,
-    QAbstractSpinBox, QComboBox,
+    QAbstractSpinBox, QComboBox, QCheckBox, QLineEdit,
 )
 
 
@@ -76,6 +76,13 @@ class NoWheelSpinBox(QSpinBox):
         event.ignore()
 
 
+class NoWheelComboBox(QComboBox):
+    """禁止鼠标滚轮误切换选项，仍允许点击下拉和键盘操作。"""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class FeederSettingsWidget(QWidget):
     DEFAULT_FEEDER_TABLE_ID = 13500
     DEFAULT_SECTION_TABLE_ID = 13503
@@ -97,9 +104,11 @@ class FeederSettingsWidget(QWidget):
         root.setSpacing(12)
 
         info = QLabel(
-            "馈线模型支持自动识别单馈线图和多馈线组合大图。"
-            "组合图会利用 Bus 上方馈线名称锚点及馈线之间的空间间隔"
-            "对 FeedLine 分区；详细规则请点击【当前模型帮助】。"
+            "馈线模型仅支持三种馈线确定方式：G 根节点 facID、文件名、人工输入。"
+            "三种方式最终都必须唯一匹配到 13500 / dms_feeder_device；"
+            "如果不能唯一确认，则直接报错并阻断，不再使用 RMU、连接拓扑或 "
+            "FEEDER_ID 反推馈线。确认馈线后，程序可按需补齐缺失的 "
+            "dms_section_device，再按原有规则关联 FeedLine。"
         )
         info.setWordWrap(True)
         info.setObjectName("moduleDescription")
@@ -109,22 +118,94 @@ class FeederSettingsWidget(QWidget):
         )
         root.addWidget(info)
 
-        mode_box = QGroupBox("图纸类型识别")
-        mode_grid = QGridLayout(mode_box)
-        mode_grid.setContentsMargins(14, 18, 14, 14)
-        mode_grid.addWidget(QLabel("处理模式"), 0, 0)
-        self.drawing_mode = QComboBox()
-        self.drawing_mode.addItem("RMU 拓扑自动识别（固定）", "AUTO")
-        self.drawing_mode.setCurrentIndex(0)
-        self.drawing_mode.setEnabled(False)
-        self.drawing_mode.setToolTip(
-            "单馈线图和组合大图统一使用 RMU + 连接拓扑 + FEEDER_ID 识别，"
-            "不再依赖馈线名称或人工指定图纸类型。"
+        resolution_box = QGroupBox("馈线识别与数据库补齐")
+        resolution_grid = QGridLayout(resolution_box)
+        resolution_grid.setContentsMargins(14, 18, 14, 14)
+        resolution_grid.setHorizontalSpacing(12)
+        resolution_grid.setVerticalSpacing(10)
+
+        resolution_grid.addWidget(QLabel("馈线识别方式"), 0, 0)
+        self.feeder_resolution_mode = NoWheelComboBox()
+        self.feeder_resolution_mode.addItem(
+            "自动：facID → 文件名 → 人工输入",
+            "AUTO",
         )
-        self.drawing_mode.setMinimumHeight(36)
-        mode_grid.addWidget(self.drawing_mode, 0, 1)
-        mode_grid.setColumnStretch(1, 1)
-        root.addWidget(mode_box)
+        self.feeder_resolution_mode.addItem(
+            "仅使用 G 根节点 facID",
+            "FACID",
+        )
+        self.feeder_resolution_mode.addItem(
+            "仅使用文件名",
+            "FILENAME",
+        )
+        self.feeder_resolution_mode.addItem(
+            "人工输入",
+            "MANUAL",
+        )
+        saved_mode = str(
+            config.get("feeder_resolution_mode", "AUTO") or "AUTO"
+        ).upper()
+        mode_index = self.feeder_resolution_mode.findData(saved_mode)
+        self.feeder_resolution_mode.setCurrentIndex(
+            mode_index if mode_index >= 0 else 0
+        )
+        self.feeder_resolution_mode.setMinimumHeight(36)
+        resolution_grid.addWidget(
+            self.feeder_resolution_mode,
+            0,
+            1,
+            1,
+            2,
+        )
+
+        resolution_grid.addWidget(QLabel("人工馈线名称"), 1, 0)
+        self.manual_feeder_name = QLineEdit(
+            str(config.get("manual_feeder_name", "") or "")
+        )
+        self.manual_feeder_name.setPlaceholderText(
+            "例如：JED CTL ADF 16"
+        )
+        self.manual_feeder_name.setMinimumHeight(36)
+        resolution_grid.addWidget(
+            self.manual_feeder_name,
+            1,
+            1,
+            1,
+            2,
+        )
+
+        self.auto_create_missing_sections = QCheckBox(
+            "执行模型关联时自动创建数据库中缺失的馈线段"
+        )
+        self.auto_create_missing_sections.setChecked(
+            bool(config.get("auto_create_missing_sections", True))
+        )
+        self.auto_create_missing_sections.setToolTip(
+            "仅 INSERT DMS_SECTION_DEVICE 中确实不存在的记录；"
+            "不会 UPDATE / DELETE 已有记录。创建成功后会重新查询数据库，"
+            "再计算 Expected KeyID 并修改本地 G 输出副本。"
+        )
+        resolution_grid.addWidget(
+            self.auto_create_missing_sections,
+            2,
+            0,
+            1,
+            3,
+        )
+
+        db_notice = QLabel(
+            "数据库写入边界：仅在此选项启用且执行【模型关联】时，"
+            "允许 INSERT 缺失的 DMS_SECTION_DEVICE。"
+            "模型校验阶段不写数据库；已有馈线段绝不重复创建。"
+        )
+        db_notice.setWordWrap(True)
+        db_notice.setStyleSheet(
+            "background:#FFF7E6;color:#8A5A00;"
+            "border:1px solid #F1D59B;border-radius:6px;padding:7px 9px;"
+        )
+        resolution_grid.addWidget(db_notice, 3, 0, 1, 3)
+        resolution_grid.setColumnStretch(1, 1)
+        root.addWidget(resolution_box)
 
         mapping = QGroupBox("馈线段数据库表与域配置")
         mapping.setSizePolicy(
@@ -179,9 +260,11 @@ class FeederSettingsWidget(QWidget):
         root.addWidget(mapping)
 
     def restore_defaults(self):
-        self.drawing_mode.setCurrentIndex(0)
         self.section_table.setValue(self.DEFAULT_SECTION_TABLE_ID)
         self.section_domain.setValue(self.DEFAULT_SECTION_DOMAIN)
+        self.feeder_resolution_mode.setCurrentIndex(0)
+        self.manual_feeder_name.clear()
+        self.auto_create_missing_sections.setChecked(True)
 
     def collect_settings(self):
         # 馈线主表 13500 是程序内部固定业务表，不再作为用户配置项显示。
@@ -189,5 +272,11 @@ class FeederSettingsWidget(QWidget):
             "feeder_table_id": self.DEFAULT_FEEDER_TABLE_ID,
             "section_table_id": int(self.section_table.value()),
             "section_domain": int(self.section_domain.value()),
-            "drawing_mode": str(self.drawing_mode.currentData() or "AUTO"),
+            "feeder_resolution_mode": str(
+                self.feeder_resolution_mode.currentData() or "AUTO"
+            ),
+            "manual_feeder_name": self.manual_feeder_name.text().strip(),
+            "auto_create_missing_sections": bool(
+                self.auto_create_missing_sections.isChecked()
+            ),
         }

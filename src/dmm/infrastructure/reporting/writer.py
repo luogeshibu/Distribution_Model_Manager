@@ -15,56 +15,79 @@ from dmm.config.constants import APP_NAME, APP_VERSION
 
 
 FEEDER_FIELDS = [
-    "file_name", "drawing_type", "region_index",
-    "region_assignment_method",
-    "trusted_rmu_count", "ignored_rmu_count",
-    "trusted_rmu_names", "trusted_feeder_ids", "ignored_rmu_details",
-    "feeder_hint", "feeder_hint_source",
-    "feeder_normalized_hint",
-    "feeder_db_count", "feeder_id", "feeder_name",
-    "feedline_count", "linked_correct_count",
-    "unlinked_count", "error_count",
-    "association_ready_count", "association_eligible",
-    "status", "severity", "reason",
+    "file_name",
+    "feeder_resolution_source",
+    "feeder_resolution_evidence",
+    "feeder_db_count",
+    "feeder_id",
+    "feeder_name",
+    "station_name",
+    "station_bv_id",
+    "section_nominal_voltage_kv",
+    "section_prefix",
+    "feedline_count",
+    "database_section_count",
+    "planned_create_count",
+    "linked_correct_count",
+    "unlinked_count",
+    "error_count",
+    "association_ready_count",
+    "association_eligible",
+    "status",
+    "severity",
+    "reason",
 ]
 
 FEEDLINE_FIELDS = [
-    "file_name", "feeder_name",
-    "drawing_type", "region_index", "region_assignment_method",
-    "topology_component", "topology_cross_region",
-    "order_index", "object_type", "xml_id",
-    "model_linked", "model_link_correct",
-    "current_keyid", "current_device_id",
-    "current_table_id", "current_domain",
-    "current_db_name", "current_db_code",
-    "current_bv_id", "current_feeder_id",
-    "assigned_device_id", "assigned_section_name", "assigned_bv_id",
-    "expected_keyid", "expected_keyid_verified",
-    "association_ready", "writeback_needed",
-    "status", "severity", "reason",
+    "file_name",
+    "feeder_name",
+    "feeder_resolution_source",
+    "order_index",
+    "object_type",
+    "xml_id",
+    "ls",
+    "planned_section_type",
+    "db_create_needed",
+    "model_linked",
+    "model_link_correct",
+    "current_keyid",
+    "current_device_id",
+    "current_table_id",
+    "current_domain",
+    "current_db_name",
+    "current_db_code",
+    "current_bv_id",
+    "current_feeder_id",
+    "assigned_device_id",
+    "assigned_section_name",
+    "assigned_bv_id",
+    "expected_keyid",
+    "expected_keyid_verified",
+    "association_ready",
+    "writeback_needed",
+    "status",
+    "severity",
+    "reason",
 ]
 
 FEEDER_LABELS = {
     "file_name": "G文件",
-    "drawing_type": "图纸类型",
-    "region_index": "馈线区域序号",
-    "region_assignment_method": "FeedLine归属方式",
-    "trusted_rmu_count": "可信环网柜数",
-    "ignored_rmu_count": "忽略环网柜数",
-    "trusted_rmu_names": "可信环网柜",
-    "trusted_feeder_ids": "可信RMU的FEEDER_ID",
-    "ignored_rmu_details": "未作为依据的环网柜说明",
-    "feeder_hint": "图上/文件馈线标识",
-    "feeder_hint_source": "馈线名称来源",
-    "feeder_normalized_hint": "标准化馈线标识",
-    "feeder_db_count": "馈线数据库匹配数",
+    "feeder_resolution_source": "馈线识别方式",
+    "feeder_resolution_evidence": "馈线识别依据",
+    "feeder_db_count": "13500数据库匹配数",
     "feeder_id": "馈线ID",
     "feeder_name": "数据库馈线名称",
+    "station_name": "所属变电站",
+    "station_bv_id": "馈线段创建BV_ID",
+    "section_nominal_voltage_kv": "馈线段创建电压等级(kV)",
+    "section_prefix": "馈线段名称前缀",
     "feedline_count": "FeedLine图元数",
+    "database_section_count": "数据库已有馈线段数",
+    "planned_create_count": "计划新增馈线段数",
     "linked_correct_count": "已正确关联数",
     "unlinked_count": "未关联数",
     "error_count": "错误数",
-    "association_ready_count": "可自动关联数",
+    "association_ready_count": "可执行关联数",
     "association_eligible": "馈线可执行关联",
     "status": "状态",
     "severity": "状态类型",
@@ -74,14 +97,13 @@ FEEDER_LABELS = {
 FEEDLINE_LABELS = {
     "file_name": "G文件",
     "feeder_name": "馈线名称",
-    "drawing_type": "图纸类型",
-    "region_index": "馈线区域序号",
-    "region_assignment_method": "FeedLine归属方式",
-    "topology_component": "连接分量",
-    "topology_cross_region": "连接关系跨区域",
+    "feeder_resolution_source": "馈线识别方式",
     "order_index": "FeedLine序号",
     "object_type": "G图元类型",
     "xml_id": "图元XML ID",
+    "ls": "ls",
+    "planned_section_type": "SECTION_TYPE",
+    "db_create_needed": "是否需要创建数据库馈线段",
     "model_linked": "是否已关联",
     "model_link_correct": "当前模型是否正确",
     "current_keyid": "当前KeyID",
@@ -489,27 +511,49 @@ def flatten_feeder_rows(reports):
     rows = []
     for report in reports:
         feedline_rows = list(report.get("feedline_rows", []))
+        section_plan = list(report.get("section_create_plan", []) or [])
+        database_section_count = 0
+        # Current validator exposes available_count after DB query; when absent,
+        # derive a conservative count from rows that resolve to a current DB ID.
+        if report.get("available_count") not in (None, ""):
+            try:
+                database_section_count = int(report.get("available_count") or 0)
+            except (TypeError, ValueError):
+                database_section_count = 0
+        else:
+            database_section_count = len({
+                str(row.get("current_device_id"))
+                for row in feedline_rows
+                if row.get("current_device_id") not in (None, "")
+            })
+
         rows.append({
             "file_name": report.get("file_name", ""),
-            "drawing_type": report.get("drawing_type", "SINGLE_FEEDER"),
-            "region_index": report.get("region_index", 1),
-            "region_assignment_method": report.get(
-                "region_assignment_method", "WHOLE_FILE"
+            "feeder_resolution_source": report.get(
+                "feeder_resolution_source",
+                report.get("feeder_hint_source", ""),
             ),
-            "trusted_rmu_count": report.get("trusted_rmu_count", 0),
-            "ignored_rmu_count": report.get("ignored_rmu_count", 0),
-            "trusted_rmu_names": report.get("trusted_rmu_names", ""),
-            "trusted_feeder_ids": report.get("trusted_feeder_ids", ""),
-            "ignored_rmu_details": report.get("ignored_rmu_details", ""),
-            "feeder_hint": report.get("feeder_hint", ""),
-            "feeder_hint_source": report.get("feeder_hint_source", ""),
-            "feeder_normalized_hint": report.get(
-                "feeder_normalized_hint", ""
+            "feeder_resolution_evidence": report.get(
+                "feeder_resolution_evidence", ""
             ),
             "feeder_db_count": len(report.get("feeder_records", []) or []),
             "feeder_id": report.get("feeder_id", ""),
             "feeder_name": report.get("feeder_name", ""),
+            "station_name": report.get(
+                "section_station_name",
+                report.get("station_name", ""),
+            ),
+            "station_bv_id": report.get(
+                "section_station_bv_id",
+                report.get("station_bv_id", ""),
+            ),
+            "section_nominal_voltage_kv": report.get(
+                "section_nominal_voltage_kv", ""
+            ),
+            "section_prefix": report.get("section_prefix", ""),
             "feedline_count": len(feedline_rows),
+            "database_section_count": database_section_count,
+            "planned_create_count": len(section_plan),
             "linked_correct_count": sum(
                 1 for row in feedline_rows
                 if row.get("model_link_correct") == "YES"
@@ -545,19 +589,28 @@ def flatten_feedline_rows(reports):
     for report in reports:
         file_name = report.get("file_name", "")
         feeder_name = report.get("feeder_name", "")
+        resolution_source = report.get(
+            "feeder_resolution_source",
+            report.get("feeder_hint_source", ""),
+        )
         for row in report.get("feedline_rows", []):
             item = dict(row)
             item.pop("x", None)
             item.pop("y", None)
+            # Obsolete topology/RMU feeder-identification data is intentionally
+            # not exported by the feeder report.
+            item.pop("topology_component", None)
+            item.pop("topology_cross_region", None)
             item["file_name"] = file_name
             item["feeder_name"] = feeder_name
+            item["feeder_resolution_source"] = resolution_source
             rows.append(item)
 
     return sorted(
         rows,
         key=lambda row: (
             str(row.get("file_name", "")),
-            _numeric_sequence(row.get("order_index", "")),
+            int(row.get("order_index") or 10**9),
         ),
     )
 
@@ -931,7 +984,7 @@ td.select-col{{background:inherit}}
       <thead><tr><th>G 图元类型</th><th>表号</th><th>域号</th></tr></thead>
       <tbody>{domain_rows}</tbody>
     </table>
-    <p>馈线主表：13500 / dms_feeder_device。馈线段表：13503 / dms_section_device，默认域号 1；回写 voltype 使用目标馈线段 BV_ID。</p>
+    <p>馈线识别只允许 facID、文件名、人工输入三种方式，最终必须唯一匹配 13500 / dms_feeder_device。405 / substation 用于确定馈线所属变电站；创建馈线段的 BV_ID 从该站 402 / voltagelevel 中选择，并通过 401 / basevoltage 只保留 110kV、33kV、13.8kV，存在多个时选择数值最小的电压等级。唯一允许写入的数据库表是 13503 / dms_section_device，模型域号为 1。</p>
   </div>
 
   <div class="card">
@@ -954,13 +1007,13 @@ td.select-col{{background:inherit}}
 
   <div class="card">
     <h2>馈线汇总</h2>
-    <p>馈线归属不再依赖图上馈线名称。程序先构建 G 图连接拓扑，再使用“数据库唯一且已有正确模型证据”的环网柜作为可信参考。一个连接区域内可信环网柜的 FEEDER_ID 必须完全一致；若出现多个不同 FEEDER_ID，整个区域禁止自动关联并要求人工确认。未关联、数据库0/多条或已有错误模型的环网柜只报告，不参与馈线判定。</p>
+    <p>馈线只通过三种来源确定：G 根节点 facID、文件名、人工输入。三种方式最终都必须唯一匹配到 13500 / dms_feeder_device；无法唯一确认时直接 FAIL，不创建馈线段，也不执行 FeedLine 关联。馈线报告不再包含任何 RMU / 环网柜拓扑判定字段。</p>
     {feeder_table}
   </div>
 
   <div class="card">
     <h2>馈线段明细</h2>
-    <p>每个拓扑连接区域确认唯一 FEEDER_ID 后，程序查询该 FEEDER_ID 下真实存在的 dms_section_device。已正确关联的 FeedLine 先占用对应数据库记录；旧关联错误或未关联的 FeedLine 再按从上到下、同高度从左到右排序，并从剩余数据库馈线段按自然序号从小到大依次分配。表格左侧复选框仅用于人工标记，勾选后整行持续高亮，不参与任何模型关联逻辑。</p>
+    <p>唯一馈线确认后，程序查询该 FEEDER_ID 下的 13503 / dms_section_device。FeedLine 按从上到下、同高度从左到右对应 SEC001、SEC002……；数据库已有目标馈线段直接使用，缺失时按设置生成创建计划。执行模型关联时先补齐缺失记录、重新查询数据库，再完成原有 LINK / RELINK 处理。表格左侧复选框仅用于人工标记。</p>
     {feedline_table}
   </div>
 </main>

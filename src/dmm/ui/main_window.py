@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import ctypes
+import csv
+import json
 import os
 import shutil
 import subprocess
@@ -27,7 +29,7 @@ from dmm.application.job_worker import JobWorker
 from dmm.application.registry import get_model_modules
 from dmm.ui.registry import create_settings_widget
 from dmm.config.constants import (
-    APP_NAME, APP_NAME_EN, APP_VERSION, APP_EDITION,
+    APP_NAME, APP_NAME_EN, APP_VERSION, APP_EDITION, APP_BUILD_DATE,
     WORKSPACE_RETENTION_DAYS,
 )
 from dmm.config.settings import load_settings, save_settings
@@ -37,8 +39,14 @@ from dmm.infrastructure.reporting.writer import (
     export_csv_bundle, export_html_bundle,
     DEVICE_FIELDS, RMU_FIELDS, DEVICE_LABELS, RMU_LABELS,
 )
+from dmm.infrastructure.remote import (
+    ReadOnlySshClient,
+    RemoteGFile,
+    RemoteSnapshotService,
+)
 from dmm.infrastructure.filesystem.workspace import (
     WORKSPACE_ROOT,
+    RUNS_ROOT,
     LOGS_ROOT,
     ensure_workspace,
     cleanup_workspace,
@@ -98,6 +106,12 @@ class MainWindow(QMainWindow):
         self.current_report_dir = self.cfg.get("last_run_dir", "")
         self.current_task_type = ""
         self.worker = None
+        self.current_source_info = {}
+        self.current_snapshot_files = []
+        self.remote_file_rows = []
+        self.remote_selected_names = set()
+        self._remote_table_populating = False
+        self.remote_list_signature = None
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} - {APP_EDITION}")
         self.resize(1600, 960)
@@ -530,7 +544,7 @@ class MainWindow(QMainWindow):
         self.nav = QListWidget()
         self.nav.setObjectName("navList")
 
-        for label in ("数据库", "模型工作区", "设置", "帮助"):
+        for label in ("数据库", "模型工作区", "运行历史", "设置", "帮助"):
             self.nav.addItem(QListWidgetItem(label))
 
         self.nav.setCurrentRow(1)
@@ -543,6 +557,7 @@ class MainWindow(QMainWindow):
 
         self.pages.addWidget(self._build_database_page())
         self.pages.addWidget(self._build_workspace_page())
+        self.pages.addWidget(self._build_history_page())
         self.pages.addWidget(self._build_settings_page())
         self.pages.addWidget(self._build_help_page())
 
@@ -585,6 +600,20 @@ class MainWindow(QMainWindow):
             self.db_edits[key] = edit
 
         layout.addWidget(box)
+
+        db_mode = QLabel(
+            "数据库访问模式：只读查询为默认。仅馈线模型在启用“自动创建缺失馈线段”并执行"
+            "【模型关联】时，允许 INSERT DMS_SECTION_DEVICE；不会 UPDATE / DELETE "
+            "已有数据库设备。除该明确启用的馈线段 INSERT 外，其他流程"
+            "不会向 Oracle 数据库执行 INSERT / UPDATE / DELETE。"
+            "G 文件仍只修改 Workspace 安全副本。"
+        )
+        db_mode.setWordWrap(True)
+        db_mode.setStyleSheet(
+            "color:#006B52;background:#EAF8F2;"
+            "border:1px solid #B9DACD;border-radius:6px;padding:8px;"
+        )
+        layout.addWidget(db_mode)
 
         actions = QHBoxLayout()
         test_btn = QPushButton("测试数据库连接")
@@ -687,34 +716,222 @@ class MainWindow(QMainWindow):
         self.module_help_btn.clicked.connect(self.show_current_module_help)
         grid.addWidget(self.module_help_btn, 0, 3)
 
-        grid.addWidget(QLabel("G 文件 / 目录"), 1, 0)
-        self.input_edit = QLineEdit(self.cfg.get("input_path", ""))
-        self.input_edit.setPlaceholderText("请选择一个 G 文件，或包含 G 文件的目录")
-        self.input_edit.editingFinished.connect(self._save_input_path_from_edit)
-        grid.addWidget(self.input_edit, 1, 1)
+        grid.addWidget(QLabel("文件来源（RMU / 馈线通用）"), 1, 0)
+        self.input_source_combo = NoWheelComboBox()
+        self.input_source_combo.addItem("本地文件 / 目录", "LOCAL")
+        self.input_source_combo.addItem("SSH 文件服务器（只读）", "SSH")
+        saved_source = str(self.cfg.get("input_source", "LOCAL")).upper()
+        source_index = self.input_source_combo.findData(saved_source)
+        self.input_source_combo.setCurrentIndex(
+            source_index if source_index >= 0 else 0
+        )
+        self.input_source_combo.currentIndexChanged.connect(
+            self._on_input_source_changed
+        )
+        grid.addWidget(self.input_source_combo, 1, 1, 1, 3)
 
+        self.input_source_stack = QStackedWidget()
+        self.input_source_stack.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Fixed,
+        )
+
+        # Local source page.
+        local_page = QWidget()
+        local_layout = QGridLayout(local_page)
+        local_layout.setContentsMargins(0, 0, 0, 0)
+        local_layout.addWidget(QLabel("G 文件 / 目录"), 0, 0)
+        self.input_edit = QLineEdit(self.cfg.get("input_path", ""))
+        self.input_edit.setPlaceholderText(
+            "请选择一个 G 文件，或包含 G 文件的目录"
+        )
+        self.input_edit.editingFinished.connect(
+            self._save_input_path_from_edit
+        )
+        local_layout.addWidget(self.input_edit, 0, 1)
         file_btn = QPushButton("选择文件")
         folder_btn = QPushButton("选择目录")
         file_btn.setMinimumWidth(100)
         folder_btn.setMinimumWidth(100)
         file_btn.clicked.connect(self.browse_file)
         folder_btn.clicked.connect(self.browse_folder)
-        grid.addWidget(file_btn, 1, 2)
-        grid.addWidget(folder_btn, 1, 3)
+        local_layout.addWidget(file_btn, 0, 2)
+        local_layout.addWidget(folder_btn, 0, 3)
+        local_page.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Fixed,
+        )
+        self.input_source_stack.addWidget(local_page)
+
+        # SSH read-only source page.
+        remote_page = QWidget()
+        remote_layout = QVBoxLayout(remote_page)
+        remote_layout.setContentsMargins(0, 0, 0, 0)
+        remote_layout.setSpacing(8)
+
+        ssh_cfg = dict(self.cfg.get("ssh", {}) or {})
+        ssh_grid = QGridLayout()
+        self.ssh_edits = {}
+
+        ssh_fields = [
+            ("host", "IP / 主机", ssh_cfg.get("host", "172.16.21.27")),
+            ("port", "端口", ssh_cfg.get("port", 22)),
+            ("username", "用户名", ssh_cfg.get("username", "up8000")),
+            ("password", "密码", ssh_cfg.get("password", "up8000")),
+            (
+                "remote_directory",
+                "远程目录",
+                ssh_cfg.get(
+                    "remote_directory",
+                    "/home/up8000/data/graph/display/sln",
+                ),
+            ),
+        ]
+        for row_index, (key, label, value) in enumerate(ssh_fields):
+            ssh_grid.addWidget(QLabel(label), row_index, 0)
+            edit = QLineEdit(str(value))
+            if key == "password":
+                edit.setEchoMode(QLineEdit.Password)
+            self.ssh_edits[key] = edit
+            ssh_grid.addWidget(edit, row_index, 1, 1, 3)
+
+        ssh_buttons = QHBoxLayout()
+        test_ssh_btn = QPushButton("测试 SSH 连接")
+        refresh_ssh_btn = QPushButton("刷新 G 文件列表")
+        test_ssh_btn.clicked.connect(self.test_ssh_connection)
+        refresh_ssh_btn.clicked.connect(self.refresh_remote_g_files)
+        ssh_buttons.addWidget(test_ssh_btn)
+        ssh_buttons.addWidget(refresh_ssh_btn)
+        ssh_buttons.addStretch()
+        ssh_grid.addLayout(ssh_buttons, len(ssh_fields), 1, 1, 3)
+
+        self.ssh_connection_status = QLabel(
+            "尚未测试 SSH/SFTP 连接。"
+        )
+        self.ssh_connection_status.setWordWrap(True)
+        self.ssh_connection_status.setStyleSheet(
+            "background:#F5F7F8; color:#53636C; "
+            "border:1px solid #D7E0E4; border-radius:6px; "
+            "padding:7px 10px;"
+        )
+        ssh_grid.addWidget(
+            self.ssh_connection_status,
+            len(ssh_fields) + 1,
+            1,
+            1,
+            3,
+        )
+
+        remote_layout.addLayout(ssh_grid)
+
+        self.ssh_readonly_notice = QLabel(
+            "SSH 服务器只读：本工具仅允许列目录、读取属性和下载 G 文件；"
+            "禁止上传、覆盖、重命名、删除或修改服务器上的任何文件。"
+        )
+        self.ssh_readonly_notice.setWordWrap(True)
+        self.ssh_readonly_notice.setStyleSheet(
+            "background:#E8F7F1; color:#006B52; "
+            "border:1px solid #A9DCC8; border-radius:7px; "
+            "padding:8px 10px; font-weight:600;"
+        )
+        remote_layout.addWidget(self.ssh_readonly_notice)
+
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("搜索 G 文件"))
+        self.remote_search_edit = QLineEdit()
+        self.remote_search_edit.setPlaceholderText(
+            "例如：ABH-06、SAMR、JED-NTH"
+        )
+        self.remote_search_edit.textChanged.connect(
+            self._apply_remote_file_filter
+        )
+        search_row.addWidget(self.remote_search_edit, 1)
+        self.remote_count_label = QLabel("尚未加载远程文件")
+        search_row.addWidget(self.remote_count_label)
+        remote_layout.addLayout(search_row)
+
+        remote_actions = QHBoxLayout()
+        select_visible_btn = QPushButton("全选当前结果")
+        unselect_visible_btn = QPushButton("取消当前结果")
+        clear_remote_btn = QPushButton("清空全部选择")
+        select_visible_btn.clicked.connect(
+            lambda: self._set_visible_remote_selection(True)
+        )
+        unselect_visible_btn.clicked.connect(
+            lambda: self._set_visible_remote_selection(False)
+        )
+        clear_remote_btn.clicked.connect(self._clear_remote_selection)
+        remote_actions.addWidget(select_visible_btn)
+        remote_actions.addWidget(unselect_visible_btn)
+        remote_actions.addWidget(clear_remote_btn)
+        remote_actions.addStretch()
+        remote_layout.addLayout(remote_actions)
+
+        self.remote_file_table = QTableWidget()
+        self.remote_file_table.setColumnCount(4)
+        self.remote_file_table.setHorizontalHeaderLabels(
+            ["选择", "文件名", "大小", "服务器修改时间"]
+        )
+        self.remote_file_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers
+        )
+        self.remote_file_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows
+        )
+        self.remote_file_table.verticalHeader().setDefaultSectionSize(30)
+        self.remote_file_table.horizontalHeader().setSectionResizeMode(
+            0,
+            QHeaderView.ResizeToContents,
+        )
+        self.remote_file_table.horizontalHeader().setSectionResizeMode(
+            1,
+            QHeaderView.Stretch,
+        )
+        self.remote_file_table.horizontalHeader().setSectionResizeMode(
+            2,
+            QHeaderView.ResizeToContents,
+        )
+        self.remote_file_table.horizontalHeader().setSectionResizeMode(
+            3,
+            QHeaderView.ResizeToContents,
+        )
+        self.remote_file_table.itemChanged.connect(
+            self._on_remote_file_item_changed
+        )
+        self.remote_file_table.setMinimumHeight(210)
+        remote_layout.addWidget(self.remote_file_table)
+        remote_page.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred,
+        )
+        self.input_source_stack.addWidget(remote_page)
+
+        grid.addWidget(self.input_source_stack, 2, 0, 1, 4)
+        self.input_source_stack.setCurrentIndex(
+            1 if saved_source == "SSH" else 0
+        )
+        QTimer.singleShot(
+            0,
+            self._update_input_source_stack_height,
+        )
 
         self.workspace_status = QLabel("执行前需要进行 Oracle 预检查。")
         apply_status_style(self.workspace_status, False)
-        grid.addWidget(self.workspace_status, 2, 0, 1, 4)
+        grid.addWidget(self.workspace_status, 3, 0, 1, 4)
 
         safe_notice = QLabel(
-            "安全说明：原始 G 文件始终保持不变。执行模型关联时，会先复制全部选中 G 文件到本软件 Workspace，再只修改安全副本。"
+            "安全说明：RMU 环网柜模型和馈线模型共用本地/SSH文件来源；"
+            "本地原始 G 文件和 SSH 服务器文件均不修改。"
+            "SSH 模式每次【模型校验】都会重新下载服务器当前最新稳定版本到 "
+            "remote_input；同一次校验后的【执行模型关联】只使用该次快照，"
+            "并仅修改 g_output 安全副本。"
         )
         safe_notice.setWordWrap(True)
         safe_notice.setStyleSheet(
             "background:#E8F7F1; color:#006B52; border:1px solid #A9DCC8; "
             "border-radius:7px; padding:8px 10px; font-weight:600;"
         )
-        grid.addWidget(safe_notice, 3, 0, 1, 4)
+        grid.addWidget(safe_notice, 4, 0, 1, 4)
 
         ws_row = QHBoxLayout()
         ws_row.addWidget(QLabel("Workspace"))
@@ -726,7 +943,7 @@ class MainWindow(QMainWindow):
         ws_row.addWidget(ws_btn)
         ws_holder = QWidget()
         ws_holder.setLayout(ws_row)
-        grid.addWidget(ws_holder, 4, 0, 1, 4)
+        grid.addWidget(ws_holder, 5, 0, 1, 4)
 
         layout.addWidget(job_box)
 
@@ -892,6 +1109,7 @@ class MainWindow(QMainWindow):
         self.open_html_btn = QPushButton("打开 HTML")
         self.open_rmu_csv_btn = QPushButton("打开环网柜 CSV")
         self.open_device_csv_btn = QPushButton("打开设备 CSV")
+        self.open_change_log_btn = QPushButton("打开修改记录 CSV")
         self.open_report_dir_btn = QPushButton("打开本次运行目录")
 
         copy_log_btn.clicked.connect(self.copy_log)
@@ -899,12 +1117,16 @@ class MainWindow(QMainWindow):
         self.open_html_btn.clicked.connect(lambda: self.open_artifact("html"))
         self.open_rmu_csv_btn.clicked.connect(lambda: self.open_artifact("rmu_csv"))
         self.open_device_csv_btn.clicked.connect(lambda: self.open_artifact("device_csv"))
+        self.open_change_log_btn.clicked.connect(
+            lambda: self.open_artifact("change_log_csv")
+        )
         self.open_report_dir_btn.clicked.connect(self.open_current_run_dir)
 
         for button in (
             self.open_html_btn,
             self.open_rmu_csv_btn,
             self.open_device_csv_btn,
+            self.open_change_log_btn,
             self.open_report_dir_btn,
         ):
             button.setEnabled(False)
@@ -916,6 +1138,7 @@ class MainWindow(QMainWindow):
         log_actions.addWidget(self.open_html_btn)
         log_actions.addWidget(self.open_rmu_csv_btn)
         log_actions.addWidget(self.open_device_csv_btn)
+        log_actions.addWidget(self.open_change_log_btn)
         log_actions.addWidget(self.open_report_dir_btn)
         log_layout.addLayout(log_actions)
 
@@ -1043,34 +1266,35 @@ class MainWindow(QMainWindow):
             return """
             <h2>馈线模型帮助</h2>
 
-            <h3>1. 馈线归属：RMU 拓扑规则</h3>
-            <p><b>核心原则：</b>馈线模型不再通过馈线名称判断归属，而是先利用已经能够可靠确认的 RMU 作为锚点，从 RMU 的数据库 FEEDER_ID 反推出当前连接区域所属馈线，再处理该区域内的 FeedLine。</p>
+            <h3>1. 馈线确定方式</h3>
             <ol>
-              <li>单馈线图和组合大图使用完全相同的算法，不再依赖 ABH-03 / AJWD-07 等馈线文字。</li>
-              <li>程序先解析 G 图中的 RMU、FeedLine、ConnectLine、Bus 及主要开关图元，建立连接拓扑区域。</li>
-              <li><b>RMU 结构硬条件：</b>候选矩形框内部必须同时至少存在 1 个 CBreakerDis、1 个 ZhaiWaiJieDiDaoZha、1 个 BusDis，缺少任意一类都不识别为环网柜。</li>
-              <li>馈线模块复用 RMU 模块同一套柜型识别：柜内 Y1/Y2/Y3/Y4… 每个计 1 个 L，Q1/Q2/Q3/Q4… 每个计 1 个 T；<b>只要识别到任何 Y/Q 文字，就绝对以文字结果为准</b>。只有完全识别不到 Y/Q 时才使用 devref 中 Load_Breaker / Circuit_Breaker 兜底。</li>
-              <li>SMART / SMR 在整张 G 图全局识别，并分别归属最近的 RMU；任意一个标识命中即为智能环网柜，SMART 与 SMR 同时命中仍记为一个“智能环网柜”。馈线可信 RMU 日志同时显示柜型和智能属性。</li>
-              <li>RMU 柜名与 RMU 模块使用完全相同的识别结果：严格只看用户勾选方向，在整张 G 图全局寻找 Text / DText；每个文字只归属最近一个 RMU，不再使用旧的 120 坐标单位距离上限。</li>
-              <li>只有数据库名称唯一、存在 FEEDER_ID、并且已有模型 KeyID 能正确证明其设备属于当前 RMU 的环网柜，才属于<b>可信环网柜参考</b>。</li>
-              <li>未关联 RMU、数据库0/多条、FEEDER_ID 为空或已有错误模型的 RMU 只在报告中告警，不参与馈线归属判断。</li>
-              <li>同一连接区域中，所有可信 RMU 的 FEEDER_ID 必须完全一致。</li>
-              <li>没有可信 RMU：<b>NO_TRUSTED_RMU_REFERENCE</b>，禁止自动关联。</li>
-              <li>出现两个及以上不同 FEEDER_ID：<b>FEEDER_RMU_CONFLICT</b>，整个区域阻断，必须人工确认。</li>
+              <li><b>G 根节点 facID</b>：优先使用 facID 精确查询表号 13500 / dms_feeder_device。</li>
+              <li><b>文件名</b>：例如 JED-CTL-ADF-16.sln.pic.g，标准化后与数据库馈线名称进行唯一匹配。</li>
+              <li><b>人工输入</b>：用户输入馈线名称后，必须唯一匹配到 13500 / dms_feeder_device。</li>
+              <li>自动模式顺序为：<b>facID → 文件名 → 人工输入</b>。</li>
+              <li><b>不再使用 RMU、环网柜、连接拓扑或 FEEDER_ID 反向推断馈线。</b></li>
+              <li>三种方式最终都无法唯一确认时，整张 G 图直接报错并阻断，不创建馈线段，也不执行 FeedLine 关联。</li>
             </ol>
 
-            <h3>2. FeedLine 关联规则</h3>
+            <h3>2. 数据库查询与创建边界</h3>
             <ul>
-              <li>连接区域唯一确认 FEEDER_ID 后，直接查询该 FEEDER_ID 下真实存在的 <b>dms_section_device</b>；数据库事实唯一、正确时，允许修复 G 文件中的旧关联错误。</li>
-              <li>馈线段数据库表：<b>13503 / dms_section_device</b>，Domain：<b>1</b>。</li>
-              <li>已有正确模型先占用数据库馈线段，保持不变。</li>
-              <li>未关联、旧关联属于其它 feeder、设备已重建导致 ID/KeyID 变化、表号/域号错误等情况，只要当前数据库目标能够唯一确定，都进入可关联/RELINK 候选，而不是直接 FAIL。</li>
-              <li>同一个 dms_section_device 被多个 FeedLine 重复使用时，所有重复行统一标记 <b>DUPLICATE_LINK</b> 并允许勾选修复；只勾选其中一条时，未勾选行保留原数据库段，勾选行改分配到其它剩余段；多条一起勾选时一起重新参与排序分配。</li>
-              <li>未关联和需要 RELINK 的 FeedLine 按<b>从上到下、同高度从左到右</b>排序。</li>
-              <li>剩余数据库馈线段按 SEC001、SEC002… 的实际自然顺序从小到大分配；不会自行生成数据库不存在的 SEC 编号。</li>
+              <li>13500 / dms_feeder_device：只查询，用于确认唯一馈线。</li>
+              <li>405 / substation：只查询，通过 feeder.ST_ID 获取所属变电站。402 / voltagelevel + 401 / basevoltage：只查询该站 110/33/13.8kV 电压等级，存在多个时取最小值，并使用对应 voltagelevel.BV_ID 创建馈线段。</li>
+              <li>13503 / dms_section_device：唯一允许写入的表，并且只允许 INSERT 缺失馈线段。</li>
+              <li>不会 UPDATE / DELETE 13503，也不会写入 13500、405 或其它任何数据库表。</li>
+              <li>已有同名馈线段直接使用，绝不重复创建。</li>
+              <li>新 ID 在 INSERT 前必须再次检查是否已被占用；同批创建使用一个事务，任何异常全部 ROLLBACK。</li>
             </ul>
 
-            <h3>3. FeedLine 安全回写</h3>
+            <h3>3. FeedLine 创建与关联</h3>
+            <ul>
+              <li>FeedLine 按从上到下、同高度从左到右排序，对应 SEC001、SEC002……</li>
+              <li>ls=2 → SECTION_TYPE=0；ls=1 → SECTION_TYPE=1；ls为空/不存在 → SECTION_TYPE=3。</li>
+              <li>创建成功后重新查询 13503，再使用数据库最终 ID / BV_ID 计算 Expected KeyID。</li>
+              <li>然后继续沿用原有 FeedLine 自动关联 / RELINK / 重复关联处理逻辑。</li>
+            </ul>
+
+            <h3>4. G 文件安全回写</h3>
             <pre>
     app="6500000"
     p_ReportType="1"
@@ -1078,13 +1302,8 @@ class MainWindow(QMainWindow):
     voltype="dms_section_device.BV_ID"
     keyid="Expected KeyID"
             </pre>
-            <p>原始 G 文件永不修改，只修改 Workspace 中的安全副本。</p>
-
-            <h3>4. 工作区选择与报告</h3>
-            <p>模型校验完成后，工作区会出现“可关联馈线段选择”表格，可逐条勾选 UNLINKED / RELINK / DUPLICATE_LINK FeedLine；执行关联时只处理勾选行。</p>
-            <p>馈线汇总会展示可信/忽略 RMU、FEEDER_ID 一致性和阻断原因；馈线段明细展示当前/目标模型。HTML 两张表都带复选框，勾选后整行持续高亮，仅用于人工标记，不参与程序关联逻辑。</p>
+            <p><b>FeedLine 只修改以上 5 个属性。</b>key_name、ls、坐标、颜色、线型等其它属性不修改。</p>
             """
-
         return """
         <h2>RMU 环网柜模型帮助</h2>
 
@@ -1208,6 +1427,280 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------
     # Settings
     # ------------------------------------------------------------
+
+    # ------------------------------------------------------------
+    # Run history / audit
+    # ------------------------------------------------------------
+    def _build_history_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(28, 22, 28, 22)
+        layout.setSpacing(12)
+
+        layout.addWidget(
+            self._page_header(
+                "运行历史",
+                "查看模型校验和模型关联的历史记录、报告、修改记录与运行目录。",
+            )
+        )
+
+        actions = QHBoxLayout()
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.clicked.connect(self.refresh_history_table)
+
+        open_run_btn = QPushButton("打开运行目录")
+        open_run_btn.clicked.connect(
+            lambda: self._open_history_artifact("run_dir")
+        )
+
+        open_html_btn = QPushButton("打开 HTML")
+        open_html_btn.clicked.connect(
+            lambda: self._open_history_artifact("html")
+        )
+
+        open_change_btn = QPushButton("打开修改记录 CSV")
+        open_change_btn.clicked.connect(
+            lambda: self._open_history_artifact("change_log_csv")
+        )
+
+        actions.addWidget(refresh_btn)
+        actions.addWidget(open_run_btn)
+        actions.addWidget(open_html_btn)
+        actions.addWidget(open_change_btn)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        self.history_table = QTableWidget()
+        self.history_table.setColumnCount(9)
+        self.history_table.setHorizontalHeaderLabels([
+            "时间",
+            "模型",
+            "操作",
+            "G 文件/输入",
+            "选中",
+            "成功",
+            "跳过/失败",
+            "结果",
+            "运行目录",
+        ])
+        self.history_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows
+        )
+        self.history_table.setSelectionMode(
+            QAbstractItemView.SingleSelection
+        )
+        self.history_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers
+        )
+        self.history_table.setAlternatingRowColors(True)
+        self.history_table.verticalHeader().setDefaultSectionSize(30)
+        self.history_table.verticalHeader().setMinimumSectionSize(30)
+        self.history_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents
+        )
+        self.history_table.horizontalHeader().setStretchLastSection(True)
+        self.history_table.doubleClicked.connect(
+            lambda *_: self._open_history_artifact("run_dir")
+        )
+        layout.addWidget(self.history_table, 1)
+
+        note = QLabel(
+            "每次模型校验/模型关联都会在对应 run 目录写入 run_manifest.json。"
+            "模型关联还会生成 model_change_log.csv，记录 XML 图元各属性修改前后的值。"
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        QTimer.singleShot(0, self.refresh_history_table)
+        return page
+
+    def _run_manifest_path(self, run_dir):
+        return Path(run_dir) / "run_manifest.json"
+
+    @staticmethod
+    def _safe_int(value):
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    def _write_run_manifest(
+        self,
+        *,
+        operation,
+        module_id,
+        result="SUCCESS",
+        summary=None,
+        artifacts=None,
+        input_path="",
+        selected=0,
+        applied=0,
+        skipped=0,
+        error="",
+    ):
+        run_dir = Path(
+            (artifacts or {}).get("run_dir")
+            or self.current_run_dir
+            or ""
+        )
+        if not str(run_dir):
+            return
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        previous = {}
+        manifest_path = self._run_manifest_path(run_dir)
+        if manifest_path.exists():
+            try:
+                previous = json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+            except Exception:
+                previous = {}
+
+        events = list(previous.get("events", []) or [])
+        event = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "module": str(module_id or ""),
+            "operation": str(operation or ""),
+            "result": str(result or ""),
+            "input_path": str(input_path or ""),
+            "source_info": dict(self.current_source_info or {}),
+            "selected": self._safe_int(selected),
+            "applied": self._safe_int(applied),
+            "skipped": self._safe_int(skipped),
+            "summary": dict(summary or {}),
+            "artifacts": dict(artifacts or {}),
+            "error": str(error or ""),
+        }
+        events.append(event)
+
+        manifest = {
+            "schema_version": 1,
+            "app_name": APP_NAME,
+            "app_version": APP_VERSION,
+            "run_dir": str(run_dir),
+            "updated_at": event["time"],
+            "events": events,
+            "latest": event,
+        }
+        manifest_path.write_text(
+            json.dumps(
+                manifest,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+
+    def _load_run_manifests(self):
+        ensure_workspace()
+        rows = []
+        if not RUNS_ROOT.exists():
+            return rows
+
+        for run_dir in sorted(
+            [p for p in RUNS_ROOT.iterdir() if p.is_dir()],
+            key=lambda p: p.name,
+            reverse=True,
+        ):
+            manifest_path = self._run_manifest_path(run_dir)
+            if not manifest_path.exists():
+                continue
+            try:
+                data = json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+            except Exception:
+                continue
+            latest = dict(data.get("latest", {}) or {})
+            latest["_manifest_path"] = str(manifest_path)
+            latest["run_dir"] = str(run_dir)
+            rows.append(latest)
+        return rows
+
+    def refresh_history_table(self):
+        if not hasattr(self, "history_table"):
+            return
+
+        rows = self._load_run_manifests()
+        self.history_table.setRowCount(len(rows))
+        for row_idx, item in enumerate(rows):
+            operation = str(item.get("operation", ""))
+            operation_text = {
+                "VALIDATE": "模型校验",
+                "APPLY_ASSOCIATION": "模型关联",
+            }.get(operation, operation)
+
+            artifacts = dict(item.get("artifacts", {}) or {})
+            values = [
+                item.get("time", ""),
+                item.get("module", ""),
+                operation_text,
+                item.get("input_path", ""),
+                item.get("selected", 0),
+                item.get("applied", 0),
+                item.get("skipped", 0),
+                item.get("result", ""),
+                item.get("run_dir", ""),
+            ]
+            for col, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                cell.setData(
+                    Qt.UserRole,
+                    {
+                        "run_dir": item.get("run_dir", ""),
+                        "html": artifacts.get("html", ""),
+                        "change_log_csv": artifacts.get(
+                            "change_log_csv",
+                            "",
+                        ),
+                        "manifest": item.get("_manifest_path", ""),
+                    },
+                )
+                self.history_table.setItem(row_idx, col, cell)
+
+    def _selected_history_data(self):
+        if not hasattr(self, "history_table"):
+            return {}
+        row = self.history_table.currentRow()
+        if row < 0:
+            return {}
+        item = self.history_table.item(row, 0)
+        return dict(item.data(Qt.UserRole) or {}) if item else {}
+
+    def _open_history_artifact(self, key):
+        data = self._selected_history_data()
+        path_value = data.get(key, "")
+        if not path_value:
+            QMessageBox.information(
+                self,
+                "运行历史",
+                "当前记录没有对应的文件或目录。",
+            )
+            return
+
+        path = Path(path_value)
+        if not path.exists():
+            QMessageBox.warning(
+                self,
+                "运行历史",
+                f"文件或目录不存在：\n{path}",
+            )
+            return
+
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "运行历史",
+                str(exc),
+            )
+
     def _build_settings_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1227,10 +1720,11 @@ class MainWindow(QMainWindow):
             f"• 当前工作目录下自动生成的报告保留 {WORKSPACE_RETENTION_DAYS} 天\n"
             "• 每次执行任务前必须进行 Oracle 预检查\n"
             "• 模型回写必须先生成校验候选\n"
-            "• 修改 G 文件前必须创建原文件备份\n"
+            "• 原始 G 文件不修改；关联前先复制到 Workspace 安全副本\n"
             "• 回写目标必须通过 G 图元类型 + XML ID 唯一定位\n"
             "• G 文件采用临时文件写入后原子替换\n"
-            "• 文件与目录选择会自动记住上一次位置"
+            "• 文件与目录选择会自动记住上一次位置\n"
+            "• SSH 文件服务器严格只读；每次模型校验重新下载当前最新版本，关联锁定该次快照"
         )
         text.setWordWrap(True)
 
@@ -1271,10 +1765,10 @@ class MainWindow(QMainWindow):
             "1. 在【数据库】页面确认 Oracle 配置，可先点击‘测试数据库连接’。\n"
             "2. 进入【模型工作区】，选择 RMU 环网柜模型或馈线模型，并选择 G 文件/目录。\n"
             "3. RMU 模块配置名称来源与设备表/域；馈线模块配置 13503 馈线段表及域号。\n"
-            "4. 点击底部【模型校验】执行独立校验，并生成校验 HTML / CSV。\n"
-            "5. 需要关联时先点击【可关联清单】，确认预览结果后【执行模型关联】才会启用。\n"
-            "6. 执行模型关联只修改 Workspace 中的安全副本，原始 G 文件不变。\n"
-            "7. 关联完成后程序会重新校验安全副本，并生成与模型校验同规格的最终 HTML / CSV 报告。"
+            "4. 点击底部【模型校验】执行校验，并生成 HTML / CSV 以及可关联清单。\n"
+            "5. 在可关联清单中勾选需要处理的设备或 FeedLine，然后点击【执行模型关联】。\n"
+            "6. 执行前会显示最终确认摘要；模型关联只修改 Workspace 中的安全副本，原始 G 文件不变。\n"
+            "7. 关联完成后生成本次执行 HTML / CSV、model_change_log.csv，并写入【运行历史】。"
         )
         quick_text.setWordWrap(True)
         quick_layout.addWidget(quick_text)
@@ -1350,7 +1844,7 @@ class MainWindow(QMainWindow):
         assoc = QGroupBox("模型关联与 G 文件回写")
         assoc_layout = QVBoxLayout(assoc)
         assoc_text = QLabel(
-            "建议先执行【可关联清单】，确认所有 Expected KeyID 和可关联设备。\n"
+            "建议先执行【模型校验】，在可关联清单中确认 Expected KeyID 和待处理对象后再执行关联。\n"
             "真正执行模型关联时，程序会重新检查数据库及预览有效性，然后复制所有选中 G 文件到 Workspace/g_output，只修改副本。原始 G 文件绝不修改。\n\n"
             "CBreakerDis / ZhaiWaiJieDiDaoZha 回写：\n"
             "app=6500000, voltype=数据库设备BV_ID, p_ReportType=1, state=41, keyid=Expected KeyID\n\n"
@@ -1369,7 +1863,8 @@ class MainWindow(QMainWindow):
             "•【设备明细】只显示 G 文件实际存在的 RMU 设备图元，并展示逻辑设备名称、数据库 CODE、当前 KeyID 和实际所属环网柜。\n"
             "• RMU 数据库记录异常时，已有人为 KeyID 的设备仍继续校验；未关联设备则直接阻断自动关联。\n"
             "• 当选择图上文字模式时，报告中的逻辑设备名称 表示用于校验的逻辑 图上逻辑名称，不是 XML 原属性。\n"
-            "• 每次模型校验、校验候选和关联完成都会自动生成对应 HTML / CSV；Workspace 历史按软件保留策略自动清理。"
+            "• 每次模型校验和模型关联都会自动生成 HTML / CSV，并写入【运行历史】。\n"
+            "• 模型关联额外生成 model_change_log.csv，逐项记录 XML ID、属性、修改前值和修改后值；Workspace 历史按软件保留策略自动清理。"
         )
         reports_text.setWordWrap(True)
         reports_layout.addWidget(reports_text)
@@ -1393,6 +1888,29 @@ class MainWindow(QMainWindow):
         feeder_help_layout.addWidget(feeder_help_text)
         layout.addWidget(feeder_help)
 
+        ssh_help = QGroupBox("SSH 文件服务器（只读）")
+        ssh_help_layout = QVBoxLayout(ssh_help)
+        ssh_help_text = QLabel(
+            "• SSH 模式只允许读取目录、读取文件属性和下载 G 文件；"
+            "程序没有上传、覆盖、删除、重命名服务器文件的功能。\n"
+            "• 点击【刷新 G 文件列表】只刷新浏览列表；搜索只在当前已加载列表中本地过滤。\n"
+            "• RMU 环网柜模型与馈线模型使用完全相同的 SSH 文件源。"
+            "无论当前模型类型是哪一个，每次点击【模型校验】都会重新从服务器下载"
+            "当前勾选文件的最新版本，历史 remote_input 或本地缓存绝不会作为"
+            "新一次校验输入。\n"
+            "• 下载采用 stat-before → download → stat-after 稳定性检查；"
+            "如果 size/mtime 在下载期间变化，会自动重新下载，最多 3 次。\n"
+            "• 下载成功后写入本次 run/remote_input，并计算 SHA256；"
+            "该快照即为本次模型校验的固定输入。\n"
+            "• 同一次校验后的【执行模型关联】禁止再次从服务器下载。"
+            "关联必须使用本次 remote_input 快照复制到 g_output 后修改，"
+            "从而保证“校验哪个版本，就修改哪个版本”。\n"
+            "• 若服务器文件后来发生变化，需要重新点击【模型校验】取得新的最新快照。"
+        )
+        ssh_help_text.setWordWrap(True)
+        ssh_help_layout.addWidget(ssh_help_text)
+        layout.addWidget(ssh_help)
+
         safety = QGroupBox("注意事项")
         safety_layout = QVBoxLayout(safety)
         safety_text = QLabel(
@@ -1404,6 +1922,24 @@ class MainWindow(QMainWindow):
         safety_text.setWordWrap(True)
         safety_layout.addWidget(safety_text)
         layout.addWidget(safety)
+
+        about = QGroupBox("关于 / 版本信息")
+        about_layout = QVBoxLayout(about)
+        about_text = QLabel(
+            f"<b>{APP_NAME}</b><br>"
+            f"{APP_NAME_EN}<br><br>"
+            f"版本：v{APP_VERSION}<br>"
+            f"构建日期：{APP_BUILD_DATE}<br>"
+            f"版本类型：{APP_EDITION}<br><br>"
+            "用途：配网 G 文件模型校验、RMU/馈线模型关联及安全回写。<br>"
+            "数据安全：原始 G 文件不修改；每次关联只写 Workspace 安全副本；"
+            "馈线自动补齐仅允许 INSERT 缺失 DMS_SECTION_DEVICE，禁止 UPDATE/DELETE；"
+            "运行结果、Console 日志和修改记录均保留在独立 run 目录。"
+        )
+        about_text.setWordWrap(True)
+        about_text.setTextFormat(Qt.RichText)
+        about_layout.addWidget(about_text)
+        layout.addWidget(about)
 
         layout.addStretch()
         scroll.setWidget(content)
@@ -1454,6 +1990,22 @@ class MainWindow(QMainWindow):
         if hasattr(self, "association_table"):
             self._clear_association_table()
         self.refresh_operation_state()
+
+        # 文件来源属于模型工作区公共能力。RMU 与 FEEDER 共用完全相同的
+        # LOCAL / SSH 只读输入源，不因模型类型切换而隐藏或重建。
+        if hasattr(self, "input_source_stack"):
+            QTimer.singleShot(
+                0,
+                self._update_input_source_stack_height,
+            )
+        if (
+            hasattr(self, "input_source_combo")
+            and self._current_input_source() == "SSH"
+        ):
+            self.workspace_status.setText(
+                "SSH只读模式：RMU/馈线模型校验都会重新下载服务器当前最新 G 文件。"
+            )
+            apply_status_style(self.workspace_status, False)
 
         # 等 Qt 完成本次 stacked page 切换后，再计算新页面高度。
         QTimer.singleShot(0, self._update_module_stack_height)
@@ -1558,10 +2110,13 @@ class MainWindow(QMainWindow):
         self.open_rmu_csv_btn.setText(first_csv_text)
         self.open_device_csv_btn.setText(second_csv_text)
 
+        self.open_change_log_btn.setText("打开修改记录 CSV")
+
         for key, button in (
             ("html", self.open_html_btn),
             ("rmu_csv", self.open_rmu_csv_btn),
             ("device_csv", self.open_device_csv_btn),
+            ("change_log_csv", self.open_change_log_btn),
             ("run_dir", self.open_report_dir_btn),
         ):
             value = self.current_artifacts.get(key, "")
@@ -1591,6 +2146,8 @@ class MainWindow(QMainWindow):
             pass
 
     def _check_saved_input_path_on_startup(self):
+        if str(self.cfg.get("input_source", "LOCAL")).upper() == "SSH":
+            return
         value = (self.cfg.get("input_path") or "").strip()
         if not value:
             return
@@ -1662,6 +2219,381 @@ class MainWindow(QMainWindow):
                 "Oracle 数据库连接失败",
                 str(exc),
             )
+
+
+    # ------------------------------------------------------------
+    # Input source: local / SSH read-only
+    # ------------------------------------------------------------
+    def _current_input_source(self) -> str:
+        if not hasattr(self, "input_source_combo"):
+            return "LOCAL"
+        return str(
+            self.input_source_combo.currentData() or "LOCAL"
+        ).upper()
+
+    def _current_ssh_config(self) -> dict:
+        cfg = {
+            key: edit.text().strip()
+            for key, edit in self.ssh_edits.items()
+        }
+        try:
+            cfg["port"] = int(cfg.get("port") or 22)
+        except Exception as exc:
+            raise ValueError("SSH 端口必须是整数。") from exc
+        return cfg
+
+    def _save_input_source_settings(self):
+        self.cfg["input_source"] = self._current_input_source()
+        if hasattr(self, "ssh_edits"):
+            self.cfg["ssh"] = self._current_ssh_config()
+        save_settings(self.cfg)
+
+    def _current_input_description(self) -> str:
+        if self._current_input_source() == "SSH":
+            source = dict(self.current_source_info or {})
+            if (
+                source.get("source_type") == "SSH"
+                and self.current_snapshot_files
+            ):
+                host = source.get("host", "")
+                port = source.get("port", 22)
+                username = source.get("username", "")
+                directory = source.get("remote_directory", "")
+                count = len(source.get("files", []) or [])
+                return (
+                    f"ssh://{username}@{host}:{port}{directory}"
+                    f" [{count} files]"
+                )
+
+            cfg = self._current_ssh_config()
+            selected = sorted(self.remote_selected_names)
+            suffix = (
+                f" [{len(selected)} files]"
+                if selected
+                else ""
+            )
+            return (
+                f"ssh://{cfg['username']}@{cfg['host']}:{cfg['port']}"
+                f"{cfg['remote_directory']}{suffix}"
+            )
+        return self.input_edit.text().strip()
+
+    def _invalidate_validation_snapshot(self, reason=""):
+        if self.current_preview is None:
+            return
+        self.current_preview = None
+        self.current_snapshot_files = []
+        self.current_source_info = {}
+        self.apply_btn.setEnabled(False)
+        self._clear_association_table()
+        if reason:
+            self.workspace_status.show()
+            self.workspace_status.setText(
+                f"输入已变化，请重新执行模型校验：{reason}"
+            )
+            apply_status_style(self.workspace_status, False)
+
+    def _on_input_source_changed(self, *_args):
+        source = self._current_input_source()
+        target_index = 1 if source == "SSH" else 0
+        self.input_source_stack.setCurrentIndex(target_index)
+        self._update_input_source_stack_height()
+
+        self._save_input_source_settings()
+        self._invalidate_validation_snapshot("文件来源已切换")
+        if source == "SSH":
+            self._set_ssh_connection_status(
+                "SSH只读模式：请先测试连接或刷新 G 文件列表。",
+                "neutral",
+            )
+            self.workspace_status.setText(
+                "SSH模式：请选择远程 G 文件后执行模型校验。"
+            )
+        else:
+            self.workspace_status.setText(
+                "本地模式：请选择 G 文件或目录。"
+            )
+        apply_status_style(self.workspace_status, False)
+
+    def _update_input_source_stack_height(self):
+        """Only reserve the height needed by the currently visible source page."""
+        if not hasattr(self, "input_source_stack"):
+            return
+
+        widget = self.input_source_stack.currentWidget()
+        if widget is None:
+            return
+
+        if widget.layout() is not None:
+            widget.layout().invalidate()
+            widget.layout().activate()
+
+        widget.updateGeometry()
+        height = max(
+            46,
+            int(widget.sizeHint().height()),
+        )
+
+        # Local mode should remain as compact as the old single-row design.
+        if self._current_input_source() == "LOCAL":
+            height = min(height, 58)
+
+        self.input_source_stack.setMinimumHeight(height)
+        self.input_source_stack.setMaximumHeight(height)
+        self.input_source_stack.updateGeometry()
+
+    @staticmethod
+    def _format_file_size(size: int) -> str:
+        value = float(size)
+        for unit in ("B", "KB", "MB", "GB"):
+            if value < 1024.0 or unit == "GB":
+                return (
+                    f"{value:.0f} {unit}"
+                    if unit == "B"
+                    else f"{value:.1f} {unit}"
+                )
+            value /= 1024.0
+        return f"{size} B"
+
+    def _set_ssh_connection_status(
+        self,
+        text: str,
+        state: str = "neutral",
+    ):
+        if not hasattr(self, "ssh_connection_status"):
+            return
+
+        styles = {
+            "success": (
+                "background:#E8F7F1; color:#006B52; "
+                "border:1px solid #A9DCC8;"
+            ),
+            "error": (
+                "background:#FDECEC; color:#B42318; "
+                "border:1px solid #F3B7B2;"
+            ),
+            "working": (
+                "background:#FFF7E6; color:#8A5A00; "
+                "border:1px solid #F1D59B;"
+            ),
+            "neutral": (
+                "background:#F5F7F8; color:#53636C; "
+                "border:1px solid #D7E0E4;"
+            ),
+        }
+        self.ssh_connection_status.setText(str(text))
+        self.ssh_connection_status.setStyleSheet(
+            styles.get(state, styles["neutral"])
+            + "border-radius:6px; padding:7px 10px;"
+        )
+
+    def test_ssh_connection(self):
+        try:
+            cfg = self._current_ssh_config()
+            self._set_ssh_connection_status(
+                "正在测试 SSH/SFTP 只读连接……",
+                "working",
+            )
+            QApplication.processEvents()
+
+            with ReadOnlySshClient(
+                cfg["host"],
+                cfg["port"],
+                cfg["username"],
+                cfg["password"],
+            ) as client:
+                client.test_connection()
+
+            self.cfg["ssh"] = cfg
+            self.cfg["input_source"] = "SSH"
+            save_settings(self.cfg)
+            self._set_ssh_connection_status(
+                "SSH/SFTP 连接正常；远程文件源为只读。",
+                "success",
+            )
+            self.log(
+                f"SSH连接通过：{cfg['host']}:{cfg['port']} | "
+                f"user={cfg['username']} | 只读模式"
+            )
+        except Exception as exc:
+            self._set_ssh_connection_status(
+                f"SSH/SFTP 连接失败：{exc}",
+                "error",
+            )
+            QMessageBox.critical(
+                self,
+                "SSH 连接失败",
+                str(exc),
+            )
+
+    def refresh_remote_g_files(self):
+        try:
+            cfg = self._current_ssh_config()
+            self._set_ssh_connection_status(
+                "SSH/SFTP 已连接；正在读取远程 G 文件列表……",
+                "working",
+            )
+            QApplication.processEvents()
+
+            with ReadOnlySshClient(
+                cfg["host"],
+                cfg["port"],
+                cfg["username"],
+                cfg["password"],
+            ) as client:
+                rows = client.list_g_files(
+                    cfg["remote_directory"]
+                )
+
+            current_names = {item.name for item in rows}
+            self.remote_selected_names.intersection_update(
+                current_names
+            )
+            self.remote_file_rows = rows
+            self.remote_list_signature = (
+                cfg["host"],
+                int(cfg["port"]),
+                cfg["username"],
+                cfg["remote_directory"],
+            )
+            self.cfg["ssh"] = cfg
+            self.cfg["input_source"] = "SSH"
+            save_settings(self.cfg)
+            self._apply_remote_file_filter(
+                self.remote_search_edit.text()
+            )
+            self._invalidate_validation_snapshot(
+                "远程文件列表已刷新"
+            )
+            self._set_ssh_connection_status(
+                f"SSH/SFTP 连接正常；远程文件源为只读。"
+                f" 已加载 {len(rows)} 个 .g 文件。",
+                "success",
+            )
+            self.log(
+                f"SSH远程目录：{cfg['remote_directory']} | "
+                f"*.g={len(rows)}；已排除 .g.h/.g.data/.g.png"
+            )
+        except Exception as exc:
+            self._set_ssh_connection_status(
+                f"读取远程 G 文件列表失败：{exc}",
+                "error",
+            )
+            QMessageBox.critical(
+                self,
+                "读取远程 G 文件失败",
+                str(exc),
+            )
+
+    def _apply_remote_file_filter(self, text=""):
+        query = str(text or "").strip().lower()
+        visible = [
+            item
+            for item in self.remote_file_rows
+            if not query or query in item.name.lower()
+        ]
+
+        self._remote_table_populating = True
+        try:
+            self.remote_file_table.setRowCount(len(visible))
+            for row_index, remote_file in enumerate(visible):
+                check = QTableWidgetItem()
+                check.setFlags(
+                    Qt.ItemIsEnabled
+                    | Qt.ItemIsSelectable
+                    | Qt.ItemIsUserCheckable
+                )
+                check.setCheckState(
+                    Qt.Checked
+                    if remote_file.name in self.remote_selected_names
+                    else Qt.Unchecked
+                )
+                check.setData(Qt.UserRole, remote_file.name)
+                self.remote_file_table.setItem(row_index, 0, check)
+
+                values = [
+                    remote_file.name,
+                    self._format_file_size(remote_file.size),
+                    remote_file.mtime_text,
+                ]
+                for column, value in enumerate(values, start=1):
+                    item = QTableWidgetItem(str(value))
+                    item.setToolTip(str(value))
+                    self.remote_file_table.setItem(
+                        row_index,
+                        column,
+                        item,
+                    )
+        finally:
+            self._remote_table_populating = False
+
+        self._update_remote_count_label()
+
+    def _update_remote_count_label(self):
+        query = self.remote_search_edit.text().strip().lower()
+        visible_count = sum(
+            1
+            for item in self.remote_file_rows
+            if not query or query in item.name.lower()
+        )
+        self.remote_count_label.setText(
+            f"总数 {len(self.remote_file_rows)} | "
+            f"当前显示 {visible_count} | "
+            f"已选择 {len(self.remote_selected_names)}"
+        )
+
+    def _on_remote_file_item_changed(self, item):
+        if self._remote_table_populating or item.column() != 0:
+            return
+        name = str(item.data(Qt.UserRole) or "")
+        if not name:
+            return
+        if item.checkState() == Qt.Checked:
+            self.remote_selected_names.add(name)
+        else:
+            self.remote_selected_names.discard(name)
+        self._update_remote_count_label()
+        self._invalidate_validation_snapshot(
+            "远程 G 文件选择发生变化"
+        )
+
+    def _set_visible_remote_selection(self, selected: bool):
+        self._remote_table_populating = True
+        try:
+            for row in range(self.remote_file_table.rowCount()):
+                item = self.remote_file_table.item(row, 0)
+                if item is None:
+                    continue
+                name = str(item.data(Qt.UserRole) or "")
+                if selected:
+                    self.remote_selected_names.add(name)
+                    item.setCheckState(Qt.Checked)
+                else:
+                    self.remote_selected_names.discard(name)
+                    item.setCheckState(Qt.Unchecked)
+        finally:
+            self._remote_table_populating = False
+        self._update_remote_count_label()
+        self._invalidate_validation_snapshot(
+            "远程 G 文件选择发生变化"
+        )
+
+    def _clear_remote_selection(self):
+        self.remote_selected_names.clear()
+        self._apply_remote_file_filter(
+            self.remote_search_edit.text()
+        )
+        self._invalidate_validation_snapshot(
+            "远程 G 文件选择已清空"
+        )
+
+    def _selected_remote_files(self) -> list[RemoteGFile]:
+        selected = self.remote_selected_names
+        return [
+            item
+            for item in self.remote_file_rows
+            if item.name in selected
+        ]
 
     # ------------------------------------------------------------
     # Remember file/folder
@@ -1787,13 +2719,24 @@ class MainWindow(QMainWindow):
     # Run model job
     # ------------------------------------------------------------
     def start_job(self, operation):
+        module_id = None
+        module = None
+        operation_label = str(operation)
+        settings = {}
+        files = []
+        source_type = "LOCAL"
+        input_description = ""
+
         try:
             module_id = self.module_combo.currentData()
             module = self.modules[module_id]
             operation_labels = {
                 "VALIDATE": "模型校验",
             }
-            operation_label = operation_labels.get(operation, operation)
+            operation_label = operation_labels.get(
+                operation,
+                operation,
+            )
 
             if not module.supports(operation):
                 raise ValueError(
@@ -1801,32 +2744,79 @@ class MainWindow(QMainWindow):
                     f"{operation_label}”。"
                 )
 
-            settings = self.module_widgets[module_id].collect_settings()
-
-            input_value = self.input_edit.text().strip()
-            if not input_value:
-                raise ValueError("请先选择 G 文件或目录。")
-
-            input_path = Path(input_value)
-            if not input_path.exists():
-                raise ValueError(f"文件或目录不存在：\n{input_value}")
-
-            files = self.resolve_files(input_value)
-            if not files:
-                raise ValueError("当前文件/目录中没有找到可处理的 .g 文件。")
+            settings = self.module_widgets[
+                module_id
+            ].collect_settings()
+            source_type = self._current_input_source()
 
             self.cfg["model_module"] = module_id
             self.cfg["operation"] = operation
-            self.cfg["input_path"] = input_value
             self.cfg["db"] = self.current_db_config()
+            self.cfg["input_source"] = source_type
 
-            input_path = Path(input_value)
-            if input_path.exists():
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择 G 文件或目录。")
+
+                input_path = Path(input_value)
+                if not input_path.exists():
+                    raise ValueError(
+                        f"文件或目录不存在：\n{input_value}"
+                    )
+
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError(
+                        "当前文件/目录中没有找到可处理的 .g 文件。"
+                    )
+
+                self.cfg["input_path"] = input_value
                 if input_path.is_file():
                     self.cfg["last_file_path"] = str(input_path)
-                    self.cfg["last_folder_path"] = str(input_path.parent)
+                    self.cfg["last_folder_path"] = str(
+                        input_path.parent
+                    )
                 else:
                     self.cfg["last_folder_path"] = str(input_path)
+
+                self.current_source_info = {
+                    "source_type": "LOCAL",
+                    "read_only_source": True,
+                    "input_path": input_value,
+                    "files": [str(Path(p).resolve()) for p in files],
+                }
+                self.current_snapshot_files = list(files)
+                input_description = input_value
+
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"],
+                    int(ssh_cfg["port"]),
+                    ssh_cfg["username"],
+                    ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError(
+                        "SSH服务器地址、用户名或远程目录与当前文件列表不一致。"
+                        "请点击【刷新 G 文件列表】后重新选择文件。"
+                    )
+                selected_remote = self._selected_remote_files()
+                if not selected_remote:
+                    raise ValueError(
+                        "请先加载 SSH 服务器 G 文件列表，"
+                        "并勾选至少一个远程 .g 文件。"
+                    )
+
+                # Save connection settings before the task.  The SSH layer is
+                # deliberately read-only and never exposes an upload API.
+                self.cfg["ssh"] = ssh_cfg
+                input_description = self._current_input_description()
+            else:
+                raise ValueError(
+                    f"不支持的文件来源：{source_type}"
+                )
 
             for key in (
                 "rmu_name_positions",
@@ -1835,7 +2825,9 @@ class MainWindow(QMainWindow):
                 "feeder_table_id",
                 "section_table_id",
                 "section_domain",
-                "drawing_mode",
+                "feeder_resolution_mode",
+                "manual_feeder_name",
+                "auto_create_missing_sections",
             ):
                 if key in settings:
                     self.cfg[key] = settings[key]
@@ -1853,7 +2845,11 @@ class MainWindow(QMainWindow):
         try:
             self.current_run_dir = create_run_directory()
         except Exception as exc:
-            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            QMessageBox.critical(
+                self,
+                "创建 Workspace 运行目录失败",
+                str(exc),
+            )
             return
 
         self._set_task_buttons_enabled(False)
@@ -1870,17 +2866,88 @@ class MainWindow(QMainWindow):
             self.open_html_btn,
             self.open_rmu_csv_btn,
             self.open_device_csv_btn,
+            self.open_change_log_btn,
             self.open_report_dir_btn,
         ):
             button.setEnabled(False)
             button.setVisible(False)
 
+        try:
+            if source_type == "SSH":
+                self.workspace_status.show()
+                self.workspace_status.setText(
+                    "正在从 SSH 服务器重新获取本次选择文件的最新稳定版本……"
+                )
+                apply_status_style(self.workspace_status, False)
+                self.progress_bar.setValue(3)
+                self.progress_message.setText(
+                    "正在下载服务器最新 G 文件快照……"
+                )
+                QApplication.processEvents()
+
+                ssh_cfg = self._current_ssh_config()
+                snapshot_service = RemoteSnapshotService(
+                    host=ssh_cfg["host"],
+                    port=ssh_cfg["port"],
+                    username=ssh_cfg["username"],
+                    password=ssh_cfg["password"],
+                    remote_directory=ssh_cfg[
+                        "remote_directory"
+                    ],
+                    max_attempts=3,
+                )
+                files, source_info = snapshot_service.download_latest(
+                    self._selected_remote_files(),
+                    self.current_run_dir,
+                    log=self.log,
+                )
+                self.current_snapshot_files = list(files)
+                self.current_source_info = dict(source_info)
+
+                self.log(
+                    "本次模型校验已锁定 remote_input 快照；"
+                    "后续模型关联必须使用同一快照，"
+                    "不会再次从服务器下载。"
+                )
+                self.workspace_status.setText(
+                    f"SSH最新快照准备完成：{len(files)} 个 G 文件。"
+                )
+                apply_status_style(self.workspace_status, True)
+            else:
+                # Local validation also remembers the exact path set used by
+                # this validation so association does not silently switch input.
+                self.current_snapshot_files = list(files)
+
+            if not files:
+                raise RuntimeError(
+                    "没有可用于本次模型校验的 G 文件。"
+                )
+
+        except Exception as exc:
+            self._set_task_buttons_enabled(True)
+            self.progress_message.setText("文件准备失败")
+            self.workspace_status.setText("文件准备失败")
+            apply_status_style(self.workspace_status, False)
+            self.log(f"文件准备失败：{exc}")
+            QMessageBox.critical(
+                self,
+                "文件准备失败",
+                str(exc),
+            )
+            return
+
         self.workspace_status.show()
-        self.workspace_status.setText("正在进行 Oracle 数据库预检查……")
+        self.workspace_status.setText(
+            "正在进行 Oracle 数据库预检查……"
+        )
         apply_status_style(self.workspace_status, False)
 
         self.log(
             f"\n开始执行：{module.display_name} / {operation_label}"
+        )
+        self.log(
+            f"文件来源：{source_type} | 本次输入："
+            f"{input_description or self._current_input_description()}"
         )
 
         self.worker = JobWorker(
@@ -1925,6 +2992,9 @@ class MainWindow(QMainWindow):
         self.current_rules = dict(rules)
         self.current_preview = preview_data
         self.current_artifacts = dict(artifacts or {})
+        self.current_artifacts["source_info"] = dict(
+            self.current_source_info or {}
+        )
         self.current_task_type = self.current_artifacts.get("task_type", "")
 
         if self.current_preview and self.current_preview.get("changes_by_file"):
@@ -1995,6 +3065,30 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.log(f"保存 console.log 失败：{exc}")
 
+        validation_candidates = 0
+        if self.current_preview:
+            validation_candidates = sum(
+                len(v)
+                for v in (
+                    self.current_preview.get("changes_by_file", {}) or {}
+                ).values()
+            )
+        self._write_run_manifest(
+            operation="VALIDATE",
+            module_id=self.current_artifacts.get(
+                "report_kind",
+                self.module_combo.currentData(),
+            ),
+            result="SUCCESS",
+            summary=summary,
+            artifacts=self.current_artifacts,
+            input_path=self._current_input_description(),
+            selected=0,
+            applied=0,
+            skipped=0,
+        )
+        self.refresh_history_table()
+
         self.statusBar().showMessage(
             "模型校验完成，校验报告和可关联清单已生成。",
             5000,
@@ -2008,6 +3102,18 @@ class MainWindow(QMainWindow):
         apply_status_style(self.workspace_status, False)
 
         self.log(text)
+        try:
+            self._write_run_manifest(
+                operation="VALIDATE",
+                module_id=self.module_combo.currentData(),
+                result="FAILED",
+                artifacts=self.current_artifacts,
+                input_path=self._current_input_description(),
+                error=text,
+            )
+            self.refresh_history_table()
+        except Exception:
+            pass
 
         QMessageBox.critical(
             self,
@@ -2452,6 +3558,89 @@ class MainWindow(QMainWindow):
 
         return filtered
 
+
+    def _export_model_change_log(
+        self,
+        result_bundle,
+        report_dir,
+        module_id,
+    ):
+        """Export exact XML attribute before/after values for this write-back."""
+        report_dir = Path(report_dir)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        path = report_dir / "model_change_log.csv"
+
+        fields = [
+            "时间",
+            "模型",
+            "源G文件",
+            "输出G文件",
+            "G图元类型",
+            "图元XML ID",
+            "属性",
+            "修改前",
+            "修改后",
+        ]
+        rows = []
+        stamp = datetime.now().isoformat(timespec="seconds")
+
+        for result in result_bundle.get("results", []) or []:
+            source_file = str(
+                result.get("source_g_file", "")
+                or result.get("g_file", "")
+            )
+            output_file = str(
+                result.get("output_g_file", "")
+                or result.get("g_file", "")
+            )
+            for change in result.get("changes", []) or []:
+                before = dict(change.get("before", {}) or {})
+                after = dict(change.get("after", {}) or {})
+                keys = list(after.keys())
+                for key in keys:
+                    rows.append({
+                        "时间": stamp,
+                        "模型": str(module_id or ""),
+                        "源G文件": source_file,
+                        "输出G文件": output_file,
+                        "G图元类型": str(change.get("tag", "")),
+                        "图元XML ID": str(change.get("xml_id", "")),
+                        "属性": str(key),
+                        "修改前": (
+                            ""
+                            if before.get(key) is None
+                            else str(before.get(key))
+                        ),
+                        "修改后": str(after.get(key, "")),
+                    })
+
+        with path.open(
+            "w",
+            encoding="utf-8-sig",
+            newline="",
+        ) as file:
+            writer = csv.DictWriter(file, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        return str(path)
+
+    @staticmethod
+    def _association_status_breakdown(execution_preview):
+        counts = {}
+        for changes in (
+            execution_preview.get("changes_by_file", {}) or {}
+        ).values():
+            for change in changes or []:
+                row = dict(change.get("validated_row", {}) or {})
+                status = str(
+                    row.get("status")
+                    or row.get("model_link_status")
+                    or "READY"
+                )
+                counts[status] = counts.get(status, 0) + 1
+        return counts
+
     def apply_association(self):
         if not self.current_preview or not self.current_preview.get("changes_by_file"):
             QMessageBox.information(
@@ -2488,12 +3677,24 @@ class MainWindow(QMainWindow):
         skipped_count = len(
             execution_preview.get("skipped_rmus", [])
         )
+        selected_file_count = len(
+            execution_preview.get("changes_by_file", {}) or {}
+        )
+        status_counts = self._association_status_breakdown(
+            execution_preview
+        )
+        status_summary = "，".join(
+            f"{key}={value}"
+            for key, value in sorted(status_counts.items())
+        ) or "无"
         skip_label = "馈线文件" if module_id == "FEEDER" else "RMU"
         target_label = "FeedLine 图元" if module_id == "FEEDER" else "设备图元"
 
         if module_id.upper() == "RMU":
             message = (
-                f"本次将只处理已勾选的 {change_count} 个{target_label}。\n\n"
+                f"本次将只处理已勾选的 {change_count} 个{target_label}。\n"
+                f"涉及 G 文件：{selected_file_count} 个\n"
+                f"候选状态：{status_summary}\n\n"
                 "执行阶段不会重新扫描整张 G 图，也不会重新循环全部环网柜。"
                 "程序只会对这些设备所属环网柜和设备做轻量数据库复核，"
                 "然后按 XML ID 精确写回 Workspace 安全副本。\n\n"
@@ -2501,12 +3702,50 @@ class MainWindow(QMainWindow):
                 "是否确认执行？"
             )
         elif module_id.upper() == "FEEDER":
+            feeder_settings = self.module_widgets[
+                module_id
+            ].collect_settings()
+            create_enabled = bool(
+                feeder_settings.get(
+                    "auto_create_missing_sections",
+                    True,
+                )
+            )
+            planned_create_count = sum(
+                1
+                for changes in (
+                    execution_preview.get(
+                        "changes_by_file",
+                        {},
+                    ) or {}
+                ).values()
+                for change in (changes or [])
+                if (
+                    change.get("db_create_needed") == "YES"
+                    or (
+                        change.get("validated_row", {}) or {}
+                    ).get("db_create_needed") == "YES"
+                )
+            )
+            db_write_notice = (
+                f"\n数据库补齐：已启用；当前勾选中最多涉及 "
+                f"{planned_create_count} 条缺失馈线段。"
+                "\n执行时会再次查询数据库，只 INSERT 确实缺失的 "
+                "DMS_SECTION_DEVICE；不会 UPDATE / DELETE 已有设备。\n"
+                if create_enabled
+                else
+                "\n数据库补齐：未启用，不会创建缺失馈线段。\n"
+            )
             message = (
-                f"本次将只处理已勾选的 {change_count} 个FeedLine 图元。\n\n"
-                "程序会基于模型校验已确认的可信RMU/FEEDER_ID拓扑区域，"
-                "重新计算未勾选FeedLine当前占用的数据库馈线段，再只给勾选行分配剩余段。\n"
-                "DUPLICATE_LINK 行可以只选其中一条重新分配，也可以多条一起重新分配。\n\n"
-                "原始 G 文件不会被修改，只修改 Workspace 安全副本。\n\n"
+                f"本次将只处理已勾选的 {change_count} 个FeedLine 图元。\n"
+                f"涉及 G 文件：{selected_file_count} 个\n"
+                f"候选状态：{status_summary}\n"
+                f"{db_write_notice}\n"
+                "程序会重新确认当前数据库馈线段占用情况；如数据库数量不足且启用了补齐，"
+                "会先创建缺失馈线段并重新查询数据库，再计算 Expected KeyID。\n"
+                "G 文件最终只回写 app、p_ReportType、state、voltype、keyid 这 5 个属性。\n\n"
+                "原始 G 文件和 SSH 服务器文件都不会被修改，"
+                "只修改 Workspace/g_output 安全副本。\n\n"
                 "是否确认执行？"
             )
         else:
@@ -2538,7 +3777,24 @@ class MainWindow(QMainWindow):
             module_id = self.module_combo.currentData()
             module = self.modules[module_id]
             settings = self.module_widgets[module_id].collect_settings()
-            files = self.resolve_files(self.input_edit.text().strip())
+
+            # Association MUST use the exact file set from the corresponding
+            # validation.  In SSH mode these are the immutable remote_input
+            # snapshots downloaded when validation started.  Never fetch the
+            # server again here: that would risk validating version A but
+            # writing version B.
+            files = [
+                Path(p)
+                for p in (self.current_snapshot_files or [])
+            ]
+            if not files and self._current_input_source() == "LOCAL":
+                files = self.resolve_files(
+                    self.input_edit.text().strip()
+                )
+            if not files:
+                raise RuntimeError(
+                    "模型校验输入快照不存在，请重新执行模型校验。"
+                )
 
             if module_id in {"RMU", "FEEDER"}:
                 selected_source_files = {
@@ -2685,6 +3941,11 @@ class MainWindow(QMainWindow):
                 reports,
                 csv_base,
             )
+            change_log_csv = self._export_model_change_log(
+                result_bundle,
+                report_dir,
+                module.module_id,
+            )
 
             self.current_artifacts = {
                 "task_type": "association",
@@ -2699,6 +3960,8 @@ class MainWindow(QMainWindow):
                 "device_csv": (
                     str(csv_paths[1]) if len(csv_paths) > 1 else ""
                 ),
+                "change_log_csv": str(change_log_csv),
+                "source_info": dict(self.current_source_info or {}),
                 "g_output_dir": str(output_dir),
             }
             self.current_report_dir = str(report_dir)
@@ -2760,18 +4023,59 @@ class MainWindow(QMainWindow):
                         else f"关联完成设备 CSV：{csv_paths[1]}"
                     )
                 )
+            self.log(f"模型修改记录 CSV：{change_log_csv}")
 
-            QMessageBox.information(
-                self,
-                "模型关联完成",
-                f"模型关联处理完成。\n"
+            self._write_run_manifest(
+                operation="APPLY_ASSOCIATION",
+                module_id=module.module_id,
+                result=(
+                    "SUCCESS"
+                    if skipped_total == 0
+                    else "PARTIAL"
+                ),
+                summary=final_summary,
+                artifacts=self.current_artifacts,
+                input_path=self._current_input_description(),
+                selected=selected_total,
+                applied=total,
+                skipped=skipped_total,
+            )
+            self.refresh_history_table()
+
+            summary_box = QMessageBox(self)
+            summary_box.setWindowTitle("模型关联完成")
+            summary_box.setIcon(QMessageBox.Information)
+            summary_box.setText(
+                f"模型关联处理完成。\n\n"
                 f"本次选择：{selected_total} 个{object_label}\n"
                 f"成功写回：{total} 个\n"
                 f"执行时跳过：{skipped_total} 个\n\n"
                 f"原始 G 文件未修改。\n"
-                f"处理后的 G 文件：\n{output_dir}\n\n"
-                f"最终校验报告：\n{html_path}",
+                f"修改记录：{change_log_csv}"
             )
+            open_dir_button = summary_box.addButton(
+                "打开结果目录",
+                QMessageBox.ActionRole,
+            )
+            open_html_button = summary_box.addButton(
+                "打开 HTML",
+                QMessageBox.ActionRole,
+            )
+            open_change_button = summary_box.addButton(
+                "打开修改记录",
+                QMessageBox.ActionRole,
+            )
+            summary_box.addButton(
+                "关闭",
+                QMessageBox.AcceptRole,
+            )
+            summary_box.exec()
+            if summary_box.clickedButton() is open_dir_button:
+                self.open_current_run_dir()
+            elif summary_box.clickedButton() is open_html_button:
+                self.open_artifact("html")
+            elif summary_box.clickedButton() is open_change_button:
+                self.open_artifact("change_log_csv")
 
         except Exception as exc:
             self.progress_message.setText("模型关联失败")
@@ -2779,6 +4083,18 @@ class MainWindow(QMainWindow):
             self.workspace_status.setText("模型关联失败")
             apply_status_style(self.workspace_status, False)
             self.log(f"模型关联失败：{exc}")
+            try:
+                self._write_run_manifest(
+                    operation="APPLY_ASSOCIATION",
+                    module_id=self.module_combo.currentData(),
+                    result="FAILED",
+                    artifacts=self.current_artifacts,
+                    input_path=self._current_input_description(),
+                    error=str(exc),
+                )
+                self.refresh_history_table()
+            except Exception:
+                pass
             self._set_task_buttons_enabled(True)
             QMessageBox.critical(
                 self,

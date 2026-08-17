@@ -37,7 +37,15 @@ DEFAULT_NAME_POSITIONS = {
 DEFAULT_SETTINGS = {
     "model_module": "RMU",
     "operation": "VALIDATE",
+    "input_source": "LOCAL",
     "input_path": "",
+    "ssh": {
+        "host": "172.16.21.27",
+        "port": 22,
+        "username": "up8000",
+        "password": "up8000",
+        "remote_directory": "/home/up8000/data/graph/display/sln",
+    },
     "last_file_path": "",
     "last_folder_path": "",
     "last_run_dir": "",
@@ -48,5 +56,7 @@ DEFAULT_SETTINGS = {
     "feeder_table_id": 13500,
     "section_table_id": 13503,
     "section_domain": 1,
-    "drawing_mode": "AUTO",
+    "feeder_resolution_mode": "AUTO",
+    "manual_feeder_name": "",
+    "auto_create_missing_sections": True,
 }

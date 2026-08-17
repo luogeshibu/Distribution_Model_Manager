@@ -224,6 +224,7 @@ class OracleClient:
                 f.st_id,
                 f.graph_name,
                 s.name AS station_name,
+                s.bv_id AS station_bv_id,
                 TRIM(
                     NVL(s.name, '') || ' ' ||
                     NVL(f.name, '')
@@ -253,7 +254,7 @@ class OracleClient:
             table_name = self.get_table_name(405)
             rows = self._query(
                 f"""
-                SELECT id, name
+                SELECT id, name, bv_id
                 FROM {table_name}
                 WHERE id = :station_id
                 """,
@@ -262,6 +263,49 @@ class OracleClient:
             return rows[0] if len(rows) == 1 else None
         except Exception:
             return None
+
+
+    def get_preferred_feeder_section_voltage(self, station_id: Any) -> Optional[Dict[str, Any]]:
+        """Select the lowest eligible station voltage for new feeder sections.
+
+        Eligible nominal voltages: 13.8kV, 33kV, 110kV.
+        Table 402 voltagelevel provides the station-specific BV_ID; table 401
+        basevoltage provides the nominal voltage represented by that BV_ID.
+        """
+        if station_id in (None, ""):
+            return None
+
+        voltagelevel_table = self.get_table_name(402)
+        basevoltage_table = self.get_table_name(401)
+        rows = self._query(
+            f"""
+            SELECT
+                vl.id AS voltagelevel_id,
+                vl.name AS voltagelevel_name,
+                vl.st_id,
+                vl.bv_id,
+                bv.name AS basevoltage_name,
+                bv.nomvol
+            FROM {voltagelevel_table} vl
+            JOIN {basevoltage_table} bv
+              ON bv.id = vl.bv_id
+            WHERE vl.st_id = :station_id
+              AND (
+                    ABS(bv.nomvol - 13.8) < 0.000001
+                 OR ABS(bv.nomvol - 33.0) < 0.000001
+                 OR ABS(bv.nomvol - 110.0) < 0.000001
+              )
+            ORDER BY bv.nomvol ASC, vl.id ASC
+            """,
+            {"station_id": int(station_id)},
+        )
+        if not rows:
+            return None
+
+        row = dict(rows[0])
+        row["_voltagelevel_table_id"] = 402
+        row["_basevoltage_table_id"] = 401
+        return row
 
 
     def find_feeders_by_name_hint(
@@ -351,7 +395,7 @@ class OracleClient:
         table_name = self.get_table_name(int(table_id))
         rows = self._query(
             f"""
-            SELECT id, code, name, feeder_id, bv_id
+            SELECT id, code, name, feeder_id, bv_id, section_type
             FROM {table_name}
             WHERE feeder_id = :feeder_id
             ORDER BY name, id
@@ -362,6 +406,245 @@ class OracleClient:
             row["_table_id"] = int(table_id)
             row["_table_name"] = table_name
         return table_name, rows
+
+    def create_missing_sections(
+        self,
+        feeder_id: int,
+        section_defs: List[Dict[str, Any]],
+        *,
+        table_id: int = 13503,
+        area_id: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Create only missing dms_section_device rows in one transaction.
+
+        ID allocation intentionally follows the D5000 GET_VLLE_ID pattern:
+          1. lock target table for this short allocation transaction;
+          2. derive the legal ID range with KEYID_TO_LONG3(table,0,area,*);
+          3. compare current MAX(id) with deleted_record MAX(id);
+          4. allocate sequential IDs above the larger value;
+          5. INSERT all missing rows, verify, then COMMIT.
+
+        Existing rows are never UPDATEd or DELETEd here.
+        """
+        if not section_defs:
+            return []
+
+        self.ensure_connected()
+        table_id = int(table_id)
+        feeder_id = int(feeder_id)
+        area_id = int(area_id)
+
+        if table_id != 13503:
+            raise OracleError(
+                "自动创建馈线段仅允许 DMS_SECTION_DEVICE / table_id=13503。"
+            )
+
+        table_name = self.get_table_name(table_id)
+        requested = []
+        seen_names = set()
+        for item in section_defs:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                raise OracleError("待创建馈线段 NAME 不能为空。")
+            key = name.upper()
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            bv_id = item.get("bv_id")
+            if bv_id in (None, ""):
+                raise OracleError(f"{name}: BV_ID 为空，禁止创建。")
+            section_type = int(item.get("section_type"))
+            if section_type not in {0, 1, 3}:
+                raise OracleError(
+                    f"{name}: SECTION_TYPE={section_type} 不在允许值 0/1/3。"
+                )
+            requested.append({
+                "name": name,
+                "bv_id": int(bv_id),
+                "section_type": section_type,
+            })
+
+        created = []
+        try:
+            with self.conn.cursor() as cur:
+                # Keep ID allocation + inserts atomic and avoid two instances
+                # allocating the same MAX+1 value at the same time.
+                cur.execute(f"LOCK TABLE {table_name} IN EXCLUSIVE MODE")
+
+                # Re-check names AFTER the lock. Existing rows are reused and
+                # are never inserted a second time.
+                existing_by_name = {}
+                cur.execute(
+                    f"""
+                    SELECT id, name, feeder_id, bv_id, section_type
+                    FROM {table_name}
+                    WHERE feeder_id = :feeder_id
+                    """,
+                    {"feeder_id": feeder_id},
+                )
+                cols = [d[0].lower() for d in cur.description]
+                for raw in cur:
+                    row = {
+                        cols[i]: raw[i]
+                        for i in range(len(cols))
+                    }
+                    key = str(row.get("name") or "").strip().upper()
+                    existing_by_name.setdefault(key, []).append(row)
+
+                for item in requested:
+                    matches = existing_by_name.get(item["name"].upper(), [])
+                    if len(matches) > 1:
+                        raise OracleError(
+                            f"{item['name']}: 数据库存在 {len(matches)} 条同名馈线段，"
+                            "禁止自动创建/分配。"
+                        )
+
+                missing = [
+                    item for item in requested
+                    if not existing_by_name.get(item["name"].upper())
+                ]
+                if not missing:
+                    return []
+
+                cur.execute(
+                    """
+                    SELECT
+                        keyid_to_long3(:table_id, 0, :area_id, 0) AS min_id,
+                        keyid_to_long3(
+                            :table_id,
+                            0,
+                            :area_id,
+                            TO_NUMBER('FFFFFF','XXXXXX')
+                        ) AS max_id
+                    FROM dual
+                    """,
+                    {
+                        "table_id": table_id,
+                        "area_id": area_id,
+                    },
+                )
+                min_id, max_id = cur.fetchone()
+                min_id = int(min_id)
+                max_id = int(max_id)
+
+                cur.execute(
+                    f"""
+                    SELECT MAX(id)
+                    FROM {table_name}
+                    WHERE id > :min_id
+                      AND id < :max_id
+                    """,
+                    {"min_id": min_id, "max_id": max_id},
+                )
+                current_max = cur.fetchone()[0]
+
+                cur.execute(
+                    """
+                    SELECT MAX(id)
+                    FROM deleted_record
+                    WHERE table_id = :table_id
+                      AND region_id = :area_id
+                    """,
+                    {
+                        "table_id": table_id,
+                        "area_id": area_id,
+                    },
+                )
+                deleted_max = cur.fetchone()[0]
+
+                allocator = max(
+                    int(current_max) if current_max is not None else min_id,
+                    int(deleted_max) if deleted_max is not None else min_id,
+                )
+
+                for item in missing:
+                    allocator += 1
+                    if allocator >= max_id:
+                        raise OracleError(
+                            "DMS_SECTION_DEVICE 当前 ID 区间已无可用编号。"
+                        )
+
+                    # Last-line uniqueness defense, still inside the lock.
+                    cur.execute(
+                        f"SELECT COUNT(*) FROM {table_name} WHERE id = :id",
+                        {"id": allocator},
+                    )
+                    if int(cur.fetchone()[0]) != 0:
+                        raise OracleError(
+                            f"新 ID 已被占用：{allocator}"
+                        )
+
+                    cur.execute(
+                        f"""
+                        INSERT INTO {table_name}
+                        (
+                            id,
+                            name,
+                            feeder_id,
+                            bv_id,
+                            section_type,
+                            record_app,
+                            record_app2,
+                            record_app3,
+                            record_app4
+                        )
+                        VALUES
+                        (
+                            :id,
+                            :name,
+                            :feeder_id,
+                            :bv_id,
+                            :section_type,
+                            65545,
+                            65545,
+                            65545,
+                            65545
+                        )
+                        """,
+                        {
+                            "id": allocator,
+                            "name": item["name"],
+                            "feeder_id": feeder_id,
+                            "bv_id": item["bv_id"],
+                            "section_type": item["section_type"],
+                        },
+                    )
+                    created.append({
+                        "id": allocator,
+                        "name": item["name"],
+                        "feeder_id": feeder_id,
+                        "bv_id": item["bv_id"],
+                        "section_type": item["section_type"],
+                    })
+
+                # Verify exactly what this transaction created before COMMIT.
+                for item in created:
+                    cur.execute(
+                        f"""
+                        SELECT id, name, feeder_id, bv_id, section_type
+                        FROM {table_name}
+                        WHERE id = :id
+                        """,
+                        {"id": item["id"]},
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        raise OracleError(
+                            f"创建后验证失败：{item['name']}"
+                        )
+
+            self.conn.commit()
+            return created
+        except Exception as exc:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            if isinstance(exc, OracleError):
+                raise
+            raise OracleError(
+                f"创建 DMS_SECTION_DEVICE 失败，事务已回滚：{exc}"
+            ) from exc
 
     def verify_keyid(self, keyid: int) -> Dict[str, Any]:
         rows = self._query(

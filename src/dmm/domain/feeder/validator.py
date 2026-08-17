@@ -365,6 +365,7 @@ class FeederValidator:
             "object_type": FEEDLINE_TAG,
             "xml_id": obj.xml_id,
             "current_keyid": obj.keyid,
+            "ls": str(obj.attrs.get("ls", "") or ""),
             "current_device_id": "",
             "current_table_id": "",
             "current_domain": "",
@@ -575,6 +576,8 @@ class FeederValidator:
         feedlines: Optional[List[GObject]] = None,
         feeder_hint: Optional[Dict[str, Any]] = None,
         region_meta: Optional[Dict[str, Any]] = None,
+        forced_feeder_record: Optional[Dict[str, Any]] = None,
+        forced_source: str = "",
     ) -> Dict[str, Any]:
         feedlines = sorted(
             list(feedlines) if feedlines is not None else [
@@ -623,7 +626,7 @@ class FeederValidator:
             return report
 
         hint_norm = feeder_hint.get("normalized_hint", "")
-        if not hint_norm:
+        if not hint_norm and not forced_feeder_record:
             report["reason"] = (
                 "FEEDER_NAME_NOT_FOUND: 无法从 Bus 附近文字或文件名识别馈线名称"
             )
@@ -634,12 +637,26 @@ class FeederValidator:
             report["summary"] = self._summary(report)
             return report
 
-        feeder_resolution = self._resolve_region_feeder_records(
-            feeder_hint,
-            feedlines,
-        )
+        if forced_feeder_record:
+            feeder_resolution = {
+                "records": [dict(forced_feeder_record)],
+                "source": forced_source or "FORCED_FEEDER",
+                "direct_match_count": 1,
+                "direct_error": "",
+                "linked_inference": {},
+            }
+        else:
+            feeder_resolution = self._resolve_region_feeder_records(
+                feeder_hint,
+                feedlines,
+            )
         feeder_records = feeder_resolution.get("records", [])
         report["feeder_records"] = feeder_records
+        if forced_feeder_record:
+            report["region_assignment_method"] = (
+                forced_source or "FORCED_FEEDER"
+            )
+            report["feeder_hint_source"] = forced_source or "FORCED_FEEDER"
         report["feeder_resolution_source"] = feeder_resolution.get(
             "source",
             "",
@@ -2019,6 +2036,53 @@ class FeederValidator:
         )
         report["summary"] = self._summary(report)
         return report
+    def validate_file_with_feeder_record(
+        self,
+        g_path: str | Path,
+        feeder_record: Dict[str, Any],
+        *,
+        source: str = "FACID",
+    ) -> Dict[str, Any]:
+        """Validate the whole G file against one already-confirmed feeder."""
+        parsed = self.parser.parse(g_path)
+        feedlines = [
+            obj for obj in parsed.objects
+            if obj.tag == FEEDLINE_TAG
+        ]
+        display = norm(
+            feeder_record.get("display_name")
+            or feeder_record.get("name")
+        )
+        hint = {
+            "hint": display,
+            "normalized_hint": normalize_engineering_name(display),
+            "source": source,
+            "text_xml_id": "",
+            "bus_xml_id": "",
+            "distance": "",
+        }
+        report = self._validate_parsed_region(
+            parsed,
+            feedlines=feedlines,
+            feeder_hint=hint,
+            region_meta={
+                "drawing_type": "SINGLE_FEEDER",
+                "region_index": 1,
+                "region_assignment_method": source,
+            },
+            forced_feeder_record=feeder_record,
+            forced_source=source,
+        )
+        return {
+            "report_type": "FEEDER_FILE",
+            "g_file": str(parsed.path),
+            "file_name": parsed.path.name,
+            "drawing_type": "SINGLE_FEEDER",
+            "feeder_regions": [report],
+            "rmu_reference_rows": [],
+            "status": report.get("status", "FAIL"),
+        }
+
     def validate_file(self, g_path: str | Path, drawing_mode: str = "AUTO") -> Dict[str, Any]:
         """
         Validate FeedLine models by RMU-derived FEEDER_ID and G topology.

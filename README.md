@@ -1902,3 +1902,105 @@ CODE = 最终用于校验的 p_NameString
 ```
 
 数据库中其它无关设备全部忽略。
+
+
+## v3.8.0 正式内部交付增强
+
+### 执行前确认
+
+模型关联前会显示：
+
+- 本次勾选对象数量
+- 涉及 G 文件数量
+- 候选状态分布
+- 原始 G 文件不修改的安全说明
+
+### 模型修改记录
+
+每次模型关联额外生成：
+
+```text
+association_result_report/model_change_log.csv
+```
+
+逐属性记录：
+
+```text
+源G文件
+输出G文件
+G图元类型
+图元XML ID
+属性
+修改前
+修改后
+```
+
+### 运行历史
+
+左侧新增【运行历史】。每个 run 目录保存 `run_manifest.json`，可快速打开：
+
+- 运行目录
+- HTML 报告
+- 模型修改记录 CSV
+
+### 数据库访问
+
+Oracle 数据库仅用于查询/校验；模型关联不会对 Oracle 数据库执行写操作。
+
+### 发布检查
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\release_check.ps1
+```
+
+需要同时构建 EXE：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\release_check.ps1 -BuildExe
+```
+
+
+## v3.9.0 SSH 只读文件源
+
+模型工作区支持：
+
+```text
+本地文件 / 目录
+SSH 文件服务器（只读）
+```
+
+默认远程目录：
+
+```text
+172.16.21.27:22
+/home/up8000/data/graph/display/sln
+```
+
+SSH 模式的硬规则：
+
+```text
+刷新列表
+    -> 只获取文件名 / 大小 / mtime
+
+搜索 / 多选
+    -> 只操作已加载的列表
+
+模型校验
+    -> 对当前勾选的每个 G 文件重新 stat
+    -> 重新下载服务器当前最新版本
+    -> 再次 stat
+    -> 文件稳定后保存到 run/remote_input
+    -> SHA256
+    -> 模型校验
+
+执行模型关联
+    -> 禁止再次从服务器下载
+    -> 使用本次校验 remote_input 快照
+    -> 复制到 g_output
+    -> 只修改 g_output
+```
+
+服务器端不提供任何上传、覆盖、删除、重命名或写入功能。
+
+如果服务器上的同名 G 文件之后更新，需要重新执行【模型校验】。
+新一次校验会重新下载服务器当时的最新版本。

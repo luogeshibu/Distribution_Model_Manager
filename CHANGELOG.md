@@ -4,6 +4,278 @@
 
 
 
+
+
+
+
+
+
+
+
+
+## [4.0.5] - 2026-08-17
+
+### Feeder section BV_ID from voltage level
+- New 13503 feeder-section rows no longer use `substation.BV_ID`.
+- Resolve station from `dms_feeder_device.ST_ID`.
+- Query 402 `voltagelevel`, join 401 `basevoltage` by BV_ID.
+- Only 110kV, 33kV and 13.8kV are eligible; if multiple exist, use the
+  numerically smallest one and its `voltagelevel.BV_ID`.
+- AJWD with 110kV + 13.8kV therefore uses 13.8kV BV_ID
+  `112871465660973067`.
+- Existing ID allocation, SECTION_TYPE, transaction and G write-back logic
+  remain unchanged.
+
+## [4.0.4] - 2026-08-17
+
+### Feeder report aligned with direct feeder identification
+- Removed obsolete RMU/topology feeder-identification columns from feeder HTML
+  and feeder CSV reports.
+- Removed trusted/ignored RMU counts, RMU FEEDER_ID evidence, topology region
+  fields, and old topology explanatory text from feeder reporting.
+- Feeder summary now focuses on:
+  - identification source: FACID / FILENAME / MANUAL
+  - identification evidence
+  - unique 13500 match
+  - feeder ID/name
+  - station name/BV_ID from 405
+  - section name prefix
+  - existing/required 13503 section counts
+  - FeedLine association results
+- FeedLine detail no longer exports topology component / cross-region fields.
+- Added `ls`, planned `SECTION_TYPE`, and database-create-needed information to
+  FeedLine detail for the new feeder-section creation workflow.
+- No feeder database creation, ID allocation, association, SSH, RMU model, or
+  five-field G write-back logic changed.
+
+## [4.0.3] - 2026-08-17
+
+### Feeder wording cleanup
+- Removed all remaining feeder UI/help wording that suggested RMU, ring-main-unit
+  topology, connection topology, or FEEDER_ID could be used to determine a feeder.
+- Feeder identification is now documented consistently as exactly three sources:
+  1. G root facID
+  2. filename
+  3. manual input
+- All three sources must ultimately resolve to one unique 13500 /
+  dms_feeder_device record; otherwise the feeder file is blocked.
+- No database creation, ID allocation, FeedLine association, SSH, RMU-model,
+  or G write-back business logic changed.
+
+## [4.0.2] - 2026-08-17
+
+### Feeder resolution UX
+- Disabled mouse-wheel changes on the feeder resolution strategy combo box.
+- Clicking the combo box and keyboard selection still work normally.
+- No feeder, database, SSH, creation, association or G write-back logic changed.
+
+## [4.0.1] - 2026-08-17
+
+### Feeder ownership simplified
+- Removed RMU topology as a feeder-identification source.
+- Removed the obsolete `RMU 拓扑自动识别` feeder UI.
+- A feeder must now be confirmed only from:
+  1. G root `facID` -> exact 13500 / `dms_feeder_device.ID`
+  2. filename engineering-name match
+  3. manual feeder-name match
+- AUTO order is `facID -> filename -> manual input`.
+- Filename/manual matching requires one unique normalized full/suffix engineering
+  name match. If explicit manual text conflicts with facID/filename, creation
+  and association are blocked.
+
+### Database write boundary
+- 13500 / `dms_feeder_device`: read only.
+- 405 / `substation`: read only.
+- 13503 / `dms_section_device`: the only table that can be written, and only
+  through INSERT of genuinely missing feeder sections.
+- No UPDATE or DELETE SQL exists in the application database layer.
+- Every newly allocated ID is checked with `COUNT(*) WHERE id=:id` before
+  INSERT, while the 13503 table remains locked for the allocation transaction.
+
+### Exact section preparation
+- Each G FeedLine order maps to its exact target SEC name
+  (`..._SEC001`, `..._SEC002`, ...).
+- A different existing section such as SEC010 does not satisfy a missing SEC002.
+- Selected missing target sections are created first, then 13503 is re-queried,
+  then the existing FeedLine link/relink logic runs.
+- G write-back remains limited to:
+  `app`, `p_ReportType`, `state`, `voltype`, `keyid`.
+
+## [4.0.0] - 2026-08-16
+
+### FeedLine database preparation + automatic association
+- Added feeder resolution sources:
+  - G root `facID` exact lookup (preferred)
+  - manual feeder text
+  - G filename such as `JED-CTL-ADF-16.sln.pic.g`
+  - existing RMU topology fallback for composite/ambiguous drawings
+- Feeder context resolves `dms_feeder_device.ST_ID -> substation` and uses
+  `substation.NAME + "_" + feeder.NAME` as the section prefix, e.g. `ADF_16`.
+
+### Missing DMS_SECTION_DEVICE creation
+- Model validation remains read-only and produces CREATE_PENDING candidates.
+- During explicit `执行模型关联`, when enabled, only actually missing
+  `DMS_SECTION_DEVICE` rows are INSERTed.
+- Existing rows are never recreated, UPDATEd or DELETEd.
+- `FeedLine.ls` maps to `SECTION_TYPE`:
+  - `ls="2"` -> `0`
+  - `ls="1"` -> `1`
+  - empty/missing `ls` -> `3`
+  - unknown values are blocked from automatic creation.
+- New section names follow the G FeedLine order:
+  `STATION_FEEDER_SEC001`, `SEC002`, ...
+
+### D5000 ID allocation
+- New section IDs follow the confirmed D5000 pattern:
+  `KEYID_TO_LONG3(13503, 0, 0, code_id)`.
+- The transaction locks `DMS_SECTION_DEVICE`, derives the area-0 legal range,
+  compares the current table MAX(id) with `deleted_record` MAX(id), then
+  allocates sequential IDs above the larger value.
+- A feeder creation batch is atomic: any error causes ROLLBACK.
+- After COMMIT the database is queried again before Expected KeyID calculation.
+
+### G write-back boundary
+FeedLine association writes only these five attributes:
+- `app="6500000"`
+- `p_ReportType="1"`
+- `state="20"`
+- `voltype="dms_section_device.BV_ID"`
+- `keyid="Expected KeyID"`
+
+No `key_name`, `ls`, geometry, line style, color or other G attributes are
+changed by FeedLine association.
+
+### Existing behavior preserved
+- Existing correct links remain unchanged.
+- UNLINKED / RELINK / DUPLICATE_LINK allocation logic remains in place.
+- SSH is still strictly read-only and server files are never written.
+- Association still modifies only Workspace `g_output` copies.
+
+## [3.9.3] - 2026-08-16
+
+### SSH connection status UX
+- Moved SSH/SFTP connection status directly below the SSH action buttons.
+- Connection success/failure and remote-list loading results are now shown
+  in the SSH configuration area where the user can see them immediately.
+- No SSH read-only, latest-file snapshot, RMU, feeder, database, KeyID/BV_ID
+  or write-back logic changed.
+
+## [3.9.2] - 2026-08-16
+
+### SSH source explicitly shared by RMU and feeder
+- The LOCAL / SSH input source is now explicitly treated as a Model Workspace
+  common capability shared by both RMU and FEEDER modules.
+- FEEDER model can use the same SSH read-only browser, search, multi-select and
+  latest-file snapshot download as RMU.
+- Switching between RMU and FEEDER preserves the source selector and refreshes
+  the source panel geometry rather than rebuilding/hiding it.
+- Both model types follow the same hard rules:
+  every validation re-downloads the latest stable selected server files;
+  association uses only that validation snapshot and never re-downloads or
+  writes to the server.
+- No RMU/FEEDER validation, topology, database, KeyID/BV_ID or write-back
+  business rules changed.
+
+## [3.9.1] - 2026-08-16
+
+### Input source layout fix
+- Fixed the large blank area shown when `本地文件 / 目录` is selected.
+- Local source mode is restored to the compact single-row layout used before SSH support.
+- SSH source mode still expands to show connection fields, search and the remote G-file table.
+- Switching between LOCAL and SSH now recalculates the source panel height for the current page only.
+- No SSH freshness, read-only, snapshot, RMU, feeder, database, KeyID, BV_ID or write-back business logic changed.
+
+## [3.9.0] - 2026-08-16
+
+### Local + SSH dual G-file source
+- Model Workspace now supports two input sources:
+  - Local file / directory
+  - SSH file server (strict read-only)
+- Default SSH field configuration:
+  - host `172.16.21.27`
+  - port `22`
+  - user `up8000`
+  - remote directory `/home/up8000/data/graph/display/sln`
+- Remote browser supports refresh, local instant search, multi-select,
+  select current search results, cancel current results and clear selection.
+- Remote listing accepts only filenames ending exactly in `.g`; `.g.h`,
+  `.g.data` and `.g.png` are excluded.
+
+### Server read-only hard boundary
+- Added a dedicated `ReadOnlySshClient`.
+- The SSH infrastructure exposes only:
+  `test_connection`, `list_g_files`, `stat_file`, `download_file`, `close`.
+- No upload / put / remove / delete / rename / mkdir / remote-write API is
+  implemented.
+- Association never writes to or uploads to the SSH server.
+
+### Always-latest validation rule
+- Every new `模型校验` in SSH mode downloads every currently selected G file
+  again from the server.
+- Previous `remote_input`, cached file content or an earlier run is never
+  reused as a new validation input.
+- File-list caching is only for browsing/search and never determines the
+  validation file content.
+
+### Stable remote snapshot
+- Each selected file uses:
+  `stat before -> download -> stat after`.
+- Size and remote mtime must be unchanged and the downloaded byte count must
+  match the final remote size.
+- If the server file changes during download, the partial local file is
+  discarded and the latest version is retried up to 3 times.
+- A stable download is stored under the current run's `remote_input/`.
+- SHA256, remote size, remote mtime and download time are recorded in
+  `run_manifest.json`.
+
+### Validation/association consistency
+- After validation starts, the downloaded `remote_input` files are the fixed
+  snapshot for that validation.
+- `执行模型关联` never re-downloads from SSH.
+- Association uses the exact validation snapshot, copies it to `g_output`,
+  and modifies only the local Workspace copy.
+- Therefore the product guarantees:
+  `the version validated is the version associated`.
+- To use a newer server version, the user must run `模型校验` again.
+
+### Packaging
+- Added `paramiko>=3.4`.
+- EXE build verification and PyInstaller collection include Paramiko,
+  bcrypt and PyNaCl.
+
+### Scope
+- RMU / feeder recognition, database matching, logical CODE, cabinet type,
+  SMART/SMR, Expected KeyID, BV_ID and write-back business rules are unchanged.
+
+## [3.8.0] - 2026-08-15
+
+### Formal internal delivery workflow
+- Added a dedicated `运行历史` page.
+- Every validation/association run writes `run_manifest.json`.
+- Run history can open the run directory, HTML report and association change log.
+
+### Association audit trail
+- Every successful association run generates `model_change_log.csv`.
+- The change log records source/output G file, tag, XML ID, attribute,
+  value before write-back and value after write-back.
+- Added `打开修改记录 CSV` result button.
+
+### Safer execution UX
+- Final association confirmation now shows selected object count,
+  affected G-file count and selected candidate status breakdown.
+- Completion dialog now includes selected/success/skipped counts and
+  direct actions to open the result directory or HTML report.
+
+### About / delivery information
+- Help page now includes application name, version, build date,
+  edition and data-safety statement.
+- Added `release_check.ps1` and `RELEASE_CHECKLIST.md`.
+
+### Scope
+- RMU/feeder recognition, database matching, logical CODE, type recognition,
+  SMART/SMR, Expected KeyID, BV_ID, model selection and write-back business
+  rules are unchanged.
+
 ## [3.7.1] - 2026-08-15
 
 ### RMU report cleanup
