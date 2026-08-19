@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QGroupBox,
     QGridLayout, QSpinBox, QPushButton, QSizePolicy,
-    QAbstractSpinBox, QComboBox, QCheckBox, QLineEdit,
+    QAbstractSpinBox, QComboBox, QCheckBox, QLineEdit, QMessageBox,
 )
 
 
@@ -104,11 +104,10 @@ class FeederSettingsWidget(QWidget):
         root.setSpacing(12)
 
         info = QLabel(
-            "馈线模型仅支持三种馈线确定方式：G 根节点 facID、文件名、人工输入。"
-            "三种方式最终都必须唯一匹配到 13500 / dms_feeder_device；"
-            "如果不能唯一确认，则直接报错并阻断，不再使用 RMU、连接拓扑或 "
-            "FEEDER_ID 反推馈线。确认馈线后，程序可按需补齐缺失的 "
-            "dms_section_device，再按原有规则关联 FeedLine。"
+            "馈线归属规则：G 根节点 facID 只要非空，就强制作为唯一权威来源，"
+            "文件名和人工输入均不参与判断。只有 facID 为空时，才允许选择"
+            "文件名或人工输入；名称必须精准匹配 13500 / dms_feeder_device，"
+            "AJWD 6 与 AJWD 06 视为不同馈线。"
         )
         info.setWordWrap(True)
         info.setObjectName("moduleDescription")
@@ -125,13 +124,11 @@ class FeederSettingsWidget(QWidget):
         resolution_grid.setVerticalSpacing(10)
 
         resolution_grid.addWidget(QLabel("馈线识别方式"), 0, 0)
+        self._facid_locked_value = ""
+        self._facid_reverting = False
         self.feeder_resolution_mode = NoWheelComboBox()
         self.feeder_resolution_mode.addItem(
-            "自动：facID → 文件名 → 人工输入",
-            "AUTO",
-        )
-        self.feeder_resolution_mode.addItem(
-            "仅使用 G 根节点 facID",
+            "仅使用 G 根节点 facID（默认）",
             "FACID",
         )
         self.feeder_resolution_mode.addItem(
@@ -139,17 +136,20 @@ class FeederSettingsWidget(QWidget):
             "FILENAME",
         )
         self.feeder_resolution_mode.addItem(
-            "人工输入",
+            "仅使用人工输入",
             "MANUAL",
         )
         saved_mode = str(
-            config.get("feeder_resolution_mode", "AUTO") or "AUTO"
+            config.get("feeder_resolution_mode", "FACID") or "FACID"
         ).upper()
         mode_index = self.feeder_resolution_mode.findData(saved_mode)
         self.feeder_resolution_mode.setCurrentIndex(
             mode_index if mode_index >= 0 else 0
         )
         self.feeder_resolution_mode.setMinimumHeight(36)
+        self.feeder_resolution_mode.currentIndexChanged.connect(
+            self._on_resolution_mode_changed
+        )
         resolution_grid.addWidget(
             self.feeder_resolution_mode,
             0,
@@ -163,7 +163,7 @@ class FeederSettingsWidget(QWidget):
             str(config.get("manual_feeder_name", "") or "")
         )
         self.manual_feeder_name.setPlaceholderText(
-            "例如：JED CTL ADF 16"
+            "例如：AJWD 43"
         )
         self.manual_feeder_name.setMinimumHeight(36)
         resolution_grid.addWidget(
@@ -173,6 +173,73 @@ class FeederSettingsWidget(QWidget):
             1,
             2,
         )
+
+        self.facid_policy_notice = QLabel(
+            "运行时检测 G.facID：非空即强制 facID；"
+            "facID 为空时才使用文件名或人工输入。"
+        )
+        self.facid_policy_notice.setWordWrap(True)
+        self.facid_policy_notice.setStyleSheet(
+            "background:#EEF5F8;color:#35515E;"
+            "border:1px solid #C8D7DE;border-radius:6px;padding:7px 9px;"
+        )
+        resolution_grid.addWidget(
+            self.facid_policy_notice,
+            2,
+            0,
+            1,
+            3,
+        )
+
+        resolution_grid.addWidget(QLabel("图纸类型确认"), 3, 0)
+        self.feeder_drawing_mode = NoWheelComboBox()
+        self.feeder_drawing_mode.addItem(
+            "自动识别（默认，按 G 图拓扑）",
+            "AUTO",
+        )
+        self.feeder_drawing_mode.addItem(
+            "强制单馈线图（本次文件/目录）",
+            "SINGLE",
+        )
+        self.feeder_drawing_mode.addItem(
+            "强制组合图（本次文件/目录）",
+            "MULTI",
+        )
+        saved_drawing_mode = str(
+            config.get("feeder_drawing_mode", "AUTO") or "AUTO"
+        ).upper()
+        drawing_mode_index = self.feeder_drawing_mode.findData(
+            saved_drawing_mode
+        )
+        self.feeder_drawing_mode.setCurrentIndex(
+            drawing_mode_index if drawing_mode_index >= 0 else 0
+        )
+        self.feeder_drawing_mode.setMinimumHeight(36)
+        self.feeder_drawing_mode.setToolTip(
+            "AUTO 使用 G 文件电气拓扑自动判断。强制单馈线后，若馈线名称在"
+            "13500 中唯一，可将该 FEEDER_ID 回写到整张 G 根 facID；"
+            "强制组合图则禁止整图根 facID 绑定到单一馈线。目录模式下该选择"
+            "应用于本次目录中的全部 G 文件。"
+        )
+        resolution_grid.addWidget(
+            self.feeder_drawing_mode,
+            3,
+            1,
+            1,
+            2,
+        )
+
+        drawing_notice = QLabel(
+            "安全边界：图纸类型只决定是否允许把整张 G 归属到一个馈线。"
+            "单馈线图的馈线根 facID 关联不依赖 Breaker、Busbar、FeedLine "
+            "等设备关联状态；组合图禁止整图写入单一 FEEDER_ID。"
+        )
+        drawing_notice.setWordWrap(True)
+        drawing_notice.setStyleSheet(
+            "background:#EEF5F8;color:#35515E;"
+            "border:1px solid #C8D7DE;border-radius:6px;padding:7px 9px;"
+        )
+        resolution_grid.addWidget(drawing_notice, 4, 0, 1, 3)
 
         self.auto_create_missing_sections = QCheckBox(
             "执行模型关联时自动创建数据库中缺失的馈线段"
@@ -187,7 +254,7 @@ class FeederSettingsWidget(QWidget):
         )
         resolution_grid.addWidget(
             self.auto_create_missing_sections,
-            2,
+            5,
             0,
             1,
             3,
@@ -203,8 +270,9 @@ class FeederSettingsWidget(QWidget):
             "background:#FFF7E6;color:#8A5A00;"
             "border:1px solid #F1D59B;border-radius:6px;padding:7px 9px;"
         )
-        resolution_grid.addWidget(db_notice, 3, 0, 1, 3)
+        resolution_grid.addWidget(db_notice, 6, 0, 1, 3)
         resolution_grid.setColumnStretch(1, 1)
+        self._sync_manual_enabled()
         root.addWidget(resolution_box)
 
         mapping = QGroupBox("馈线段数据库表与域配置")
@@ -259,11 +327,83 @@ class FeederSettingsWidget(QWidget):
 
         root.addWidget(mapping)
 
+    def _sync_manual_enabled(self):
+        if getattr(self, "_facid_locked_value", ""):
+            self.manual_feeder_name.setEnabled(False)
+            return
+        self.manual_feeder_name.setEnabled(
+            str(self.feeder_resolution_mode.currentData() or "").upper()
+            == "MANUAL"
+        )
+
+    def _on_resolution_mode_changed(self, _index=None):
+        mode = str(self.feeder_resolution_mode.currentData() or "").upper()
+        locked = str(getattr(self, "_facid_locked_value", "") or "").strip()
+        if locked and mode != "FACID":
+            if getattr(self, "_facid_reverting", False):
+                return
+            self._facid_reverting = True
+            try:
+                idx = self.feeder_resolution_mode.findData("FACID")
+                if idx >= 0:
+                    self.feeder_resolution_mode.setCurrentIndex(idx)
+            finally:
+                self._facid_reverting = False
+            QMessageBox.information(
+                self,
+                "馈线 facID 已锁定",
+                f"当前 G 文件 facID={locked}，馈线归属已经由 facID 确定。\n\n"
+                "禁止使用文件名或人工输入重新查询馈线。"
+            )
+            return
+        self._sync_manual_enabled()
+
+    def set_facid_lock(self, facid=None):
+        value = str(facid or "").strip()
+        self._facid_locked_value = value
+        if value:
+            idx = self.feeder_resolution_mode.findData("FACID")
+            self._facid_reverting = True
+            try:
+                if idx >= 0:
+                    self.feeder_resolution_mode.setCurrentIndex(idx)
+            finally:
+                self._facid_reverting = False
+            self.feeder_resolution_mode.setEnabled(True)
+            self.manual_feeder_name.clear()
+            self.manual_feeder_name.setEnabled(False)
+            self.manual_feeder_name.setPlaceholderText(
+                "当前 G 文件 facID 非空，禁止人工输入"
+            )
+            self.facid_policy_notice.setText(
+                f"检测到 G.facID={value}：馈线已由 facID 强制锁定。"
+                "文件名和人工输入禁止参与查询。"
+            )
+            self.facid_policy_notice.setStyleSheet(
+                "background:#E8F7F1;color:#006B52;"
+                "border:1px solid #A9DCC8;border-radius:6px;padding:7px 9px;"
+                "font-weight:600;"
+            )
+        else:
+            self.feeder_resolution_mode.setEnabled(True)
+            self.manual_feeder_name.setPlaceholderText("例如：AJWD 43")
+            self._sync_manual_enabled()
+            self.facid_policy_notice.setText(
+                "当前 G.facID 为空：可选择文件名或人工输入。"
+                "名称必须精准匹配；AJWD 6 与 AJWD 06 不等价。"
+                "执行关联成功后，会把最终 FEEDER_ID 回写到 G 根节点 facID。"
+            )
+            self.facid_policy_notice.setStyleSheet(
+                "background:#FFF7E6;color:#8A5A00;"
+                "border:1px solid #F1D59B;border-radius:6px;padding:7px 9px;"
+            )
+
     def restore_defaults(self):
         self.section_table.setValue(self.DEFAULT_SECTION_TABLE_ID)
         self.section_domain.setValue(self.DEFAULT_SECTION_DOMAIN)
         self.feeder_resolution_mode.setCurrentIndex(0)
         self.manual_feeder_name.clear()
+        self.feeder_drawing_mode.setCurrentIndex(0)
         self.auto_create_missing_sections.setChecked(True)
 
     def collect_settings(self):
@@ -273,9 +413,12 @@ class FeederSettingsWidget(QWidget):
             "section_table_id": int(self.section_table.value()),
             "section_domain": int(self.section_domain.value()),
             "feeder_resolution_mode": str(
-                self.feeder_resolution_mode.currentData() or "AUTO"
+                self.feeder_resolution_mode.currentData() or "FACID"
             ),
             "manual_feeder_name": self.manual_feeder_name.text().strip(),
+            "feeder_drawing_mode": str(
+                self.feeder_drawing_mode.currentData() or "AUTO"
+            ).upper(),
             "auto_create_missing_sections": bool(
                 self.auto_create_missing_sections.isChecked()
             ),

@@ -3,8 +3,30 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectRoot
 
-$BuildScriptVersion = "4.0.5"
-$AppName = "Distribution_Model_Manager_v4.0.5"
+# Keep packaging version in one place only: src/dmm/config/constants.py.
+# The build script derives its EXE/folder/release names from APP_VERSION so a
+# future application version bump cannot accidentally keep an older package name.
+$ConstantsPath = Join-Path $ProjectRoot "src\dmm\config\constants.py"
+if (!(Test-Path $ConstantsPath)) {
+    throw "Application constants file not found: $ConstantsPath"
+}
+
+$ConstantsText = Get-Content $ConstantsPath -Raw -Encoding UTF8
+$VersionMatch = [regex]::Match(
+    $ConstantsText,
+    'APP_VERSION\s*=\s*["'']([^"'']+)["'']'
+)
+if (!$VersionMatch.Success) {
+    throw "APP_VERSION was not found in: $ConstantsPath"
+}
+
+$AppVersion = $VersionMatch.Groups[1].Value.Trim()
+if ([string]::IsNullOrWhiteSpace($AppVersion)) {
+    throw "APP_VERSION is empty in: $ConstantsPath"
+}
+
+$BuildScriptVersion = $AppVersion
+$AppName = "Distribution_Model_Manager_v$AppVersion"
 
 $VenvDir = Join-Path $ProjectRoot ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"

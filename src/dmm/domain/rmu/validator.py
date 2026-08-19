@@ -66,7 +66,10 @@ class RmuValidator:
         if not all_candidates:
             return {
                 "status": "FAIL",
-                "reason": "RMU_NAME_NOT_FOUND",
+                "reason": (
+                    "RMU_NAME_NOT_PARSED: "
+                    "在当前配置的环网柜名称方向内未解析到有效名称文字"
+                ),
                 "candidate_rows": [],
                 "selected": None,
             }
@@ -115,6 +118,18 @@ class RmuValidator:
                 chosen = ordered[0]
                 selection_reason = "MULTIPLE_LABELS_NEAREST_FALLBACK"
 
+        chosen_name = norm(getattr(chosen, "text", ""))
+        if not chosen_name:
+            return {
+                "status": "FAIL",
+                "reason": (
+                    "RMU_NAME_NOT_PARSED: "
+                    "已找到候选文字对象，但解析后的环网柜名称为空"
+                ),
+                "candidate_rows": [],
+                "selected": None,
+            }
+
         candidate_rows = []
         selected_row = None
 
@@ -140,7 +155,7 @@ class RmuValidator:
             if c is chosen:
                 selected_row = row
 
-        records = self.db.get_rmu_records(chosen.text)
+        records = self.db.get_rmu_records(chosen_name)
 
         if len(records) == 1:
             return {
@@ -775,20 +790,32 @@ class RmuValidator:
             row["current_rmu_name"] = current_rmu_name
 
             expected_rmu_name = norm(row.get("rmu_name"))
-            if expected_rmu_name and current_rmu_name:
+            if expected_rmu_name:
                 row["current_rmu_name_match"] = (
                     "YES"
-                    if expected_rmu_name == current_rmu_name
+                    if current_rmu_name
+                    and expected_rmu_name == current_rmu_name
                     else "NO"
                 )
             else:
-                row["current_rmu_name_match"] = "NO"
+                # The G-file RMU name was not resolved.  Do not label an
+                # otherwise valid existing KeyID as "linked to another RMU"
+                # merely because there is no textual RMU name to compare.
+                # The cross-device consistency pass below will determine
+                # whether all existing links point to one actual RMU.
+                row["current_rmu_name_match"] = "N/A"
 
             # There is no unique expected RMU ID in this branch.
             row["current_rmu_match"] = "N/A"
 
-            # Existing model belongs to another RMU -> hard error.
-            if row.get("current_rmu_name_match") != "YES":
+            # Only an actually resolved G-file RMU name can prove that the
+            # current model belongs to another RMU.  If the name is missing,
+            # keep inspecting the current link and infer RMU identity from the
+            # set of existing device links afterwards.
+            if (
+                expected_rmu_name
+                and row.get("current_rmu_name_match") != "YES"
+            ):
                 row["model_link_status"] = (
                     "已人工关联，但关联到了其他环网柜"
                 )
@@ -908,16 +935,19 @@ class RmuValidator:
 
     def _validate_nonunique_rmu_existing_links(self, rmu_result):
         """
-        Additional consistency rule for a non-unique RMU name.
+        Cross-check existing manual KeyIDs when the RMU identity cannot be
+        uniquely established from the G-file name.
 
-        The RMU summary still fails because the RMU name is not unique.
-        However, if G elements already contain manual KeyIDs, inspect the
-        existing model rather than discarding it.
+        This covers both:
+        - a parsed RMU name that is duplicated/not uniquely usable in DB; and
+        - an RMU name that was not parsed (or whose parsing raised an error).
 
-        All successfully resolved existing KeyIDs inside this G RMU must point
-        to ONE AND THE SAME actual dms_combined_device record.  Having the same
-        RMU NAME is not enough: if some devices point to duplicate RMU ID A and
-        others point to duplicate RMU ID B, the existing model is inconsistent.
+        Existing links are inspected instead of being discarded.  All
+        successfully resolved KeyIDs inside one G RMU must point to ONE AND
+        THE SAME actual dms_combined_device record.  For a missing G-file RMU
+        name, that common combined_id is also used as an evidence-only RMU
+        identity hint for the report.  It does NOT enable automatic creation
+        or reassociation while the graphical RMU name remains unresolved.
 
         Feeder information is deliberately not involved.
         """
@@ -928,8 +958,13 @@ class RmuValidator:
         if not linked_rows:
             return
 
+        expected_name = norm(rmu_result.get("rmu_name"))
+        reason_text = norm(rmu_result.get("rmu_reason"))
+        reason_code = reason_text.split(":", 1)[0] if reason_text else ""
+
         resolved_rows = []
         current_rmu_ids = set()
+        current_rmu_names = set()
 
         for row in linked_rows:
             current_id = int_or_none(row.get("current_combined_id"))
@@ -937,10 +972,13 @@ class RmuValidator:
             if current_id is not None:
                 current_rmu_ids.add(current_id)
                 resolved_rows.append(row)
+            if current_name:
+                current_rmu_names.add(current_name)
 
-            # Per-row validation already detects a different RMU name. Keep
-            # that hard error; this method adds the cross-device ID check.
-            expected_name = norm(rmu_result.get("rmu_name"))
+            # If the G-file RMU name was actually resolved, keep the original
+            # hard name-mismatch check.  When it was not resolved there is no
+            # textual target to compare against, so only the cross-device
+            # combined_id consistency rule below is meaningful.
             if current_name and expected_name and current_name != expected_name:
                 row["model_link_correct"] = "NO"
                 row["association_ready"] = "NO"
@@ -954,31 +992,154 @@ class RmuValidator:
                     f"当前combined_id={current_id or '-'}"
                 )
 
-        if len(current_rmu_ids) <= 1:
+        if len(current_rmu_ids) > 1:
+            ids_text = ",".join(
+                str(value) for value in sorted(current_rmu_ids)
+            )
+            if expected_name:
+                issue = (
+                    "NONUNIQUE_RMU_EXISTING_LINKS_SPAN_MULTIPLE_RMUS: "
+                    f"同一G图环网柜内已关联设备实际来自多个环网柜ID：{ids_text}"
+                )
+            else:
+                issue = (
+                    "UNRESOLVED_RMU_EXISTING_LINKS_SPAN_MULTIPLE_RMUS: "
+                    "图上环网柜名称未可靠解析，且柜内已关联设备实际来自"
+                    f"多个数据库环网柜ID：{ids_text}；无法反推出唯一环网柜。"
+                )
+            rmu_result["db_integrity_issues"].append(issue)
+            rmu_result["association_block_reasons"].append(issue)
+
+            for row in resolved_rows:
+                row["model_link_correct"] = "NO"
+                row["association_ready"] = "NO"
+                row["writeback_needed"] = "NO"
+                row["model_link_status"] = (
+                    "已关联，但同一环网柜内设备来自多个数据库环网柜"
+                )
+                row["association_action"] = (
+                    "禁止自动处理，请检查已有模型关联"
+                )
+                self._set_rmu_link_issue(
+                    row,
+                    "CURRENT_MODEL_RMU_ID_INCONSISTENT: "
+                    f"当前图形环网柜={expected_name or '-'}；"
+                    f"本环网柜已关联设备涉及多个combined_id={ids_text}"
+                )
             return
 
-        ids_text = ",".join(str(value) for value in sorted(current_rmu_ids))
-        issue = (
-            "NONUNIQUE_RMU_EXISTING_LINKS_SPAN_MULTIPLE_RMUS: "
-            f"同一G图环网柜内已关联设备实际来自多个环网柜ID：{ids_text}"
-        )
-        rmu_result["db_integrity_issues"].append(issue)
-        rmu_result["association_block_reasons"].append(issue)
+        # v4.1.17: RMU name was not parsed, but all resolvable existing
+        # device links point to the same actual database RMU.  Preserve the
+        # red RMU-level name warning, while explicitly reporting that the
+        # existing RMU ownership is consistent and does not need reassociation.
+        if not expected_name and len(current_rmu_ids) == 1:
+            inferred_id = next(iter(current_rmu_ids))
+            inferred_name = (
+                next(iter(current_rmu_names))
+                if len(current_rmu_names) == 1
+                else ""
+            )
+            rmu_result["inferred_rmu_id"] = inferred_id
+            rmu_result["inferred_rmu_name"] = inferred_name
 
-        for row in resolved_rows:
-            row["model_link_correct"] = "NO"
-            row["association_ready"] = "NO"
-            row["writeback_needed"] = "NO"
-            row["model_link_status"] = (
-                "已关联，但同一环网柜内设备来自多个数据库环网柜"
+            all_device_rows = [
+                row for row in rmu_result.get("device_rows", [])
+                if row.get("xml_id")
+            ]
+            unlinked_rows = [
+                row for row in all_device_rows
+                if row.get("model_linked") != "YES"
+            ]
+            linked_without_owner = [
+                row for row in linked_rows
+                if int_or_none(row.get("current_combined_id")) is None
+            ]
+            all_devices_confirmed = (
+                bool(all_device_rows)
+                and not unlinked_rows
+                and not linked_without_owner
+                and len(resolved_rows) == len(all_device_rows)
             )
-            row["association_action"] = "禁止自动处理，请检查已有模型关联"
-            self._set_rmu_link_issue(
-                row,
-                "CURRENT_MODEL_RMU_ID_INCONSISTENT: "
-                f"当前图形环网柜={rmu_result.get('rmu_name') or '-'}；"
-                f"本环网柜已关联设备涉及多个combined_id={ids_text}"
+
+            parse_label = (
+                "图上环网柜名称解析/核验异常"
+                if reason_code in {
+                    "RMU_NAME_RESOLUTION_ERROR",
+                    "RMU_LOOKUP_ERROR",
+                }
+                else "图上环网柜名称未解析出来"
             )
+            rmu_ref = (
+                f"ID={inferred_id}，NAME={inferred_name or '-'}"
+            )
+            if all_devices_confirmed:
+                consistency_text = (
+                    "柜内所有设备的现有KeyID均可反查，并且全部来自同一个"
+                    f"数据库环网柜（{rmu_ref}）；因此现有RMU归属关联一致且正确，"
+                    "无需重新关联。"
+                )
+            else:
+                consistency_text = (
+                    "当前能够反查的已关联设备均来自同一个数据库环网柜"
+                    f"（{rmu_ref}），现有已关联设备的RMU归属一致；"
+                    f"另有未关联设备={len(unlinked_rows)}，"
+                    f"无法反查所属RMU的已关联设备={len(linked_without_owner)}。"
+                )
+
+            advice = (
+                f"{parse_label}；{consistency_text}"
+                f"请检查图上的环网柜名称是否应为“{inferred_name or '-'}”。"
+            )
+            rmu_result["rmu_reason"] = (
+                f"{reason_code or 'RMU_NAME_NOT_PARSED'}: {advice}"
+            )
+
+            # Replace the generic identity blocker with a precise message.
+            # The row stays red because the graphical RMU name is unresolved;
+            # however, existing consistent links are explicitly preserved.
+            old_blocks = list(rmu_result.get("association_block_reasons", []))
+            filtered_blocks = [
+                block for block in old_blocks
+                if not str(block).startswith((
+                    "RMU_NAME_NOT_PARSED:",
+                    "RMU_NAME_RESOLUTION_ERROR:",
+                    "RMU_IDENTITY_INVALID:",
+                ))
+            ]
+            filtered_blocks.append(
+                f"{reason_code or 'RMU_NAME_NOT_PARSED'}: "
+                f"{parse_label}；已通过柜内现有KeyID反查到唯一数据库环网柜"
+                f"（{rmu_ref}）。{consistency_text}"
+                "由于图上名称仍未可靠解析，禁止自动新增或改绑；"
+                "现有一致关联无需修改。"
+            )
+            rmu_result["association_block_reasons"] = filtered_blocks
+
+            for row in resolved_rows:
+                # Do not overwrite genuine device-level errors.  Only improve
+                # the explanation for rows whose existing manual link already
+                # passed the per-device checks.
+                if (
+                    row.get("status") == "PASS"
+                    and row.get("model_link_correct") == "YES"
+                ):
+                    row["model_link_status"] = (
+                        "模型已关联且正确；图上RMU名称未解析，但柜内设备归属一致"
+                    )
+                    row["association_action"] = (
+                        "保留现有关联；请核对图上环网柜名称"
+                    )
+                    row["reason"] = (
+                        "RMU_NAME_UNRESOLVED_EXISTING_LINK_VALID: "
+                        f"当前KeyID设备所属环网柜ID={inferred_id}；"
+                        f"环网柜NAME={inferred_name or '-'}；"
+                        "当前设备关联无需修改。"
+                    )
+            return
+
+        # Exactly one actual RMU ID with a resolved expected RMU name is
+        # consistent; per-row checks have already handled any name mismatch.
+        return
 
     def _append_unresolved_rmu_device_rows(
         self,
@@ -1293,16 +1454,74 @@ class RmuValidator:
             return
         self._evaluate_current_model(row, elem, device_id, rule, row.get("rmu_id"))
 
+    @staticmethod
+    def _rmu_identity_block_reason(reason, frame_xml_id, rmu_name=""):
+        """Return a user-facing RMU-level hard blocker with a precise cause."""
+        reason_text = norm(reason)
+        code = reason_text.split(":", 1)[0] if reason_text else ""
+        frame_ref = norm(frame_xml_id) or "-"
+        name_ref = norm(rmu_name)
+
+        if code in {"RMU_NAME_NOT_PARSED", "RMU_NAME_NOT_FOUND"}:
+            return (
+                "RMU_NAME_NOT_PARSED: "
+                f"矩形框XML ID={frame_ref} 未解析出环网柜名称；"
+                "请检查环网柜名称方向配置、图内名称文字及其与矩形框的位置关系。"
+                "环网柜身份未确定，禁止该RMU及柜内设备自动关联。"
+            )
+
+        if code in {"RMU_NAME_RESOLUTION_ERROR", "RMU_LOOKUP_ERROR"}:
+            detail = reason_text.split(":", 1)[1].strip() if ":" in reason_text else reason_text
+            return (
+                "RMU_NAME_RESOLUTION_ERROR: "
+                f"矩形框XML ID={frame_ref} 环网柜名称解析/核验异常；"
+                f"详情={detail or '-'}；"
+                "环网柜身份未可靠确定，禁止该RMU及柜内设备自动关联。"
+            )
+
+        if code == "RMU_DUPLICATE_IN_DATABASE":
+            return (
+                "RMU_DUPLICATE_IN_DATABASE: "
+                f"已解析环网柜名称={name_ref or '-'}，但数据库存在多条同名记录；"
+                "环网柜必须唯一，禁止自动关联。"
+            )
+
+        if code == "RMU_NOT_FOUND_IN_DATABASE":
+            return (
+                "RMU_NOT_FOUND_IN_DATABASE: "
+                f"已解析环网柜名称={name_ref or '-'}，但数据库中未找到唯一对应记录；"
+                "请检查数据库模型或图内环网柜名称，禁止自动关联。"
+            )
+
+        return (
+            f"RMU_IDENTITY_INVALID: 矩形框XML ID={frame_ref}；"
+            f"环网柜名称={name_ref or '-'}；原因={reason_text or 'UNKNOWN'}；"
+            "环网柜身份无法可靠确定，禁止该RMU及柜内设备自动关联。"
+        )
+
     def validate_file(self, g_path: str | Path, positions: Sequence[str], progress_callback=None) -> Dict[str, Any]:
         parsed = self.parser.parse(g_path)
         frames = self.parser.find_rmu_frames(parsed)
-        preassigned_name_candidates = (
-            self.parser.assign_rmu_label_candidates_globally(
-                parsed,
-                frames,
-                positions,
+        name_assignment_error = ""
+        try:
+            preassigned_name_candidates = (
+                self.parser.assign_rmu_label_candidates_globally(
+                    parsed,
+                    frames,
+                    positions,
+                )
             )
-        )
+        except Exception as exc:
+            # Name parsing must never abort the whole RMU report.  Convert the
+            # parser/resolution failure into a per-RMU red FAIL instead.
+            preassigned_name_candidates = {}
+            name_assignment_error = (
+                f"RMU_NAME_RESOLUTION_ERROR: {type(exc).__name__}: {exc}"
+            )
+            self.log(
+                f"[{parsed.path.name}] 环网柜名称候选解析异常：{name_assignment_error}"
+            )
+
         preassigned_smart_markers = (
             self.parser.assign_rmu_smart_markers_globally(
                 parsed,
@@ -1350,7 +1569,7 @@ class RmuValidator:
                     f"  RMU类型交叉校验不一致："
                     f"图内文字={type_info.get('text_type')}；"
                     f"devref={type_info.get('devref_type')}；"
-                    "仍严格按柜内Y/Q文字结果。"
+                    "最终按devref类型。"
                 )
 
             rmu_result = {
@@ -1373,7 +1592,7 @@ class RmuValidator:
                         f"环网柜={{RMU_NAME}}；"
                         f"柜内Y/Q文字类型={type_info.get('text_type', 'UNKNOWN')}；"
                         f"devref类型={type_info.get('devref_type', 'UNKNOWN')}；"
-                        "最终仍采用Y/Q文字类型，请检查该环网柜的Y/Q命名方式及开关devref模板。"
+                        "最终采用devref类型，请检查该环网柜的Y/Q文字命名与开关devref模板是否一致。"
                     )
                 ),
                 "rmu_type_labels": ", ".join(type_info.get("text_labels", [])),
@@ -1401,18 +1620,31 @@ class RmuValidator:
                 "label_candidates": [],
             }
 
-            try:
-                resolved = self._resolve_rmu_name(
-                    parsed,
-                    frame,
-                    positions,
-                    preassigned_candidates=preassigned_name_candidates,
-                )
-            except Exception as exc:
-                rmu_result["rmu_status"] = "FAIL"
-                rmu_result["rmu_reason"] = f"RMU_LOOKUP_ERROR: {exc}"
-                report["rmu_results"].append(rmu_result)
-                continue
+            if name_assignment_error:
+                resolved = {
+                    "status": "FAIL",
+                    "reason": name_assignment_error,
+                    "candidate_rows": [],
+                    "selected": None,
+                }
+            else:
+                try:
+                    resolved = self._resolve_rmu_name(
+                        parsed,
+                        frame,
+                        positions,
+                        preassigned_candidates=preassigned_name_candidates,
+                    )
+                except Exception as exc:
+                    resolved = {
+                        "status": "FAIL",
+                        "reason": (
+                            "RMU_NAME_RESOLUTION_ERROR: "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                        "candidate_rows": [],
+                        "selected": None,
+                    }
 
             rmu_result["label_candidates"] = resolved["candidate_rows"]
             rmu_result["rmu_status"] = resolved["status"]
@@ -1472,7 +1704,11 @@ class RmuValidator:
                     f"数据库记录数={rmu_result.get('rmu_db_count', 0)}。"
                 )
                 rmu_result["association_block_reasons"].append(
-                    "环网柜ID不唯一或环网柜数据库记录无效，请先检查环网柜模型。"
+                    self._rmu_identity_block_reason(
+                        resolved["reason"],
+                        frame.frame.xml_id,
+                        rmu_result.get("rmu_name", ""),
+                    )
                 )
                 self._append_unresolved_rmu_device_rows(
                     parsed,

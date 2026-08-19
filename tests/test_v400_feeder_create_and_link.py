@@ -58,13 +58,13 @@ def test_facid_is_first_class_feeder_source(tmp_path):
         FakeFeederDB(),
         g,
         {
-            "feeder_resolution_mode": "AUTO",
+            "feeder_resolution_mode": "FACID",
             "feeder_table_id": 13500,
         },
         logs.append,
     )
     assert row["id"] == 3799912185593856228
-    assert row["_resolution_source"] == "FACID"
+    assert row["_resolution_source"] == "FACID_FORCED"
 
 
 def test_section_type_mapping_is_exact():
@@ -73,7 +73,7 @@ def test_section_type_mapping_is_exact():
     assert module._section_type_from_ls("1") == 1
     assert module._section_type_from_ls("") == 3
     assert module._section_type_from_ls(None) == 3
-    assert module._section_type_from_ls("4") is None
+    assert module._section_type_from_ls("4") == 0
 
 
 def test_writeback_attributes_are_exactly_five_fields():

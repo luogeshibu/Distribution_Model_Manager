@@ -32,7 +32,7 @@ def test_creation_plan_uses_voltagelevel_bv_not_substation_bv():
         "feeder_id": 700,
         "feeder_name": "AJWD 07",
         "feedline_rows": [{
-            "order_index": 1, "xml_id": "f1", "ls": "2",
+            "order_index": 1, "xml_id": "f1", "ls": "2", "topology_section_name": "B303_AJWD07-Y1",
             "reason": "SECTION_NOT_AVAILABLE", "model_linked": "NO",
         }],
     }

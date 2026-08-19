@@ -34,7 +34,7 @@ def test_rmu_type_prefers_y_q_text_and_cross_checks_devref(tmp_path):
     assert info["consistent"] is True
 
 
-def test_rmu_type_uses_any_recognized_yq_text_before_devref(tmp_path):
+def test_rmu_type_uses_devref_when_text_and_devref_disagree(tmp_path):
     g = tmp_path / "rmu.g"
     g.write_text(
         '''<G><Layer>
@@ -52,7 +52,8 @@ def test_rmu_type_uses_any_recognized_yq_text_before_devref(tmp_path):
     parsed = parser.parse(g)
     frame = parser.find_rmu_frames(parsed)[0]
     info = parser.classify_rmu_type(parsed, frame)
-    assert info["rmu_type"] == "1L"
-    assert info["source"] == "TEXT_YQ"
+    assert info["rmu_type"] == "2L1T"
+    assert info["source"] == "DEVREF"
+    assert info["text_type"] == "1L"
     assert info["devref_type"] == "2L1T"
     assert info["consistent"] is False

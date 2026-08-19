@@ -56,7 +56,8 @@ DEFAULT_SETTINGS = {
     "feeder_table_id": 13500,
     "section_table_id": 13503,
     "section_domain": 1,
-    "feeder_resolution_mode": "AUTO",
+    "feeder_resolution_mode": "FACID",
     "manual_feeder_name": "",
+    "feeder_drawing_mode": "AUTO",
     "auto_create_missing_sections": True,
 }

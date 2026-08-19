@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from dmm.domain.gfile.parser import GParser, GObject, ParsedG, Box
+from dmm.domain.feeder.topology import FeederDrawingTopologyClassifier
 from dmm.config.constants import (
     RMU_LABEL_SEARCH_MAX_DISTANCE,
     RMU_LABEL_EDGE_TOLERANCE,
@@ -57,6 +58,28 @@ def natural_section_key(row: Dict[str, Any]):
         return (1, int(nums[-1]), upper, int_or_none(row.get("id")) or 0)
 
     return (2, 10**18, upper, int_or_none(row.get("id")) or 0)
+
+
+def section_allocation_key(row: Dict[str, Any]):
+    """Deterministic order for assigning currently-unused DB sections.
+
+    Business rule (v4.1.14):
+      * if NAME carries an explicit SEC/SECTION number, use that number;
+      * otherwise use the database device ID from small to large.
+
+    This order is used only to allocate *unresolved* FeedLines. It never
+    reorders or invalidates an already-correct existing association.
+    """
+    name = norm(row.get("name"))
+    upper = name.upper()
+    device_id = int_or_none(row.get("id"))
+    safe_id = device_id if device_id is not None else 10**30
+
+    m = re.search(r"(?:SEC|SECTION)[_-]?(\d+)", upper)
+    if m:
+        return (0, int(m.group(1)), safe_id, upper)
+
+    return (1, safe_id, upper)
 
 
 class FeederValidator:
@@ -383,6 +406,8 @@ class FeederValidator:
             "model_link_correct": "",
             "association_ready": "NO",
             "writeback_needed": "NO",
+            "relink_same_section": "NO",
+            "relink_missing_section": "NO",
             "status": "FAIL",
             "severity": "ERROR",
             "reason": "",
@@ -620,10 +645,13 @@ class FeederValidator:
             ),
         }
 
-        if not feedlines:
-            report["reason"] = "FEEDLINE_NOT_FOUND_IN_G_FILE"
-            report["summary"] = self._summary(report)
-            return report
+        # Do not reject the whole feeder merely because this drawing has no
+        # FeedLine objects.  A feeder master record (13500) can still be
+        # uniquely confirmed from facID / filename / manual input and the G
+        # root facID can still be associated to that feeder.  FeedLine absence
+        # only means there are no 13503 section objects to validate in this
+        # drawing.  The no-FeedLine decision is therefore made *after* feeder
+        # resolution below.
 
         hint_norm = feeder_hint.get("normalized_hint", "")
         if not hint_norm and not forced_feeder_record:
@@ -737,22 +765,89 @@ class FeederValidator:
             report["summary"] = self._summary(report)
             return report
 
+        # v4.1.8: feeder-master/root association is a separate concern from
+        # FeedLine section validation.  Once a SINGLE_FEEDER drawing has been
+        # assigned to one unique feeder through MANUAL/FILENAME and root facID
+        # is empty, expose root facID writeback regardless of Breaker/Busbar or
+        # FeedLine presence/link state. Composite drawings never enter this
+        # single-region path.
+        root_facid = str(parsed.root.attrib.get("facID", "") or "").strip()
+        source_upper = str(
+            report.get("feeder_resolution_source")
+            or forced_source
+            or source
+            or ""
+        ).upper()
+        root_writeback = (
+            report.get("drawing_type", "SINGLE_FEEDER") == "SINGLE_FEEDER"
+            and not root_facid
+            and source_upper in {"FILENAME", "MANUAL"}
+        )
+        report["feeder_root_writeback_needed"] = (
+            "YES" if root_writeback else "NO"
+        )
+        report["feeder_root_current_facid"] = root_facid
+        report["feeder_root_expected_facid"] = str(feeder_id)
+
+        # v4.1.7: feeder-only drawings are valid.  When a feeder has already
+        # been uniquely resolved but this G file contains zero FeedLine
+        # objects, keep the feeder fact in the report instead of returning the
+        # historical FEEDLINE_NOT_FOUND_IN_G_FILE failure.  For name-based
+        # resolution an empty root facID becomes an explicit feeder-root
+        # association candidate; no dms_section_device row is created.
+        if not feedlines:
+            report["association_eligible"] = True
+            if root_writeback:
+                report["status"] = "WARN"
+                report["severity"] = "UNLINKED"
+                report["reason"] = (
+                    "FEEDER_ROOT_FACID_WRITEBACK_READY: "
+                    f"FEEDER_ID={feeder_id}; 数据库馈线={feeder_name}; "
+                    "G文件无FeedLine，仅需将根节点facID关联到已唯一确认的馈线；"
+                    "不会创建13503馈线段。"
+                )
+            else:
+                report["status"] = "PASS"
+                report["severity"] = "PASS"
+                report["reason"] = (
+                    "FEEDER_CONFIRMED_NO_FEEDLINE: "
+                    f"FEEDER_ID={feeder_id}; 数据库馈线={feeder_name}; "
+                    "G文件无FeedLine，无馈线段需要校验或创建。"
+                )
+            report["summary"] = self._summary(report)
+            return report
+
         _, section_rows = self.db.get_sections_by_feeder_id(
             feeder_id,
             table_id=self.section_table_id,
         )
-        section_rows = sorted(section_rows, key=natural_section_key)
+        section_rows = sorted(section_rows, key=section_allocation_key)
         sections_by_id = {
             int(row["id"]): row
             for row in section_rows
             if int_or_none(row.get("id")) is not None
         }
 
-        used_db_ids = set()
-        # Any existing KeyID that already resolves to a database section in
-        # the current feeder reserves that section, even when the link has a
-        # domain error.  We never allocate the same DB section to another
-        # unlinked FeedLine while an existing G object still references it.
+        # v4.1.14 validation contract:
+        #   1) existing FeedLine links are checked only for feeder ownership
+        #      and KeyID domain; no SEC/name/geometry/order validation is used;
+        #   2) unresolved FeedLines are allowed to consume the current feeder's
+        #      unused 13503 rows in a deterministic database sequence;
+        #   3) if NAME contains SECnnn, that engineering number defines the
+        #      sequence; otherwise database device ID is used from small to large;
+        #   4) only the genuinely missing remainder is marked for creation.
+        # Existing correct links are always preserved and never re-ordered.
+        all_feedlines_unlinked = all(not obj.keyid for obj in feedlines)
+        report["section_assignment_mode"] = (
+            "NEW_DRAWING_ORDER" if all_feedlines_unlinked
+            else "PRESERVE_EXISTING_DB_SEQUENCE"
+        )
+
+        # Any existing KeyID that resolves to a section in the current feeder
+        # reserves that section, even when the Domain is wrong.  Multiple G
+        # FeedLines pointing to the same same-feeder section are intentionally
+        # not rejected here: per the current business rule, existing-link
+        # validation is limited to feeder ownership + Domain only.
         reserved_db_ids = set()
         rows = []
 
@@ -812,10 +907,12 @@ class FeederValidator:
                     if current_owner == feeder_id:
                         reserved_db_ids.add(current_device_id)
 
+            # Device/table must still be valid. A wrong TABLE is not safe to
+            # auto-repair because the same numeric device_id can belong to a
+            # different model table. Domain-only errors are handled below.
             if (
                 current_device_id is None
                 or current_table_id != self.section_table_id
-                or current_domain != self.section_domain
             ):
                 row["reason"] = (
                     "MODEL_LINK_WRONG: "
@@ -833,7 +930,26 @@ class FeederValidator:
                     current_device_id,
                 )
             if not current_record:
-                row["reason"] = "CURRENT_SECTION_NOT_FOUND_IN_DATABASE"
+                # v4.1.11: a KeyID that still decodes to the configured
+                # 13503 table but whose device_id no longer exists is a stale
+                # section link, not an unrecoverable table/feeder error. The
+                # feeder itself has already been uniquely confirmed for this
+                # SINGLE_FEEDER region, so this FeedLine may be reassigned
+                # only within the same feeder's currently available section
+                # pool. If that pool is exhausted, the normal missing-section
+                # creation planner will create only the remaining shortage.
+                row.update({
+                    "model_link_correct": "NO",
+                    "relink_missing_section": "YES",
+                    "status": "WARN",
+                    "severity": "RELINK",
+                    "association_ready": "NO",
+                    "writeback_needed": "NO",
+                    "reason": (
+                        "STALE_SECTION_LINK: 当前KeyID对应的13503设备已不存在；"
+                        "将在当前已确认馈线内优先使用剩余馈线段，数量不足时仅创建缺少数量。"
+                    ),
+                })
                 rows.append(row)
                 continue
 
@@ -852,12 +968,13 @@ class FeederValidator:
                 row["current_feeder_name"] = norm(
                     (owner or {}).get("name")
                 )
+
             row["assigned_device_id"] = current_device_id
             row["assigned_section_name"] = norm(current_record.get("name"))
             row["assigned_bv_id"] = current_record.get("bv_id", "")
-            row["expected_keyid"] = current_keyid
-            row["expected_keyid_verified"] = "YES"
 
+            # Cross-feeder links remain a hard error. Never turn a domain
+            # correction into an automatic feeder reassignment.
             if current_feeder_id != feeder_id:
                 row["reason"] = (
                     "CURRENT_MODEL_FEEDER_MISMATCH: "
@@ -867,16 +984,58 @@ class FeederValidator:
                 rows.append(row)
                 continue
 
-            if current_device_id in used_db_ids:
-                row["reason"] = (
-                    "DUPLICATE_SECTION_LINK: "
-                    f"数据库馈线段ID={current_device_id} 被多个FeedLine重复使用"
+            # Same feeder + valid 13503 record is sufficient for ownership.
+            # Do not compare SEC number, DB NAME, geometry order, or duplicate
+            # use here.  Domain is the only remaining existing-link check.
+            reserved_db_ids.add(current_device_id)
+
+            # v4.1.10: same 13503 record + same feeder + wrong domain is a
+            # repairable KeyID encoding error. Preserve the exact section
+            # device_id and rewrite only the KeyID using the configured domain.
+            if current_domain != self.section_domain:
+                expected_keyid, verified_ok, _ = self._verify_expected_keyid(
+                    current_device_id
                 )
+                row["expected_keyid"] = expected_keyid
+                row["expected_keyid_verified"] = "YES" if verified_ok else "NO"
+                row["relink_same_section"] = "YES"
+                if not norm(row.get("assigned_bv_id")):
+                    row.update({
+                        "status": "FAIL",
+                        "severity": "ERROR",
+                        "association_ready": "NO",
+                        "writeback_needed": "NO",
+                        "model_link_correct": "NO",
+                        "reason": "BV_ID_EMPTY: 当前馈线段BV_ID为空，禁止重写模型",
+                    })
+                elif not verified_ok:
+                    row.update({
+                        "status": "FAIL",
+                        "severity": "ERROR",
+                        "association_ready": "NO",
+                        "writeback_needed": "NO",
+                        "model_link_correct": "NO",
+                        "reason": "EXPECTED_KEYID_VERIFY_FAILED",
+                    })
+                else:
+                    row.update({
+                        "status": "WARN",
+                        "severity": "RELINK",
+                        "association_ready": "YES",
+                        "writeback_needed": "YES",
+                        "model_link_correct": "NO",
+                        "reason": (
+                            "DOMAIN_RELINK_READY: 当前馈线段和feeder_id均正确，"
+                            f"仅域号错误 current_domain={current_domain}, "
+                            f"expected_domain={self.section_domain}；"
+                            "保持device_id不变并重写KeyID。"
+                        ),
+                    })
                 rows.append(row)
                 continue
 
-            used_db_ids.add(current_device_id)
-            reserved_db_ids.add(current_device_id)
+            row["expected_keyid"] = current_keyid
+            row["expected_keyid_verified"] = "YES"
             row["model_link_correct"] = "YES"
             row["association_ready"] = "YES"
             row["writeback_needed"] = "NO"
@@ -885,61 +1044,50 @@ class FeederValidator:
             row["reason"] = "MODEL_ALREADY_LINKED_CORRECT"
             rows.append(row)
 
-        # If one existing DB section is used by multiple G FeedLines, mark ALL
-        # rows using it as errors, not only the later duplicate.
-        linked_by_device = defaultdict(list)
-        for row in rows:
-            if (
-                row.get("model_linked") == "YES"
-                and int_or_none(row.get("assigned_device_id")) is not None
-            ):
-                linked_by_device[int(row["assigned_device_id"])].append(row)
-
-        for device_id, mapped in linked_by_device.items():
-            if len(mapped) <= 1:
-                continue
-            for row in mapped:
-                row["model_link_correct"] = "NO"
-                row["association_ready"] = "NO"
-                row["writeback_needed"] = "NO"
-                row["status"] = "FAIL"
-                row["severity"] = "ERROR"
-                row["reason"] = (
-                    "DUPLICATE_SECTION_LINK: "
-                    f"数据库馈线段ID={device_id} 被多个FeedLine重复使用"
-                )
-            # Keep the duplicated section reserved. Existing G objects
-            # still reference it and are not auto-overwritten.
-            used_db_ids.discard(device_id)
-            reserved_db_ids.add(device_id)
-
         # ---------------------------------------------------------------
-        # Second pass: assign only UNLINKED FeedLines from unused DB rows.
-        # Existing wrong links are not silently overwritten.
+        # Second pass: unresolved FeedLines.
+        #
+        # v4.1.14: once valid existing links are locked, unresolved/stale
+        # FeedLines may continue to use the current feeder's unoccupied DB
+        # sections in deterministic sequence.  This is allocation, not
+        # validation: it never changes the already-correct links above.
+        #
+        # Allocation sequence:
+        #   explicit SECnnn in NAME -> SEC number ascending;
+        #   otherwise               -> database device ID ascending.
+        # If DB rows are insufficient, only the remaining shortage is marked
+        # SECTION_NOT_AVAILABLE so the creation planner creates exactly that
+        # many new sections.
         # ---------------------------------------------------------------
         available = [
             row for row in section_rows
             if int_or_none(row.get("id")) not in reserved_db_ids
         ]
-        available.sort(key=natural_section_key)
+        available.sort(key=section_allocation_key)
 
-        unlinked = [
+        pending = [
             row for row in rows
-            if row.get("model_linked") == "NO"
+            if (
+                row.get("model_linked") == "NO"
+                or row.get("relink_missing_section") == "YES"
+            )
         ]
 
-        for row, section in zip(unlinked, available):
+        def assign_existing_section(row, section, *, reason_mode):
             device_id = int_or_none(section.get("id"))
             if device_id is None:
-                row["status"] = "FAIL"
-                row["severity"] = "ERROR"
-                row["reason"] = "SECTION_DEVICE_ID_INVALID"
-                continue
+                row.update({
+                    "status": "FAIL",
+                    "severity": "ERROR",
+                    "association_ready": "NO",
+                    "writeback_needed": "NO",
+                    "reason": "SECTION_DEVICE_ID_INVALID",
+                })
+                return False
 
             expected_keyid, verified_ok, _ = self._verify_expected_keyid(
                 device_id
             )
-
             row["assigned_device_id"] = device_id
             row["assigned_section_name"] = norm(section.get("name"))
             row["assigned_bv_id"] = section.get("bv_id", "")
@@ -947,39 +1095,80 @@ class FeederValidator:
             row["expected_keyid_verified"] = "YES" if verified_ok else "NO"
 
             if not norm(row.get("assigned_bv_id")):
-                row["status"] = "FAIL"
-                row["severity"] = "ERROR"
-                row["association_ready"] = "NO"
-                row["writeback_needed"] = "NO"
-                row["reason"] = (
-                    "BV_ID_EMPTY: 数据库馈线段 BV_ID 为空，"
-                    "无法写入 FeedLine voltype"
-                )
-                continue
+                row.update({
+                    "status": "FAIL",
+                    "severity": "ERROR",
+                    "association_ready": "NO",
+                    "writeback_needed": "NO",
+                    "reason": (
+                        "BV_ID_EMPTY: 数据库馈线段 BV_ID 为空，"
+                        "无法写入 FeedLine voltype"
+                    ),
+                })
+                return False
 
             if not verified_ok:
-                row["status"] = "FAIL"
-                row["severity"] = "ERROR"
-                row["reason"] = "EXPECTED_KEYID_VERIFY_FAILED"
-                continue
+                row.update({
+                    "status": "FAIL",
+                    "severity": "ERROR",
+                    "association_ready": "NO",
+                    "writeback_needed": "NO",
+                    "reason": "EXPECTED_KEYID_VERIFY_FAILED",
+                })
+                return False
 
             row["model_link_correct"] = ""
             row["association_ready"] = "YES"
             row["writeback_needed"] = "YES"
             row["status"] = "WARN"
-            row["severity"] = "UNLINKED"
-            row["reason"] = "MODEL_NOT_LINKED_READY_FOR_ASSOCIATION"
-
-        if len(unlinked) > len(available):
-            for row in unlinked[len(available):]:
-                row["status"] = "FAIL"
-                row["severity"] = "ERROR"
-                row["association_ready"] = "NO"
-                row["writeback_needed"] = "NO"
+            if row.get("relink_missing_section") == "YES":
+                row["severity"] = "RELINK"
                 row["reason"] = (
-                    "SECTION_NOT_AVAILABLE: "
-                    "数据库中可用馈线段数量不足，当前FeedLine禁止自动关联"
+                    "STALE_SECTION_RELINK_READY: 旧13503设备已不存在；"
+                    + (
+                        "全新图按FeedLine顺序使用数据库现有馈线段。"
+                        if reason_mode == "NEW_DRAWING_ORDER"
+                        else "保留已有正确关联，并按数据库剩余记录顺序从小到大重新关联。"
+                    )
                 )
+            else:
+                row["severity"] = "UNLINKED"
+                row["reason"] = (
+                    "MODEL_NOT_LINKED_READY_FOR_ASSOCIATION: 全新图按顺序关联"
+                    if reason_mode == "NEW_DRAWING_ORDER"
+                    else "MODEL_NOT_LINKED_DB_SEQUENCE_READY: 保留已有正确关联；按当前馈线未占用数据库记录顺序从小到大关联"
+                )
+            reserved_db_ids.add(device_id)
+            return True
+
+        reason_mode = (
+            "NEW_DRAWING_ORDER" if all_feedlines_unlinked
+            else "PRESERVE_EXISTING_DB_SEQUENCE"
+        )
+
+        # Pair the unresolved G rows (already in G top-to-bottom / left-to-right
+        # order) with the free DB rows in deterministic database sequence.
+        for row, section in zip(pending, available):
+            assign_existing_section(row, section, reason_mode=reason_mode)
+
+        # Whatever remains after exhausting existing same-feeder DB rows is a
+        # genuine shortage.  Mark every remaining row so the creation planner
+        # creates exactly the missing count, then association execution can
+        # write those newly created KeyIDs back to the corresponding FeedLines.
+        if len(pending) > len(available):
+            shortage = len(pending) - len(available)
+            for row in pending[len(available):]:
+                row.update({
+                    "status": "FAIL",
+                    "severity": "ERROR",
+                    "association_ready": "NO",
+                    "writeback_needed": "NO",
+                    "reason": (
+                        "SECTION_NOT_AVAILABLE: "
+                        f"当前馈线未占用数据库馈线段不足，实际短缺={shortage}；"
+                        "仅创建缺少数量后继续按当前未关联FeedLine顺序关联"
+                    ),
+                })
 
         for row in rows:
             row["drawing_type"] = report.get("drawing_type", "SINGLE_FEEDER")
@@ -1172,22 +1361,22 @@ class FeederValidator:
             if obj.tag == FEEDLINE_TAG
         )
 
+        topology_profile = FeederDrawingTopologyClassifier(self.parser).classify(parsed)
+
         if mode == "SINGLE":
             drawing_type = "SINGLE_FEEDER"
         elif mode == "MULTI":
             drawing_type = (
                 "MULTI_FEEDER_COMPOSITE"
                 if len(g_anchors) >= 2
+                or int(topology_profile.get("feeder_source_branch_count", 0)) >= 2
                 else "AMBIGUOUS"
             )
         else:
-            # AUTO: two or more clean G feeder-title anchors is already enough
-            # to identify a composite drawing.
-            drawing_type = (
-                "MULTI_FEEDER_COMPOSITE"
-                if len(g_anchors) >= 2
-                else "SINGLE_FEEDER"
-            )
+            # AUTO uses electrical topology first. Multiple raw <Bus> objects
+            # are never sufficient by themselves because some are 6x6 junction
+            # points rather than physical busbars.
+            drawing_type = topology_profile["drawing_type"]
 
         if self.log:
             self.log(
@@ -1218,6 +1407,12 @@ class FeederValidator:
                 for x in g_anchors
                 if x.get("db_match_count") == 1
             ),
+            "classification_reason": topology_profile.get("classification_reason", ""),
+            "effective_busbar_count": topology_profile.get("effective_busbar_count", 0),
+            "feeder_source_branch_count": topology_profile.get("feeder_source_branch_count", 0),
+            "bus_source_branch_count": topology_profile.get("bus_source_branch_count", 0),
+            "bus_tie_branch_count": topology_profile.get("bus_tie_branch_count", 0),
+            "topology_feeder_title_count": topology_profile.get("feeder_title_count", 0),
         }
 
 
@@ -1862,8 +2057,10 @@ class FeederValidator:
                     and did in section_by_id
                     and owner_id == feeder_id
                     and tab == self.section_table_id
-                    and dom == self.section_domain
                 ):
+                    # Count usage regardless of domain so two G objects that
+                    # reference the same section remain a duplicate even when
+                    # one/both KeyIDs carry a wrong domain.
                     linked_device_usage[did].append(obj.xml_id)
             except Exception as exc:
                 meta["verify_error"] = str(exc)
@@ -1915,6 +2112,15 @@ class FeederValidator:
             duplicate_current_link = (
                 did is not None and did in duplicate_device_ids
             )
+            domain_only_wrong = (
+                current is not None
+                and did in section_by_id
+                and owner_id == feeder_id
+                and tab == self.section_table_id
+                and dom != self.section_domain
+                and did not in used
+                and not duplicate_current_link
+            )
             correct = (
                 current is not None
                 and did in section_by_id
@@ -1937,6 +2143,48 @@ class FeederValidator:
                     ),
                 })
                 pending.append(row)
+            elif domain_only_wrong:
+                used.add(did)
+                expected, ok, _ = self._verify_expected_keyid(did)
+                bv_id = norm(current.get("bv_id"))
+                row.update({
+                    "assigned_device_id": did,
+                    "assigned_section_name": norm(current.get("name")),
+                    "assigned_bv_id": current.get("bv_id", ""),
+                    "expected_keyid": expected,
+                    "expected_keyid_verified": "YES" if ok else "NO",
+                    "relink_same_section": "YES",
+                    "model_link_correct": "NO",
+                })
+                if not bv_id:
+                    row.update({
+                        "status": "FAIL",
+                        "severity": "ERROR",
+                        "association_ready": "NO",
+                        "writeback_needed": "NO",
+                        "reason": "BV_ID_EMPTY: 当前馈线段BV_ID为空，禁止重写模型",
+                    })
+                elif not ok:
+                    row.update({
+                        "status": "FAIL",
+                        "severity": "ERROR",
+                        "association_ready": "NO",
+                        "writeback_needed": "NO",
+                        "reason": "EXPECTED_KEYID_VERIFY_FAILED",
+                    })
+                else:
+                    row.update({
+                        "status": "WARN",
+                        "severity": "RELINK",
+                        "association_ready": "YES",
+                        "writeback_needed": "YES",
+                        "reason": (
+                            "DOMAIN_RELINK_READY: 当前13503馈线段和feeder_id均正确，"
+                            f"仅域号错误 current_domain={dom}, "
+                            f"expected_domain={self.section_domain}；"
+                            "保持device_id不变并重写KeyID。"
+                        ),
+                    })
             elif correct:
                 used.add(did)
                 row.update({

@@ -58,6 +58,56 @@ class GWriteBackService:
                 matches.append(match)
         return matches
 
+    def apply_root_g_attributes(
+        self,
+        g_path,
+        attributes,
+        create_backup=True,
+    ):
+        """Update only the root opening <G ...> tag."""
+        g_path = Path(g_path)
+        if not g_path.exists():
+            raise GWriteBackError(f"G 文件不存在：{g_path}")
+
+        original_bytes = g_path.read_bytes()
+        had_bom = original_bytes.startswith(b"\xef\xbb\xbf")
+        raw = original_bytes.decode("utf-8-sig")
+        match = re.search(r"<G\b[^>]*>", raw, flags=re.DOTALL)
+        if match is None:
+            raise GWriteBackError("未找到 G 文件根节点 <G ...>。")
+
+        before_tag = match.group(0)
+        after_tag = before_tag
+        before_attrs = {}
+        for key, value in dict(attributes or {}).items():
+            attr_re = re.compile(
+                rf'\b{re.escape(key)}\s*=\s*(["\'])(.*?)\1',
+                re.DOTALL,
+            )
+            old = attr_re.search(before_tag)
+            before_attrs[key] = old.group(2) if old else None
+            after_tag = self._set_attribute(after_tag, key, str(value))
+
+        backup = self.create_backup(g_path) if create_backup else None
+        updated = raw[:match.start()] + after_tag + raw[match.end():]
+        temp_path = g_path.with_name(g_path.name + ".tmp_model_manager")
+        try:
+            output_bytes = updated.encode("utf-8")
+            if had_bom:
+                output_bytes = b"\xef\xbb\xbf" + output_bytes
+            temp_path.write_bytes(output_bytes)
+            temp_path.replace(g_path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+        return {
+            "g_file": str(g_path),
+            "backup": str(backup) if backup else "",
+            "before": before_attrs,
+            "after": {k: str(v) for k, v in dict(attributes or {}).items()},
+        }
+
     def apply_attribute_changes(self, g_path, changes, create_backup=True):
         g_path = Path(g_path)
         if not g_path.exists():

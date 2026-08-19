@@ -1,4 +1,4 @@
-﻿param(
+param(
     [switch]$BuildExe
 )
 
@@ -32,7 +32,14 @@ $BuildScript = Get-Content ".\build_exe.ps1" -Raw
 if ($BuildScript -match "(?i)smoke") {
     throw "build_exe.ps1 中仍发现 smoke test 相关文本。"
 }
+if ($BuildScript -notmatch '\$AppName\s*=\s*"Distribution_Model_Manager_v\$AppVersion"') {
+    throw "build_exe.ps1 未从 APP_VERSION 派生 AppName，存在版本号打包不一致风险。"
+}
+if ($BuildScript -match '\$AppName\s*=\s*"Distribution_Model_Manager_v\d+\.\d+\.\d+"') {
+    throw "build_exe.ps1 中发现硬编码版本 AppName，请改为从 APP_VERSION 自动派生。"
+}
 Write-Host "  - smoke test: not found"
+Write-Host "  - packaging version: derived from APP_VERSION"
 Write-Host "  - source G safety: Workspace copy/write-back architecture enabled"
 
 Write-Host "[5/7] Report/audit feature checks..."

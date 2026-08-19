@@ -7,6 +7,7 @@ import ctypes
 import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -798,10 +799,13 @@ class MainWindow(QMainWindow):
         ssh_buttons = QHBoxLayout()
         test_ssh_btn = QPushButton("测试 SSH 连接")
         refresh_ssh_btn = QPushButton("刷新 G 文件列表")
+        download_ssh_btn = QPushButton("下载所选 G 文件")
         test_ssh_btn.clicked.connect(self.test_ssh_connection)
         refresh_ssh_btn.clicked.connect(self.refresh_remote_g_files)
+        download_ssh_btn.clicked.connect(self.download_selected_remote_g_files)
         ssh_buttons.addWidget(test_ssh_btn)
         ssh_buttons.addWidget(refresh_ssh_btn)
+        ssh_buttons.addWidget(download_ssh_btn)
         ssh_buttons.addStretch()
         ssh_grid.addLayout(ssh_buttons, len(ssh_fields), 1, 1, 3)
 
@@ -1271,7 +1275,7 @@ class MainWindow(QMainWindow):
               <li><b>G 根节点 facID</b>：优先使用 facID 精确查询表号 13500 / dms_feeder_device。</li>
               <li><b>文件名</b>：例如 JED-CTL-ADF-16.sln.pic.g，标准化后与数据库馈线名称进行唯一匹配。</li>
               <li><b>人工输入</b>：用户输入馈线名称后，必须唯一匹配到 13500 / dms_feeder_device。</li>
-              <li>自动模式顺序为：<b>facID → 文件名 → 人工输入</b>。</li>
+              <li><b>facID 为最高优先级：</b>只要 G 根节点 facID 非空，就强制使用 facID；文件名和人工输入不参与判断。只有 facID 为空时才允许选择文件名或人工输入。</li>
               <li><b>不再使用 RMU、环网柜、连接拓扑或 FEEDER_ID 反向推断馈线。</b></li>
               <li>三种方式最终都无法唯一确认时，整张 G 图直接报错并阻断，不创建馈线段，也不执行 FeedLine 关联。</li>
             </ol>
@@ -1288,7 +1292,7 @@ class MainWindow(QMainWindow):
 
             <h3>3. FeedLine 创建与关联</h3>
             <ul>
-              <li>FeedLine 按从上到下、同高度从左到右排序，对应 SEC001、SEC002……</li>
+              <li>已有正确 FeedLine 关联保持不变；仅未关联/失效关联按从上到下、同高度从左到右分配当前馈线未占用的数据库馈线段，真实不足时才按 SECnnn 规则新建。</li>
               <li>ls=2 → SECTION_TYPE=0；ls=1 → SECTION_TYPE=1；ls为空/不存在 → SECTION_TYPE=3。</li>
               <li>创建成功后重新查询 13503，再使用数据库最终 ID / BV_ID 计算 Expected KeyID。</li>
               <li>然后继续沿用原有 FeedLine 自动关联 / RELINK / 重复关联处理逻辑。</li>
@@ -1311,11 +1315,11 @@ class MainWindow(QMainWindow):
         <ul>
           <li><b>结构硬条件：</b>矩形框内必须同时包含 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元（每类至少 1 个），缺少任意一类不识别为 RMU。</li>
           <li><b>RMU 类型识别：</b>首先读取矩形框内部 Text / DText。Y1/Y2/Y3/Y4… 每个计为 1 个 L，Q1/Q2/Q3/Q4… 每个计为 1 个 T，例如 Y1、Y2、Q1 → <b>2L1T</b>。编号按自然递增顺序展示。</li>
-          <li><b>文字是绝对第一优先级：</b>只要柜内识别到至少一个 Y* 或 Q*，最终柜型就使用柜内文字统计结果；不会因为文字数量与 CBreakerDis 数量不一致而改用 devref。</li>
-          <li>只有柜内<b>完全识别不到任何 Y/Q 文字</b>时，才使用 CBreakerDis.devref 兜底：包含 <b>Load_Breaker</b> 计 L，包含 <b>Circuit_Breaker</b> 计 T。若两套信息都存在，devref 仅用于交叉检查，不覆盖文字结果。</li>
-          <li>如果文字类型与 devref 类型不一致，报告中显示“类型交叉校验=NO”，但不改变 RMU 数据库关联资格，供人工检查图元模板。</li>
+          <li><b>柜型双源识别：</b>柜内 Y*/Q* 文字与 CBreakerDis.devref 分别独立计算柜型；两者一致时正常通过交叉校验。</li>
+          <li>CBreakerDis.devref 中包含 <b>Load_Breaker</b> 计 L，包含 <b>Circuit_Breaker</b> 计 T；当图内文字类型与 devref 类型不一致时，<b>最终柜型以 devref 为准</b>，并保留 WARN 供人工检查。</li>
+          <li>如果文字类型与 devref 类型不一致，报告中显示“类型交叉校验=NO”，最终“环网柜类型”采用 devref 类型；该差异本身不改变 RMU 数据库关联资格。</li>
           <li><b>智能环网柜识别：</b>在整张 G 图全局寻找 Text / DText 中精确的 SMART 和 SMR，并把每个标识唯一归属给距离最近的 RMU。SMART 通常在柜内、SMR 可以在柜外，因此不设置最大距离限制。</li>
-          <li>一个 RMU 只要命中 SMART 或 SMR 任意一种就标记“是否智能=YES”；若 SMART 和 SMR 都归属于同一个柜，仍然只表示该柜为智能环网柜，并在“智能标识”中记录 <b>SMART, SMR</b>。</li>
+          <li>一个 RMU 只要命中 SMART 或 SMR 任意一种，报告“是否智能”列显示 <b>SMART</b>；未命中则显示 <b>NORMAL</b>。若两种标识都归属于同一个柜，“智能标识”仍记录 <b>SMART, SMR</b>。</li>
           <li>环网柜名称严格只按照当前页面勾选的方向读取：上方 / 下方 / 左侧 / 右侧；未勾选方向绝不参与。</li>
           <li>在所选方向对整张 G 图执行全局搜索，不再使用旧的 120 坐标单位柜名距离上限；较远的普通文字和绿色文字都可参与。</li>
           <li>每个 Text / DText 全局只归属距离最近的一个环网柜，避免同一名称被相邻环网柜重复使用。</li>
@@ -1334,10 +1338,10 @@ class MainWindow(QMainWindow):
 
         <h3>2.1 RMU 柜型两套规则与交叉验证</h3>
         <ul>
-          <li><b>规则一（主规则）：</b>柜内 Y1/Y2/Y3/Y4… 每个计 1 个 L，Q1/Q2/Q3/Q4… 每个计 1 个 T。只要识别到任何 Y/Q 文字，最终柜型就采用文字结果。</li>
-          <li><b>规则二（兜底规则）：</b>只有完全识别不到 Y/Q 文字时，才用 CBreakerDis.devref 判断：Load_Breaker=L，Circuit_Breaker=T。</li>
+          <li><b>规则一：</b>柜内 Y1/Y2/Y3/Y4… 每个计 1 个 L，Q1/Q2/Q3/Q4… 每个计 1 个 T，形成图内文字柜型。</li>
+          <li><b>规则二：</b>独立使用 CBreakerDis.devref 判断：Load_Breaker=L，Circuit_Breaker=T，形成 devref 柜型。</li>
           <li><b>全面验证：</b>当文字结果和 devref 结果同时存在时，两套结果必须进行交叉验证。</li>
-          <li>若两套结果冲突，最终仍采用规则一的文字柜型，但该 RMU 会产生 WARN，并在 HTML / CSV / Console 中输出：环网柜名称、文字柜型、devref 柜型和“请检查该环网柜 Y/Q 命名方式及开关 devref 模板”。</li>
+          <li>若两套结果冲突，最终采用 <b>devref 柜型</b>，同时该 RMU 产生 WARN，并在 HTML / CSV / Console 中输出环网柜名称、文字柜型和 devref 柜型供检查。</li>
           <li>柜型交叉验证告警本身不阻断已经由数据库唯一事实确定的设备关联。</li>
         </ul>
 
@@ -1778,7 +1782,7 @@ class MainWindow(QMainWindow):
         rmu_naming_layout = QVBoxLayout(rmu_naming)
         rmu_naming_text = QLabel(
             "• 环网柜只有在矩形框内同时存在 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元时才识别为 RMU。\n"
-            "• RMU 柜型规则一：柜内 Y* 每个计 1L、Q* 每个计 1T，文字绝对优先；规则二：完全识别不到 Y/Q 时才用 devref（Load_Breaker=L、Circuit_Breaker=T）兜底。两套结果同时存在时必须交叉验证，冲突则 WARN 并指出具体环网柜。\n"
+            "• RMU 柜型：柜内 Y*/Q* 文字与 devref 独立计算并交叉验证；两者冲突时最终以 devref（Load_Breaker=L、Circuit_Breaker=T）为准，同时 WARN 并指出具体环网柜。\n"
             "• 环网柜名称严格只按照用户勾选的方向读取：上方 / 下方 / 左侧 / 右侧；未勾选方向绝不参与。\n"
             "• 对所选方向执行整张 G 图全局搜索，柜名不再受旧的 120 坐标单位距离上限限制。\n"
             "• 每个 Text / DText 全局只分配给距离最近的一个环网柜，避免同一个名字被两个柜重复使用。\n"
@@ -1799,9 +1803,9 @@ class MainWindow(QMainWindow):
             "• BusDis：逻辑名称固定为 BUS。\n"
             "• 图上开关名称必须与当前 RMU 下数据库 CODE 唯一对应；失败时明确告警对应环网柜并提示检查命名方式。\n\n"
             "【RMU 柜型识别】\n"
-            "• 第一套：柜内 Y1/Y2/Y3... 每个计 L；Q1/Q2/Q3... 每个计 T，文字优先。\n"
-            "• 第二套：完全识别不到 Y/Q 时才用 devref 兜底：Load_Breaker=L，Circuit_Breaker=T。\n"
-            "• 两套结果都存在时必须交叉验证；冲突时最终仍采用文字柜型，同时产生 WARN 并指出具体环网柜。\n\n"
+            "• 第一套：柜内 Y1/Y2/Y3... 每个计 L；Q1/Q2/Q3... 每个计 T，形成文字柜型。\n"
+            "• 第二套：独立使用 devref：Load_Breaker=L，Circuit_Breaker=T，形成 devref 柜型。\n"
+            "• 两套结果都存在时必须交叉验证；冲突时最终采用 devref 柜型，同时产生 WARN 并指出具体环网柜。\n\n"
 "• 环网柜数据库记录为 0 条或多条时，环网柜汇总直接 FAIL。若 G 设备未关联，禁止自动关联。\n"
             "• 环网柜数据库记录为 0 条或多条，但 G 设备已经有人为 KeyID 时，不丢弃该模型：继续反解当前设备并校验 CODE/图上逻辑名称 和实际所属环网柜。\n"
             "• 唯一 RMU 下，若旧 KeyID 实际属于其它环网柜，使用紫色 RMU_RELINK 标记，可以覆盖旧模型并重新关联到当前 RMU；只有 RMU 本身不唯一时才继续作为硬阻断。\n"
@@ -1879,7 +1883,7 @@ class MainWindow(QMainWindow):
             "• 数据库可读馈线名称由站名 + dms_feeder_device.NAME 组合；名称匹配忽略横线、下划线和空格：AJWD-07 → AJWD07；JED CTL AJWD + 07 → JEDCTLAJWD07。\n"
             "• 馈线主表：13500 / dms_feeder_device；馈线段表：13503 / dms_section_device；默认域号：1。\n"
             "• G 馈线段图元为 <FeedLine>。已有关联时，当前 KeyID 必须反解到 13503 / Domain 1 且数据库记录属于当前馈线。\n"
-            "• 未关联 FeedLine：已正确关联的数据库馈线段先视为占用；其余数据库馈线段按 SEC001、SEC002… 自然顺序排列，未关联 G FeedLine 按从上到下、从左到右依次分配。\n"
+            "• 已关联 FeedLine：13503、Domain、FEEDER_ID 均正确即保持原关联，不按几何顺序重排 SEC。\n• 未关联/失效关联 FeedLine：已正确关联的数据库馈线段先视为占用；其余数据库馈线段按自然顺序分配，真实数量不足时才新建缺少数量。\n"
             "• 已经关联错误的 FeedLine 不自动覆盖，只在报告中标红，避免静默改错已有模型。\n"
             "• FeedLine 回写安全副本：app=6500000, p_ReportType=1, state=20, voltype=dms_section_device.BV_ID, keyid=Expected KeyID。\n"
             "• 馈线模块拥有独立的【馈线汇总】和【馈线段明细】HTML / CSV 报告，不改变 RMU 模块已经取消馈线判断的规则。"
@@ -2485,6 +2489,26 @@ class MainWindow(QMainWindow):
                 str(exc),
             )
 
+    def download_selected_remote_g_files(self):
+        selected=self._selected_remote_files()
+        if not selected:
+            QMessageBox.information(self,"下载所选 G 文件","请先勾选至少一个远程 G 文件。"); return
+        destination=QFileDialog.getExistingDirectory(self,"选择 G 文件下载目录",self._existing_start_path(self.cfg.get("last_folder_path",""),str(Path.home())))
+        if not destination:return
+        cfg=self._current_ssh_config(); destination=Path(destination); success=0; failed=[]
+        try:
+            with ReadOnlySshClient(cfg["host"],cfg["port"],cfg["username"],cfg["password"]) as client:
+                for item in selected:
+                    try:
+                        latest=client.stat_file(item.remote_path)
+                        client.download_file(latest.remote_path,str(destination/latest.name))
+                        success+=1
+                    except Exception as exc: failed.append((item.name,str(exc)))
+            self.cfg["last_folder_path"]=str(destination); save_settings(self.cfg)
+            QMessageBox.information(self,"G 文件下载完成",f"成功 {success} 个，失败 {len(failed)} 个。\n保存目录：{destination}")
+        except Exception as exc:
+            QMessageBox.critical(self,"下载远程 G 文件失败",str(exc))
+
     def _apply_remote_file_filter(self, text=""):
         query = str(text or "").strip().lower()
         visible = [
@@ -2611,6 +2635,36 @@ class MainWindow(QMainWindow):
 
         return str(Path.home())
 
+    def _refresh_feeder_facid_ui_from_local_path(self, value):
+        widget = self.module_widgets.get("FEEDER")
+        if widget is None or not hasattr(widget, "set_facid_lock"):
+            return
+
+        path = Path(str(value or "").strip())
+        if not path.is_file() or path.suffix.lower() != ".g":
+            widget.set_facid_lock(None)
+            return
+
+        try:
+            with path.open(
+                "r",
+                encoding="utf-8",
+                errors="ignore",
+            ) as handle:
+                prefix = handle.read(16384)
+            match = re.search(
+                r'<G\b[^>]*\bfacID="([^"]*)"',
+                prefix,
+                flags=re.IGNORECASE,
+            )
+            widget.set_facid_lock(
+                match.group(1).strip()
+                if match and match.group(1).strip()
+                else None
+            )
+        except Exception:
+            widget.set_facid_lock(None)
+
     def browse_file(self):
         start_dir = self._existing_start_path(
             self.cfg.get("last_file_path", ""),
@@ -2632,6 +2686,7 @@ class MainWindow(QMainWindow):
         self.cfg["last_file_path"] = path
         self.cfg["last_folder_path"] = str(Path(path).parent)
         save_settings(self.cfg)
+        self._refresh_feeder_facid_ui_from_local_path(path)
 
     def browse_folder(self):
         start_dir = self._existing_start_path(
@@ -2652,6 +2707,11 @@ class MainWindow(QMainWindow):
         self.cfg["input_path"] = path
         self.cfg["last_folder_path"] = path
         save_settings(self.cfg)
+        feeder_widget = self.module_widgets.get("FEEDER")
+        if feeder_widget is not None and hasattr(
+            feeder_widget, "set_facid_lock"
+        ):
+            feeder_widget.set_facid_lock(None)
 
     def _save_input_path_from_edit(self):
         value = self.input_edit.text().strip()
@@ -2748,6 +2808,7 @@ class MainWindow(QMainWindow):
                 module_id
             ].collect_settings()
             source_type = self._current_input_source()
+            settings["input_is_directory"] = False
 
             self.cfg["model_module"] = module_id
             self.cfg["operation"] = operation
@@ -2765,6 +2826,7 @@ class MainWindow(QMainWindow):
                         f"文件或目录不存在：\n{input_value}"
                     )
 
+                settings["input_is_directory"] = input_path.is_dir()
                 files = self.resolve_files(input_value)
                 if not files:
                     raise ValueError(
@@ -2827,6 +2889,7 @@ class MainWindow(QMainWindow):
                 "section_domain",
                 "feeder_resolution_mode",
                 "manual_feeder_name",
+                "feeder_drawing_mode",
                 "auto_create_missing_sections",
             ):
                 if key in settings:
@@ -2977,6 +3040,35 @@ class MainWindow(QMainWindow):
             self.workspace_status.setText("Oracle 数据库预检查通过")
             apply_status_style(self.workspace_status, True)
 
+    def _sync_feeder_facid_lock_from_preview(self, preview_data):
+        widget = self.module_widgets.get("FEEDER")
+        if widget is None or not hasattr(widget, "set_facid_lock"):
+            return
+        reports = list((preview_data or {}).get("reports", []) or [])
+        if not reports:
+            return
+        sources = {
+            str(
+                report.get("feeder_resolution_source")
+                or report.get("feeder_hint_source")
+                or ""
+            ).upper()
+            for report in reports
+        }
+        evidences = {
+            str(report.get("feeder_resolution_evidence") or "").strip()
+            for report in reports
+            if str(report.get("feeder_resolution_evidence") or "").strip()
+        }
+        if sources and sources == {"FACID_FORCED"}:
+            widget.set_facid_lock(
+                next(iter(evidences))
+                if len(evidences) == 1
+                else "多个 G 文件均已由 facID 强制确定"
+            )
+        else:
+            widget.set_facid_lock(None)
+
     def on_job_completed(
         self,
         report_dir,
@@ -2991,6 +3083,8 @@ class MainWindow(QMainWindow):
         )
         self.current_rules = dict(rules)
         self.current_preview = preview_data
+        if str(self.module_combo.currentData() or "").upper() == "FEEDER":
+            self._sync_feeder_facid_lock_from_preview(preview_data)
         self.current_artifacts = dict(artifacts or {})
         self.current_artifacts["source_info"] = dict(
             self.current_source_info or {}
@@ -3010,9 +3104,9 @@ class MainWindow(QMainWindow):
                 self._populate_association_table(self.current_preview)
                 if current_module == "FEEDER":
                     self.log(
-                        f"模型校验已生成可关联馈线段清单："
-                        f"可关联/重新关联 FeedLine {change_count} 个。"
-                        "请在工作区表格中勾选需要处理的馈线段。"
+                        f"模型校验已生成可关联馈线对象清单："
+                        f"可关联对象 {change_count} 个。"
+                        "请在工作区表格中勾选需要处理的馈线或馈线段。"
                     )
                 else:
                     self.log(
@@ -3245,12 +3339,13 @@ class MainWindow(QMainWindow):
                         display_rows.append(item)
         else:
             self.association_selection_box.setTitle(
-                "可关联馈线段选择（模型校验结果）"
+                "可关联馈线 / 馈线段选择（模型校验结果）"
             )
             self.association_selection_tip.setText(
-                "模型校验完成后，这里展示 FeedLine 明细。数据库 FEEDER_ID 与馈线段事实唯一正确时，"
-                "未关联、旧关联错误以及 DUPLICATE_LINK 重复关联行允许勾选。"
-                "只处理你勾选的 FeedLine；未勾选对象保持原样。"
+                "模型校验完成后，这里展示可执行的馈线根关联和 FeedLine 明细。"
+                "当 G 文件没有 FeedLine、但人工输入/文件名已唯一确定 13500 馈线时，"
+                "可单独勾选 G 根节点 facID 关联；不会创建 13503 馈线段。"
+                "其余 FeedLine 仍按原规则逐条选择。"
             )
             self.association_filter_label.setText("馈线段快速筛选")
             self.rmu_filter_edit.setPlaceholderText(
@@ -3264,6 +3359,14 @@ class MainWindow(QMainWindow):
             for report in reports:
                 source_file = str(report.get("g_file", "") or "")
                 file_name = str(report.get("file_name", "") or Path(source_file).name)
+                root_row = dict(report.get("feeder_root_candidate_row", {}) or {})
+                if root_row.get("xml_id"):
+                    root_row["_source_file"] = source_file
+                    root_row["_file_name"] = file_name
+                    root_row["_region_index"] = report.get("region_index", "")
+                    root_row["_feeder_id"] = report.get("feeder_id", "")
+                    root_row["_feeder_name"] = report.get("feeder_name", "")
+                    display_rows.append(root_row)
                 for row in report.get("feedline_rows", []) or []:
                     if not row.get("xml_id"):
                         continue
@@ -3319,9 +3422,17 @@ class MainWindow(QMainWindow):
                         row.get("reason", ""),
                     ]
                 else:
+                    is_root_row = (
+                        str(row.get("object_type", "")).upper() == "G"
+                        and str(row.get("xml_id", "")) == "root"
+                    )
                     current_text = (
-                        f"KeyID={row.get('current_keyid')} / {row.get('current_db_name') or '-'}"
-                        if row.get("model_linked") == "YES" else "未关联"
+                        "根facID未关联"
+                        if is_root_row
+                        else (
+                            f"KeyID={row.get('current_keyid')} / {row.get('current_db_name') or '-'}"
+                            if row.get("model_linked") == "YES" else "未关联"
+                        )
                     )
                     status_text = (
                         str(row.get("severity", ""))
@@ -3397,7 +3508,7 @@ class MainWindow(QMainWindow):
                 else ""
             )
             unit = (
-                "个馈线段"
+                "个馈线对象"
                 if str(self.module_combo.currentData() or "").upper() == "FEEDER"
                 else "个设备"
             )
@@ -3456,7 +3567,7 @@ class MainWindow(QMainWindow):
                 getattr(self, "_association_candidate_keys", set())
             )
             suffix = f"；当前显示 {visible_count} 行" if needle else ""
-            unit = "个馈线段" if module_id == "FEEDER" else "个设备"
+            unit = "个馈线对象" if module_id == "FEEDER" else "个设备"
             self.selection_count_label.setText(
                 f"已选择 {selected_count} {unit} / "
                 f"可关联 {total_candidates} {unit}{suffix}"
@@ -3661,7 +3772,7 @@ class MainWindow(QMainWindow):
                     self,
                     "模型关联",
                     (
-                        "请先在“可关联馈线段选择”表格中勾选至少一个需要关联或重新关联的FeedLine。"
+                        "请先在“可关联馈线 / 馈线段选择”表格中勾选至少一个需要处理的馈线对象。"
                         if module_id.upper() == "FEEDER"
                         else "请先在“可关联设备选择”表格中勾选至少一个需要关联或重新关联的设备。"
                     ),
@@ -3688,7 +3799,7 @@ class MainWindow(QMainWindow):
             for key, value in sorted(status_counts.items())
         ) or "无"
         skip_label = "馈线文件" if module_id == "FEEDER" else "RMU"
-        target_label = "FeedLine 图元" if module_id == "FEEDER" else "设备图元"
+        target_label = "馈线对象" if module_id == "FEEDER" else "设备图元"
 
         if module_id.upper() == "RMU":
             message = (
@@ -3743,7 +3854,7 @@ class MainWindow(QMainWindow):
                 f"{db_write_notice}\n"
                 "程序会重新确认当前数据库馈线段占用情况；如数据库数量不足且启用了补齐，"
                 "会先创建缺失馈线段并重新查询数据库，再计算 Expected KeyID。\n"
-                "G 文件最终只回写 app、p_ReportType、state、voltype、keyid 这 5 个属性。\n\n"
+                "FeedLine 只回写 app、p_ReportType、state、voltype、keyid 这 5 个属性；若原 G.facID 为空且通过文件名/人工输入唯一确定馈线，还会额外把根节点 facID 回写为最终 FEEDER_ID。原 facID 非空时绝不修改。\n\n"
                 "原始 G 文件和 SSH 服务器文件都不会被修改，"
                 "只修改 Workspace/g_output 安全副本。\n\n"
                 "是否确认执行？"

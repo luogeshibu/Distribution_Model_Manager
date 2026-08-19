@@ -16,8 +16,20 @@ from dmm.config.constants import APP_NAME, APP_VERSION
 
 FEEDER_FIELDS = [
     "file_name",
+    "drawing_type",
+    "drawing_mode",
+    "automatic_drawing_type",
+    "classification_reason",
+    "region_index",
+    "region_identity_confidence",
     "feeder_resolution_source",
     "feeder_resolution_evidence",
+    "fingerprint_match_ratio",
+    "current_feeder_ids",
+    "current_feeder_count",
+    "majority_feeder_id",
+    "majority_feeder_count",
+    "anomaly_count",
     "feeder_db_count",
     "feeder_id",
     "feeder_name",
@@ -42,6 +54,8 @@ FEEDLINE_FIELDS = [
     "file_name",
     "feeder_name",
     "feeder_resolution_source",
+    "topology_region",
+    "current_feeder_name",
     "order_index",
     "object_type",
     "xml_id",
@@ -72,8 +86,20 @@ FEEDLINE_FIELDS = [
 
 FEEDER_LABELS = {
     "file_name": "G文件",
+    "drawing_type": "最终图纸类型",
+    "drawing_mode": "图纸类型设置",
+    "automatic_drawing_type": "自动拓扑识别",
+    "classification_reason": "最终分型判据",
+    "region_index": "区域序号",
+    "region_identity_confidence": "区域身份置信度",
     "feeder_resolution_source": "馈线识别方式",
     "feeder_resolution_evidence": "馈线识别依据",
+    "fingerprint_match_ratio": "单馈线指纹匹配率",
+    "current_feeder_ids": "当前区域FEEDER_ID集合",
+    "current_feeder_count": "当前区域FEEDER_ID数量",
+    "majority_feeder_id": "多数FEEDER_ID",
+    "majority_feeder_count": "多数FEEDER_ID条数",
+    "anomaly_count": "异常FeedLine数",
     "feeder_db_count": "13500数据库匹配数",
     "feeder_id": "馈线ID",
     "feeder_name": "数据库馈线名称",
@@ -98,6 +124,8 @@ FEEDLINE_LABELS = {
     "file_name": "G文件",
     "feeder_name": "馈线名称",
     "feeder_resolution_source": "馈线识别方式",
+    "topology_region": "拓扑区域",
+    "current_feeder_name": "当前所属馈线名称",
     "order_index": "FeedLine序号",
     "object_type": "G图元类型",
     "xml_id": "图元XML ID",
@@ -255,6 +283,7 @@ def status_cls(status):
         "PASS": "pass",
         "WARN": "warn",
         "RELINK": "relink",
+        "CREATE_PENDING": "create",
         "RMU_RELINK": "rmu-relink",
         # RMU_LINK remains a hard error used by ambiguous/non-unique RMU cases.
         "RMU_LINK": "fail",
@@ -358,6 +387,34 @@ def flatten_rmu_rows(reports):
             reason = rmu.get("rmu_reason", "")
             block_reasons = list(rmu.get("association_block_reasons", []))
 
+            # RMU name resolution failures are hard RMU-level identity errors.
+            # Keep them visibly red and make sure the blocker column explains
+            # the actual name-parsing problem instead of falling back to a
+            # misleading database-not-found message.
+            reason_code = str(reason or "").split(":", 1)[0]
+            if reason_code in {
+                "RMU_NAME_NOT_PARSED",
+                "RMU_NAME_NOT_FOUND",
+                "RMU_NAME_RESOLUTION_ERROR",
+                "RMU_LOOKUP_ERROR",
+            }:
+                status = "FAIL"
+                severity = "ERROR"
+                if not block_reasons:
+                    frame_ref = rmu.get("frame_xml_id", "") or "-"
+                    if reason_code in {"RMU_NAME_NOT_PARSED", "RMU_NAME_NOT_FOUND"}:
+                        block_reasons.append(
+                            "RMU_NAME_NOT_PARSED: "
+                            f"矩形框XML ID={frame_ref} 未解析出环网柜名称；"
+                            "环网柜身份未确定，禁止该RMU及柜内设备自动关联。"
+                        )
+                    else:
+                        block_reasons.append(
+                            "RMU_NAME_RESOLUTION_ERROR: "
+                            f"矩形框XML ID={frame_ref} 环网柜名称解析/核验异常；"
+                            f"详情={reason or '-'}；禁止该RMU及柜内设备自动关联。"
+                        )
+
             if db_count > 1:
                 status = "FAIL"
                 severity = "ERROR"
@@ -419,7 +476,15 @@ def flatten_rmu_rows(reports):
                     "rmu_type_check_reason",
                     "",
                 ),
-                "rmu_is_smart": rmu.get("rmu_is_smart", "NO"),
+                # Report-facing wording requested in v4.1.4.  Keep the
+                # validator's internal YES/NO contract unchanged, but render
+                # the user-facing column as SMART/NORMAL.
+                "rmu_is_smart": (
+                    "SMART"
+                    if str(rmu.get("rmu_is_smart", "NO")).strip().upper()
+                    in {"YES", "TRUE", "1", "SMART", "SMR"}
+                    else "NORMAL"
+                ),
                 "rmu_smart_marker_types": rmu.get(
                     "rmu_smart_marker_types",
                     "",
@@ -529,6 +594,12 @@ def flatten_feeder_rows(reports):
 
         rows.append({
             "file_name": report.get("file_name", ""),
+            "drawing_type": report.get("drawing_type", ""),
+            "drawing_mode": report.get("drawing_mode", "AUTO"),
+            "automatic_drawing_type": report.get("automatic_drawing_type", ""),
+            "classification_reason": report.get("classification_reason", ""),
+            "region_index": report.get("region_index", ""),
+            "region_identity_confidence": report.get("region_identity_confidence", ""),
             "feeder_resolution_source": report.get(
                 "feeder_resolution_source",
                 report.get("feeder_hint_source", ""),
@@ -536,6 +607,12 @@ def flatten_feeder_rows(reports):
             "feeder_resolution_evidence": report.get(
                 "feeder_resolution_evidence", ""
             ),
+            "fingerprint_match_ratio": report.get("fingerprint_match_ratio", ""),
+            "current_feeder_ids": report.get("current_feeder_ids", ""),
+            "current_feeder_count": report.get("current_feeder_count", ""),
+            "majority_feeder_id": report.get("majority_feeder_id", ""),
+            "majority_feeder_count": report.get("majority_feeder_count", ""),
+            "anomaly_count": report.get("anomaly_count", ""),
             "feeder_db_count": len(report.get("feeder_records", []) or []),
             "feeder_id": report.get("feeder_id", ""),
             "feeder_name": report.get("feeder_name", ""),
@@ -707,10 +784,24 @@ def _table_html(
     labels,
     status_field=None,
     selectable=False,
+    table_id=None,
+    filter_placeholder=None,
 ):
     body = []
     for row in rows:
-        cls = status_cls(str(row.get(status_field, ""))) if status_field else ""
+        if status_field:
+            # Some feeder rows keep status=WARN for operational readiness while
+            # severity carries the exact action type. CREATE_PENDING needs its
+            # own report color so users can immediately distinguish "link an
+            # existing section" from "create a new 13503 section, then link".
+            semantic_status = str(row.get("severity", "") or "")
+            cls = (
+                status_cls(semantic_status)
+                if semantic_status == "CREATE_PENDING"
+                else status_cls(str(row.get(status_field, "")))
+            )
+        else:
+            cls = ""
         select_cell = (
             "<td class='select-col'>"
             "<input type='checkbox' class='row-check' "
@@ -734,8 +825,23 @@ def _table_html(
         if selectable else ""
     )
 
+    table_id_attr = f" id='{esc(table_id)}'" if table_id else ""
+    filter_html = ""
+    if table_id:
+        placeholder = filter_placeholder or "输入任意内容进行模糊筛选"
+        filter_html = (
+            "<div class='table-filter'>"
+            "<label>筛选：</label>"
+            f"<input type='search' class='table-filter-input' "
+            f"placeholder='{esc(placeholder)}' "
+            f"oninput=\"filterReportTable('{esc(table_id)}', this.value)\">"
+            f"<span class='filter-count' id='{esc(table_id)}-count'>共 {len(rows)} 行</span>"
+            "</div>"
+        )
+
     return (
-        "<div class='scroll'><table><thead><tr>"
+        filter_html
+        + f"<div class='scroll'><table{table_id_attr}><thead><tr>"
         + select_header
         + "".join(
             f"<th>{esc(labels.get(field,field))}</th>"
@@ -796,9 +902,19 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules):
         RMU_LABELS,
         "rmu_status",
         selectable=True,
+        table_id="rmu-summary-table",
+        filter_placeholder="输入环网柜名称或任意字符，模糊匹配",
     )
     device_fields = ["file_name"] + DEVICE_FIELDS
-    device_table = _table_html(device_rows, device_fields, DEVICE_LABELS, "status", selectable=True)
+    device_table = _table_html(
+        device_rows,
+        device_fields,
+        DEVICE_LABELS,
+        "status",
+        selectable=True,
+        table_id="rmu-device-table",
+        filter_placeholder="输入环网柜名称或任意字符，模糊匹配",
+    )
 
     text = f"""<!doctype html>
 <html lang="zh-CN">
@@ -831,6 +947,11 @@ tr.row-selected{{outline:3px solid #1976D2;outline-offset:-3px;font-weight:600}}
 .select-col{{position:sticky;left:0;z-index:4;text-align:center!important;min-width:52px;max-width:52px;background:#F8FBFA!important}}
 thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}}
 .row-check{{width:17px;height:17px;cursor:pointer;accent-color:#1976D2}}
+.table-filter{{display:flex;align-items:center;gap:10px;margin:10px 0 12px 0;flex-wrap:wrap}}
+.table-filter label{{font-weight:600;color:var(--green-dark)}}
+.table-filter-input{{width:min(520px,70vw);padding:8px 11px;border:1px solid var(--border);border-radius:6px;font-size:13px;outline:none;background:#fff;color:var(--text)}}
+.table-filter-input:focus{{border-color:var(--green);box-shadow:0 0 0 2px rgba(0,140,106,.12)}}
+.filter-count{{font-size:12px;color:#607D74}}
 .status-list{{display:flex;flex-direction:column;gap:8px;max-width:1100px}}
 .status-item{{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:14px;padding:9px 12px;border-radius:6px;border:1px solid var(--border)}}
 .status-item strong{{white-space:nowrap}}
@@ -903,6 +1024,26 @@ function toggleSelectedRow(cb) {{
     row.classList.remove('row-selected');
   }}
 }}
+
+function filterReportTable(tableId, value) {{
+  const table = document.getElementById(tableId);
+  if (!table || !table.tBodies || !table.tBodies.length) return;
+  const query = String(value || '').trim().toLocaleUpperCase();
+  const rows = Array.from(table.tBodies[0].rows);
+  let visible = 0;
+  for (const row of rows) {{
+    const haystack = String(row.textContent || '').toLocaleUpperCase();
+    const matched = !query || haystack.includes(query);
+    row.style.display = matched ? '' : 'none';
+    if (matched) visible += 1;
+  }}
+  const counter = document.getElementById(tableId + '-count');
+  if (counter) {{
+    counter.textContent = query
+      ? `匹配 ${{visible}} / ${{rows.length}} 行`
+      : `共 ${{rows.length}} 行`;
+  }}
+}}
 </script>
 </body>
 </html>"""
@@ -929,6 +1070,8 @@ def _export_feeder_html_bundle(reports, export_path, domain_rules):
         FEEDER_LABELS,
         "status",
         selectable=True,
+        table_id="feeder-summary-table",
+        filter_placeholder="输入馈线名称或任意字符，模糊匹配",
     )
     feedline_table = _table_html(
         feedline_rows,
@@ -936,6 +1079,8 @@ def _export_feeder_html_bundle(reports, export_path, domain_rules):
         FEEDLINE_LABELS,
         "status",
         selectable=True,
+        table_id="feedline-detail-table",
+        filter_placeholder="输入馈线段名称或任意字符，模糊匹配",
     )
 
     text = f"""<!doctype html>
@@ -960,6 +1105,7 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
 .scroll{{overflow:auto;max-height:650px}}
 .pass{{background:#EAF8F2}}
 .warn{{background:#FFF8DE}}
+.create{{background:#FFE8CC}}
 .fail{{background:#FFF0F0}}
 .info{{background:#EAF3FF}}
 .row-selected td{{background:#DCEEFF !important;box-shadow:inset 0 1px #8AB8F5,inset 0 -1px #8AB8F5}}
@@ -967,6 +1113,11 @@ th,td{{border:1px solid var(--border);padding:6px 8px;text-align:left;white-spac
 th.select-col{{z-index:5;background:var(--green-dark)}}
 td.select-col{{background:inherit}}
 .row-check{{width:16px;height:16px;cursor:pointer}}
+.table-filter{{display:flex;align-items:center;gap:10px;margin:10px 0 12px 0;flex-wrap:wrap}}
+.table-filter label{{font-weight:600;color:var(--green-dark)}}
+.table-filter-input{{width:min(520px,70vw);padding:8px 11px;border:1px solid var(--border);border-radius:6px;font-size:13px;outline:none;background:#fff;color:var(--text)}}
+.table-filter-input:focus{{border-color:var(--green);box-shadow:0 0 0 2px rgba(0,140,106,.12)}}
+.filter-count{{font-size:12px;color:#607D74}}
 .status-list{{display:flex;flex-direction:column;gap:8px;max-width:1100px}}
 .status-item{{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:14px;padding:9px 12px;border-radius:6px;border:1px solid var(--border)}}
 .meta{{color:#D7EEE5}}
@@ -984,7 +1135,7 @@ td.select-col{{background:inherit}}
       <thead><tr><th>G 图元类型</th><th>表号</th><th>域号</th></tr></thead>
       <tbody>{domain_rows}</tbody>
     </table>
-    <p>馈线识别只允许 facID、文件名、人工输入三种方式，最终必须唯一匹配 13500 / dms_feeder_device。405 / substation 用于确定馈线所属变电站；创建馈线段的 BV_ID 从该站 402 / voltagelevel 中选择，并通过 401 / basevoltage 只保留 110kV、33kV、13.8kV，存在多个时选择数值最小的电压等级。唯一允许写入的数据库表是 13503 / dms_section_device，模型域号为 1。</p>
+    <p>馈线识别规则：G 根节点 facID 非空时强制使用 facID，文件名和人工输入均不参与判断。只有 facID 为空时才允许文件名或人工输入，并且必须精准唯一匹配 13500 / dms_feeder_device；AJWD 6 与 AJWD 06 是不同馈线。405 / substation 用于确定馈线所属变电站；创建馈线段的 BV_ID 从该站 402 / voltagelevel 中选择，并通过 401 / basevoltage 只保留 110kV、33kV、13.8kV，存在多个时选择数值最小的电压等级。唯一允许写入的数据库表是 13503 / dms_section_device，模型域号为 1。</p>
   </div>
 
   <div class="card">
@@ -996,24 +1147,28 @@ td.select-col{{background:inherit}}
       </div>
       <div class="status-item warn" style="background:#FFF8DE">
         <strong>黄色 WARN</strong>
-        <span>当前 FeedLine 尚未关联，但已经分配到可用数据库馈线段，可以在工作区勾选后执行模型关联。</span>
+        <span>当前 FeedLine 尚未关联，但已经分配到本馈线下已有的可用数据库馈线段，可以在工作区勾选后直接执行模型关联。</span>
+      </div>
+      <div class="status-item create" style="background:#FFE8CC">
+        <strong>橙色 CREATE</strong>
+        <span>当前馈线数据库中没有足够的可用 13503 馈线段；该 FeedLine 需要先单独创建新的 dms_section_device 记录，再生成正确 KeyID 并完成关联。</span>
       </div>
       <div class="status-item fail" style="background:#FFF0F0">
         <strong>红色 FAIL</strong>
-        <span>馈线名称无法唯一解析、当前 KeyID 不属于本馈线、表号/域号错误、数据库馈线段不足或其它硬错误。</span>
+        <span>馈线名称无法唯一解析、当前 KeyID 不属于本馈线、跨馈线关联、无法安全确定目标或其它硬错误。</span>
       </div>
     </div>
   </div>
 
   <div class="card">
     <h2>馈线汇总</h2>
-    <p>馈线只通过三种来源确定：G 根节点 facID、文件名、人工输入。三种方式最终都必须唯一匹配到 13500 / dms_feeder_device；无法唯一确认时直接 FAIL，不创建馈线段，也不执行 FeedLine 关联。馈线报告不再包含任何 RMU / 环网柜拓扑判定字段。</p>
+    <p>馈线通过三种互相独立的来源之一确定：G 根节点 facID、文件名、人工输入。默认使用 facID；所选来源必须单独唯一匹配到 13500 / dms_feeder_device，不与另外两种来源交叉分析。无法唯一确认时直接 FAIL，不创建馈线段，也不执行 FeedLine 关联。馈线报告不再包含任何 RMU / 环网柜拓扑判定字段。</p>
     {feeder_table}
   </div>
 
   <div class="card">
     <h2>馈线段明细</h2>
-    <p>唯一馈线确认后，程序查询该 FEEDER_ID 下的 13503 / dms_section_device。FeedLine 按从上到下、同高度从左到右对应 SEC001、SEC002……；数据库已有目标馈线段直接使用，缺失时按设置生成创建计划。执行模型关联时先补齐缺失记录、重新查询数据库，再完成原有 LINK / RELINK 处理。表格左侧复选框仅用于人工标记。</p>
+    <p>唯一馈线确认后，程序查询该 FEEDER_ID 下的 13503 / dms_section_device。已正确关联到本馈线且表号/域号正确的 FeedLine 保持原关联，不按图形几何顺序强制重排 SEC；未关联或旧关联失效的 FeedLine 才使用当前馈线未占用的现有馈线段，真实数量不足时仅按短缺数量生成 SECnnn 创建计划。执行模型关联时先补齐缺失记录、重新查询数据库，再完成 LINK / RELINK。表格左侧复选框仅用于人工标记。</p>
     {feedline_table}
   </div>
 </main>
@@ -1022,6 +1177,25 @@ function toggleSelectedRow(cb) {{
   const row = cb.closest('tr');
   if (!row) return;
   row.classList.toggle('row-selected', cb.checked);
+}}
+function filterReportTable(tableId, value) {{
+  const table = document.getElementById(tableId);
+  if (!table || !table.tBodies || !table.tBodies.length) return;
+  const query = String(value || '').trim().toLocaleUpperCase();
+  const rows = Array.from(table.tBodies[0].rows);
+  let visible = 0;
+  for (const row of rows) {{
+    const haystack = String(row.textContent || '').toLocaleUpperCase();
+    const matched = !query || haystack.includes(query);
+    row.style.display = matched ? '' : 'none';
+    if (matched) visible += 1;
+  }}
+  const counter = document.getElementById(tableId + '-count');
+  if (counter) {{
+    counter.textContent = query
+      ? `匹配 ${{visible}} / ${{rows.length}} 行`
+      : `共 ${{rows.length}} 行`;
+  }}
 }}
 </script>
 </body>

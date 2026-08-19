@@ -227,19 +227,16 @@ class GParser:
     def classify_rmu_type(self, parsed: ParsedG, frame: RmuFrame | GObject) -> Dict[str, object]:
         """Identify RMU cabinet type such as 2L1T.
 
-        Priority rule requested by the field workflow:
-        1. Read Text/DText labels INSIDE the RMU rectangle.  Y1/Y2/Y3...
-           represent load-breaker ways (L); Q1/Q2... represent circuit-breaker
-           ways (T).
-        2. Use CBreakerDis.devref as an independent/fallback source:
+        Field workflow rule (v4.1.4):
+        1. Independently calculate the cabinet type from Text/DText labels
+           inside the RMU rectangle: Y* -> L, Q* -> T.
+        2. Independently calculate the cabinet type from CBreakerDis.devref:
            * contains Load_Breaker    -> L
            * contains Circuit_Breaker -> T
-        3. If the text rule completely accounts for all CBreakerDis objects,
-           text is authoritative.  Otherwise devref is the fallback.
-        4. When both complete sources are available but disagree, keep the
-           text-derived type (higher priority) and expose the mismatch in the
-           returned diagnostics.  Type mismatch is descriptive only; it does
-           not change RMU database association eligibility.
+        3. When both sources exist and disagree, devref is authoritative for
+           the final RMU type.  The text/devref mismatch is still exposed as
+           a WARN diagnostic for engineering review.
+        4. When only one source exists, use the available source.
         """
         rect = frame.frame if isinstance(frame, RmuFrame) else frame
         inside = [
@@ -304,15 +301,25 @@ class GParser:
         text_type = fmt(text_l, text_t)
         devref_type = fmt(devref_l, devref_t)
 
-        # Field rule: Y1/Y2/Y3... and Q1/Q2/Q3... text is ALWAYS
-        # authoritative once any such labels are recognized inside the RMU.
-        # devref is used only when no Y/Q label can be recognized at all.
-        if text_found:
-            rmu_type = text_type
-            source = "TEXT_YQ"
+        # v4.1.4 field rule:
+        # - keep the two sources independent for cross-checking;
+        # - if both exist and disagree, DEVREF is authoritative;
+        # - if they agree, keep TEXT_YQ as the normal source label to avoid
+        #   changing otherwise-valid historical reports;
+        # - if only one source exists, use that source.
+        if text_found and devref_found:
+            if text_type == devref_type:
+                rmu_type = text_type
+                source = "TEXT_YQ"
+            else:
+                rmu_type = devref_type
+                source = "DEVREF"
         elif devref_found:
             rmu_type = devref_type
             source = "DEVREF"
+        elif text_found:
+            rmu_type = text_type
+            source = "TEXT_YQ"
         else:
             rmu_type = "UNKNOWN"
             source = "UNRESOLVED"

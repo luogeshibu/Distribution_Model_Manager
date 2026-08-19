@@ -1,17 +1,239 @@
+# v4.1.17
 
+- RMU 名称未解析/解析异常时继续检查柜内已有设备 KeyID，不再因 `rmu_name` 为空直接把正确设备误报为 `RMU_LINK_MISMATCH`。
+- 已有关联设备通过 KeyID 反查 `combined_id`；若均来自同一个数据库 RMU，则记录推断出的 RMU ID/NAME，并在 RMU 汇总说明及 RMU 级阻断原因中明确说明“名称未解析但现有 RMU 归属关联一致”。
+- 当柜内所有设备均已有可反查 KeyID 且归属同一个 RMU 时，说明明确标记现有 RMU 归属关联一致且正确、无需重新关联，并提示核对图上名称是否应为该数据库 RMU NAME。
+- 名称未解析的设备行如果现有 KeyID、CODE 和实际 RMU 归属检查均通过，保持 PASS / 无需回写；`当前模型环网柜名称是否正确` 显示 `N/A`，避免把“无名称可比较”误解释成错误。
+- 同一图形 RMU 内已有设备指向多个 combined_id 时仍保持红色硬错误；名称未解析时仍禁止自动新增或改绑。
+- 新增 3 个专项回归测试覆盖：名称未解析但单一 RMU 关联正确、报告反推 ID/NAME、跨多个 RMU 仍硬错误。
 
+# v4.1.16
 
+- RMU 名称未解析时明确输出 `RMU_NAME_NOT_PARSED`，环网柜汇总使用红色 FAIL。
+- RMU 名称候选解析/核验发生异常时转换为 `RMU_NAME_RESOLUTION_ERROR` 红色 FAIL，不再因异常直接丢失该 RMU 报告记录。
+- `RMU级关联阻断原因` 改为按实际失败原因输出：名称未解析、名称解析/核验异常、数据库无记录、数据库重名分别描述。
+- 名称身份未可靠确定时禁止该 RMU 及柜内设备自动关联。
+- 报告层保留名称解析失败原始原因，不再错误降级为 `RMU_NOT_FOUND_IN_DATABASE`。
+- 新增 RMU 名称未解析与解析异常的报告/颜色/阻断原因回归测试。
 
+# v4.1.15
 
+- 馈线 HTML 报告新增独立的橙色 `CREATE` 状态，用于明确区分“已有数据库馈线段直接关联”和“需要先新建 13503 再关联”的 FeedLine。
+- `severity=CREATE_PENDING` 的馈线段明细行现在使用浅橙色背景，不再与普通黄色 WARN 混在一起。
+- 状态颜色说明新增“橙色 CREATE”：数据库可用 13503 数量不足时，该 FeedLine 需要先创建新的 `dms_section_device`，再生成正确 KeyID 并回写关联。
+- 黄色 WARN 继续仅表示已找到本馈线下现有可用数据库馈线段，可直接关联；红色 FAIL 不再把“数据库馈线段数量不足但可安全新建”描述为硬错误。
+- 新增 HTML 报告回归测试，验证 CREATE_PENDING 行、图例与 CSS 颜色均正确输出。
 
+# v4.1.14
 
+- 调整部分已关联馈线图的剩余 FeedLine 分配策略：不再要求 1 对 1 唯一剩余，也不再因多个未关联项 + 多个候选段而 BLOCKED。
+- 已正确关联的 FeedLine 仍严格保留，只校验同 FEEDER_ID 与 Domain；不检查 SEC/图形顺序。
+- 未关联或旧 KeyID 失效的 FeedLine 依次使用本馈线未占用 13503：NAME 含 SECnnn 时按 SEC 数字升序，否则按数据库 device ID 升序。
+- 数据库现有段不足时，先分配全部可用段，再仅对真实短缺行生成 `SECTION_NOT_AVAILABLE` / `CREATE_PENDING`，新建数量等于实际短缺数量。
+- 部分已关联图新建 NAME 继续使用第一个未占用的 `*_SECnnn`，不会依据已有 FeedLine 的几何位置重排历史模型。
+- 新增/更新回归测试覆盖：4 已关联 + 2 未关联、非 SEC 历史名称按 ID 顺序、现有段不足后仅创建短缺数量。
 
+# v4.1.13
 
+- 馈线段既有模型校验进一步收敛：只检查当前 KeyID 是否能解析到 13503、数据库记录是否属于当前已确认 FEEDER_ID，以及 Domain 是否正确。
+- 取消既有/部分已关联模型的 SEC001/SEC002 几何顺序校验；数据库 NAME、CODE、SEC 后缀、上下/左右顺序均不再作为既有关联正确性的判据。
+- 只有“全新图”（本图所有 FeedLine 均无 KeyID）允许使用从上到下、同高度从左到右的图形顺序进行首次馈线段分配，并在数据库数量不足时按该顺序创建缺少的 SEC。
+- 只要图中存在任何已关联 FeedLine，即进入 `PRESERVE_EXISTING_NO_ORDER` 模式；多个未关联项与多个候选馈线段并存时不再按顺序猜测，改为 BLOCKED。
+- 非全新图仅剩 1 个未解析 FeedLine + 1 个未占用同馈线 13503 时，可按唯一剩余事实直接关联，不依赖顺序。
+- 非全新图仅剩 1 个未解析 FeedLine且数据库无剩余 13503 时，允许只创建 1 条；新 NAME 使用当前馈线第一个未使用的 SEC 后缀，不使用该 FeedLine 的几何序号。
+- 同一馈线、正确 Domain 的既有关联直接 PASS；按当前业务规则不再额外检查同一 13503 是否被多个 FeedLine 重复引用。
+- 新增 5 个专项回归测试覆盖：全新图按序首次关联、部分图多候选禁止按序、唯一剩余安全关联、重复同馈线/同 Domain 不额外报错、单条短缺创建不使用几何序号。
 
+# v4.1.12
 
+- 修复“已正确关联的同馈线 FeedLine 因几何顺序与 SECnnn 顺序不同而被误报 RELINK”的问题。
+- 已有关联只要 KeyID 解析到 13503、Domain 正确、数据库记录仍属于当前已确认 FEEDER_ID，即直接 PASS；不再按图形从上到下/从左到右强制重排 SEC。
+- Domain-only 错误仍保持同一 device_id，仅重写正确 Domain 的 KeyID。
+- 未关联或旧 KeyID 失效的 FeedLine，继续优先分配当前馈线未占用的现有 13503；只有真实数量不足时才按短缺数量创建。
+- SECnnn 规则仅用于新建缺失馈线段的 NAME；若首选 SECnnn 已被现有正确关联占用，则自动选择当前馈线下第一个未使用的 SEC 序号，避免重复创建/抢占。
+- 新增 ADF-15 真实排列场景回归：SEC001、SEC004、SEC002、SEC005、SEC003、SEC006 均保持原正确关联，不产生无意义 RELINK。
 
+# v4.1.11
 
+- 修复馈线 G 中旧 KeyID 指向已不存在 13503 记录时无法继续分配的问题。
+- 失效旧关联先使用当前已确认 FEEDER_ID 下未占用的现有馈线段。
+- 现有馈线段仍不足时，仅按实际短缺 FeedLine 数量生成 CREATE_PENDING 计划。
+- 执行阶段仅创建用户选中的短缺馈线段，创建后重新查询数据库并计算 KeyID。
+- 非创建行按验证阶段已选定的 device_id 精确执行，兼容历史拓扑式馈线段 NAME。
 
+# v4.1.10
+
+- 馈线 HTML 报告的“馈线汇总”和“馈线段明细”新增独立模糊搜索框，支持按馈线名、馈线段名、状态、ID 或其它可见字符整行筛选。
+- 修复同一 13503 馈线段仅 Domain 编码错误时被报为不可处理 `MODEL_LINK_WRONG` 的问题。
+- 当当前 KeyID 指向 13503、本数据库记录仍属于当前 FEEDER_ID、但 Domain 不等于配置值（默认 1）时，标记为 `RELINK` 并允许重写 KeyID。
+- Domain-only RELINK 保持原 device_id / 馈线段不变，只重算并回写正确 KeyID；执行阶段禁止重新分配到其它 SEC。
+- 不同 feeder_id、错误 table、数据库记录缺失等场景仍保持硬错误，不放宽跨馈线安全边界。
+- 增加 Domain-only RELINK 与馈线 HTML 双搜索框专项回归测试。
+
+# v4.1.9
+
+- 馈线图 AUTO 分型改为 CBreaker 优先：严格统计 `<CBreaker>`，1 个判定单馈线图，2 个及以上判定多馈线组合图。
+- `<CBreakerDis>` 仅表示 RMU/馈线内部开关，不参与源馈线数量统计。
+- 仅当 `<CBreaker>` 为 0 时，才启用有效母线、源分支、FeedLine 连通域和馈线标题锚点的拓扑兜底。
+- 增加分型置信度与 CBreaker 数量日志；保留 AUTO / 强制单馈线 / 强制组合图人工覆盖。
+- 加入 TEST88、AJWD-03、ABH-03、ABH 组合图真实文件回归。
+
+## [4.1.8] - 2026-08-19
+
+- 馈线配置新增“图纸类型确认”：AUTO / 强制单馈线图 / 强制组合图；选择对本次文件或目录中的文件生效。
+- AUTO 继续使用 v4.1.2+ 的 G 电气拓扑分型；人工覆盖时日志与报告同时保留自动识别结果和最终分型判据。
+- 单馈线根 facID 关联与 Breaker、Busbar、FeedLine/13503 校验解耦：人工输入/文件名唯一确认 13500 馈线后，可独立勾选并回写 G 根 facID。
+- 即使 FeedLine/section 区域校验被阻断，已验证的单馈线根关联仍可单独执行；不会因此修改或创建其它设备模型。
+- 组合图继续禁止将整张 G 根节点绑定到单一 FEEDER_ID。
+- 馈线报告新增图纸类型设置、自动拓扑识别和最终分型判据列。
+
+## [4.1.7] - 2026-08-19
+
+- 馈线模型允许“零 FeedLine 的馈线图”：先完成 13500 馈线唯一解析，再判断是否存在馈线段；FeedLine=0 不再导致整条馈线 FAIL。
+- 人工输入/文件名唯一确定馈线且 G 根 facID 为空时，新增“馈线根 facID”可选关联项；执行只回写 `<G facID>`，不会创建任何 13503 馈线段。
+- 馈线汇总在零 FeedLine 场景也正确显示 13500 匹配数、FEEDER_ID、数据库馈线名和所属变电站。
+- 明确变电站名称使用 405/substation.NAME（例如 `AJWD`）；`JED CTL` 属于区域信息，不参与馈线段前缀。
+- 馈线段原 `AJWD_43_SEC001` 命名规则、拓扑图纸分型和跨馈线保护保持不变。
+
+## [4.1.6] - 2026-08-19
+
+### Fixed
+- 修复馈线段旧命名规则在完整站名场景下的前缀错误：`JED CTL AJWD + 43` 不再错误生成 `JED_CTL_AJWD_43_SEC001`，而是匹配数据库实际的 `AJWD_43_SEC001`。
+- 馈线段前缀优先从当前 `FEEDER_ID` 下已有 `dms_section_device.NAME` 的唯一 `*_SECnnn` 前缀推断；无既有馈线段时，再使用站名最后业务代码 + 馈线名生成。
+- 避免数据库已存在馈线段却被误判为缺失并生成错误 CREATE 计划。
+
+## [4.1.5] - 2026-08-19
+- 修复馈线模型在目标 SECnnn 已存在于数据库时调用不存在的 `OracleClient.make_expected_keyid()` 导致模型校验崩溃的问题。
+- 馈线段期望 KeyID 改为使用项目统一的 D5000 编码规则：`DeviceID + (Domain << 32)`。
+- 修正回归测试：Fake DB 不再伪造真实 OracleClient 不存在的方法，并新增真实接口形状的专项测试，避免同类问题再次漏测。
+- 保留 v4.1.4 的 RMU 报告筛选、DEVREF 柜型优先规则，以及 v4.1.3/v4.1.2 的 SEC 命名、跨馈线保护和拓扑分型逻辑。
+
+## [4.1.4] - 2026-08-19
+- 修复 `build_exe.ps1` 仍硬编码 v4.1.3 的问题；打包名称现在自动从 `APP_VERSION` 派生，避免版本升级后 EXE/ZIP 名称滞后。
+
+### RMU report filtering and field-rule update
+
+- Added independent fuzzy-search inputs above both RMU HTML report tables: `环网柜汇总` and `设备明细`. Search is case-insensitive and matches any visible row text, including RMU names.
+- Changed RMU type conflict rule: when Y/Q text-derived type and `CBreakerDis.devref` type disagree, the final RMU type now follows `devref`; the mismatch still remains WARN for review.
+- Changed the report-facing `是否智能` value from `YES/NO` to `SMART/NORMAL`. Internal smart-marker detection and the existing `智能标识` column remain unchanged.
+
+## [4.1.3] - 2026-08-19
+
+### Restore original feeder-section naming + hard feeder ownership guard
+- Keep v4.1.2 topology-first classification for SINGLE_FEEDER vs MULTI_FEEDER_COMPOSITE.
+- Revert the v4.1.1 topology endpoint naming rule for FeedLine sections.
+- Feeder-section targets again use the original resolved-feeder prefix plus positional SEC number: `..._SEC001`, `..._SEC002`, etc.
+- G `link` / `node_area` topology no longer determines section NAME or association target.
+- Existing `ls>2 -> 2` normalization remains unchanged.
+- During validation, an already-linked FeedLine whose 13503 row belongs to a different `feeder_id` is a hard `FEEDER_MISMATCH`.
+- Cross-feeder mismatches are never silently converted into automatic RELINK operations.
+- Same-feeder exact SEC-order mismatches can still follow the original explicit RELINK behavior.
+- Composite drawings remain audit-only and retain their feeder-owner consistency checks.
+
+## [4.1.2] - 2026-08-18
+
+### Topology-first drawing classification
+- Fixed false composite detection caused by counting every XML `Bus` object.
+- Tiny Bus point-nodes (for example 6x6 junction objects) no longer count as physical busbars.
+- Drawing type now uses effective busbars plus independent source branches after removing the busbar backbone from the explicit G link graph.
+- Two or more independent bus-to-breaker-to-FeedLine branches are a strong composite signal.
+- Distinct feeder-title anchors near effective busbars remain a second independent composite signal for sparse overview drawings.
+- Multiple raw Bus objects alone never force `MULTI_FEEDER_COMPOSITE`.
+- Validation logs now expose raw Bus count, effective busbars, feeder source branches, title anchors, and the classification reason.
+
+## [4.1.1] - 2026-08-18
+
+### Topology-based feeder section creation
+- FeedLine section NAME is derived from real G `link` / `node_area` topology,
+  not from SEC001/SEC002 order.
+- Endpoint order is top-to-bottom, then left-to-right.
+- Supported examples include `B303_22545-Y1`,
+  `22545-Y3_22521-Y2`, and `8664-Y1_22520`.
+- Remote RMU ports are never guessed when the G file exposes only the cabinet
+  number.
+- Existing topology-named 13503 rows become exact targets; wrong same-feeder
+  links can be RELINK candidates.
+- `ls=1` -> SECTION_TYPE=1, `ls=2` -> 0, empty -> 3.
+- Any numeric `ls>2` is treated as 2 before validation/database creation and
+  every such FeedLine is rewritten to `ls="2"` in the local g_output safe copy.
+- SSH server and local original G files remain unchanged.
+- Added `下载所选 G 文件` to the SSH read-only browser; each file is re-statted
+  immediately before download.
+
+## [4.1.0] - 2026-08-18
+
+### Single-feeder vs composite feeder audit
+- Added structural drawing classification using Bus count:
+  SINGLE_FEEDER / MULTI_FEEDER_COMPOSITE / AMBIGUOUS.
+- Local directory mode requires non-empty root facID for every single-feeder
+  drawing; filename/manual feeder lookup is not used for directory singles.
+- Composite drawings ignore root facID completely.
+- Directory single-feeder drawings build trusted FeedLine XML-ID fingerprints.
+- Composite regions with 100% fingerprint match receive an authoritative
+  Expected FEEDER_ID from the matching single-feeder facID.
+- Remaining composite FeedLines are grouped by FeedLine/ConnectLine topology
+  components and audited for current FEEDER_ID consistency.
+- Exact-fingerprint wrong-feeder rows are reported as FEEDER_MISMATCH; topology
+  minority-owner rows are reported as TOPOLOGY_FEEDER_CONFLICT.
+- Composite/ambiguous drawings are audit-only in this release and are never
+  automatically rewritten.
+- Existing single-feeder 13503 creation, 401/402 BV_ID selection, facID policy,
+  SSH read-only snapshots and FeedLine writeback remain unchanged.
+
+## [4.0.9] - 2026-08-17
+
+### Hard facID lock and empty-facID writeback
+- Fixed local single-G facID detection regex.
+- Non-empty G.facID is now reflected as a hard UI lock after validation,
+  including SSH snapshot validation.
+- Attempts to choose filename/manual while facID is locked show an explicit
+  warning and immediately return to FACID.
+- When original G.facID is empty and FILENAME/MANUAL uniquely identifies the
+  feeder, successful association writes the final FEEDER_ID into root G.facID
+  in the Workspace/g_output safe copy.
+- Existing non-empty facID is never overwritten.
+- FeedLine five-field writeback, 401/402 BV_ID selection, 13503 INSERT boundary,
+  transactions and SSH read-only behavior remain unchanged.
+
+## [4.0.8] - 2026-08-17
+
+### facID authority + precise fallback matching
+- Non-empty G root facID is always authoritative (`FACID_FORCED`).
+- Filename/manual selections are ignored whenever facID is populated.
+- Invalid or unresolved non-empty facID blocks processing; no fallback occurs.
+- Only an empty facID enables filename or manual feeder identification.
+- Filename/manual matching preserves numeric text exactly:
+  `AJWD 6` and `AJWD 06` are different feeders.
+- Local single-file loading locks the feeder selection UI to facID when a
+  populated facID is detected.
+- Existing 401/402 BV_ID selection, 13503 creation, ID allocation,
+  transaction safety, SSH read-only behavior, and G write-back remain unchanged.
+
+## [4.0.7] - 2026-08-17
+
+### Independent feeder identification modes
+- Removed feeder AUTO mode.
+- Default feeder identification is FACID.
+- FACID, FILENAME and MANUAL are fully independent:
+  selecting one mode uses only that source.
+- No fallback or cross-check is performed against the other two sources.
+- The selected source must independently resolve to one unique 13500 /
+  dms_feeder_device record, otherwise processing is blocked.
+- Existing 401/402 BV_ID selection, 13503 creation, ID allocation, transaction,
+  SSH read-only behavior, FeedLine association and five-field G write-back
+  remain unchanged.
+
+## [4.0.6] - 2026-08-17
+
+### Feeder name canonicalization
+- Fixed false `FEEDER_NAME_FACID_MISMATCH` when the database feeder name uses
+  an unpadded numeric suffix and the G filename uses a zero-padded suffix.
+- Numeric feeder-name tokens now ignore leading zeros during comparison:
+  `AJWD 6 == AJWD 06 == AJWD-006`.
+- The canonicalization is used consistently for facID/file/manual cross-checks.
+- True feeder-number mismatches such as `AJWD 6` vs `AJWD 16` still block.
+- No database creation, ID allocation, voltage-level BV_ID selection, SSH,
+  FeedLine association, or G write-back behavior changed.
 
 ## [4.0.5] - 2026-08-17
 

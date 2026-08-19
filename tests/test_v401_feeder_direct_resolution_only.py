@@ -11,9 +11,9 @@ class NameDB:
                 "id": 1001,
                 "name": "16",
                 "st_id": 40501,
-                "station_name": "ADF",
+                "station_name": "JED CTL ADF",
                 "station_bv_id": 112871465660973067,
-                "display_name": "ADF 16",
+                "display_name": "JED CTL ADF 16",
             }
         ]
 
@@ -37,7 +37,7 @@ def test_filename_can_match_db_station_feeder_suffix(tmp_path):
         NameDB(),
         g,
         {
-            "feeder_resolution_mode": "AUTO",
+            "feeder_resolution_mode": "FILENAME",
             "feeder_table_id": 13500,
             "manual_feeder_name": "",
         },
@@ -93,4 +93,4 @@ def test_obsolete_rmu_topology_selector_removed():
 
     assert "图纸类型识别" not in source
     assert "RMU 拓扑自动识别" not in source
-    assert "自动：facID → 文件名 → 人工输入" in source
+    assert "仅使用 G 根节点 facID（默认）" in source

@@ -11,8 +11,6 @@ def test_feeder_summary_schema_has_no_rmu_or_topology_columns():
         "trusted_rmu_names",
         "trusted_feeder_ids",
         "ignored_rmu_details",
-        "drawing_type",
-        "region_index",
         "region_assignment_method",
     }
     assert forbidden.isdisjoint(set(writer.FEEDER_FIELDS))
@@ -42,7 +40,7 @@ def test_feeder_report_uses_only_direct_identification_wording():
     for text in obsolete:
         assert text not in source
 
-    assert "G 根节点 facID、文件名、人工输入" in source
+    assert "facID" in source and "文件名" in source and "人工输入" in source
     assert "馈线报告不再包含任何 RMU / 环网柜拓扑判定字段" in source
 
 
