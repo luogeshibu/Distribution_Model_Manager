@@ -8,6 +8,7 @@
 4. RMU 单图模型校验
 5. RMU 大图/组合图模型校验
 6. RMU 选择性模型关联，检查执行前确认摘要
+   - 执行模型关联/回写期间，进度条应持续左右来回动画；即使 Oracle/磁盘操作较慢，窗口也必须保持可拖动和可重绘
 7. 馈线模型校验与选择性关联
    - AUTO 图纸类型：抽查单馈线和组合图自动拓扑分型
    - 强制单馈线：确认唯一馈线可独立回写 G 根 facID，且不受 Breaker/Busbar/FeedLine 状态影响
@@ -91,3 +92,15 @@
 - [ ] `JED-CTL-BABJ.sln.pic.g` frame XML ID 2001193 resolves top label 38995.
 - [ ] Existing normal RMU label assignment keeps legacy edge-gap scoring.
 - [ ] RMU/feeder/database/SSH/write-back business rules remain unchanged.
+
+
+## v4.1.35 UI-only check
+- [ ] Task Progress / 任务进度 title has no pale-green background patch.
+- [ ] Busy progress behavior, Console placement, and all model logic are unchanged.
+
+
+## v4.1.36 refresh performance check
+
+- Refresh the same SSH directory twice with no server changes: second completion must report no changes and must not rebuild the remote table or clear the current validation snapshot.
+- Add/modify/remove one remote `.g` file: refresh must detect the metadata change, rebuild the table once, preserve still-existing selections, and invalidate the old validation snapshot.
+- Confirm SSH remains read-only and model validation still performs its independent latest-file snapshot download.

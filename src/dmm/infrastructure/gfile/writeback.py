@@ -48,7 +48,11 @@ class GWriteBackService:
 
     @staticmethod
     def _find_exact_open_tag(text: str, tag: str, xml_id: str):
-        # Match only an opening tag and then verify its id attribute exactly.
+        """Legacy exact locator retained for compatibility/tests.
+
+        Bulk write-back no longer calls this once per object.  See
+        ``_index_target_open_tags`` for the one-pass implementation.
+        """
         tag_pattern = re.compile(rf'<{re.escape(tag)}\b[^>]*>', re.DOTALL)
         matches = []
         id_pattern = re.compile(r'\bid\s*=\s*(["\'])(.*?)\1', re.DOTALL)
@@ -57,6 +61,42 @@ class GWriteBackService:
             if id_match and id_match.group(2) == str(xml_id):
                 matches.append(match)
         return matches
+
+    @staticmethod
+    def _index_target_open_tags(text: str, target_keys):
+        """Index all requested (tag, XML id) opening tags in one file scan.
+
+        The previous implementation rescanned the whole G file twice for every
+        selected object.  Large RMU drawings can contain thousands of selected
+        devices, making write-back effectively O(selected_objects * file_size).
+        This index keeps the exact same uniqueness rule while scanning the file
+        only once for the requested tag names.
+        """
+        target_keys = {
+            (str(tag), str(xml_id))
+            for tag, xml_id in (target_keys or set())
+        }
+        if not target_keys:
+            return {}
+
+        tags = sorted({tag for tag, _ in target_keys}, key=len, reverse=True)
+        tag_alternation = "|".join(re.escape(tag) for tag in tags)
+        tag_pattern = re.compile(
+            rf'<(?P<tag>{tag_alternation})\b[^>]*>',
+            re.DOTALL,
+        )
+        id_pattern = re.compile(r'\bid\s*=\s*(["\'])(.*?)\1', re.DOTALL)
+
+        indexed = {key: [] for key in target_keys}
+        for match in tag_pattern.finditer(text):
+            opening = match.group(0)
+            id_match = id_pattern.search(opening)
+            if not id_match:
+                continue
+            key = (match.group("tag"), id_match.group(2))
+            if key in indexed:
+                indexed[key].append(match)
+        return indexed
 
     def apply_root_g_attributes(
         self,
@@ -117,48 +157,106 @@ class GWriteBackService:
         had_bom = original_bytes.startswith(b"\xef\xbb\xbf")
         raw = original_bytes.decode("utf-8-sig")
 
-        # Validate every target against the ORIGINAL file before changing anything.
-        validated = []
+        normalized_changes = []
         for change in changes:
             xml_id = str(change.get("xml_id", "")).strip()
             tag = str(change.get("tag", "")).strip()
             attrs = dict(change.get("attributes", {}))
-            matches = self._find_exact_open_tag(raw, tag, xml_id)
+            normalized_changes.append((tag, xml_id, attrs))
+
+        total = len(normalized_changes)
+        target_keys = {(tag, xml_id) for tag, xml_id, _ in normalized_changes}
+        self.log(
+            f"正在建立 G 文件回写索引：{g_path.name}；"
+            f"目标对象数={total}"
+        )
+        indexed = self._index_target_open_tags(raw, target_keys)
+
+        # Validate every target against the ORIGINAL file before changing
+        # anything.  This preserves the original all-or-nothing uniqueness
+        # safety rule, but avoids a full-file regex scan per selected object.
+        for tag, xml_id, _ in normalized_changes:
+            matches = indexed.get((tag, xml_id), [])
             if len(matches) != 1:
                 raise GWriteBackError(
                     f"回写目标必须唯一：tag={tag}, XML ID={xml_id}, 匹配数={len(matches)}"
                 )
-            validated.append((tag, xml_id, attrs))
 
         backup = self.create_backup(g_path) if create_backup else None
-        updated = raw
-        applied = []
 
-        # Locate again after each replacement because offsets may move.
-        for tag, xml_id, attrs in validated:
-            matches = self._find_exact_open_tag(updated, tag, xml_id)
+        # Keep one mutable opening-tag value per unique target.  If callers
+        # provide multiple changes for the same target, apply them in the same
+        # sequence as before so the final XML and the per-change audit records
+        # remain equivalent to the previous implementation.
+        target_state = {}
+        for key, matches in indexed.items():
             if len(matches) != 1:
-                raise GWriteBackError(
-                    f"回写过程中目标失去唯一性：tag={tag}, XML ID={xml_id}"
-                )
+                continue
             match = matches[0]
-            before_tag = match.group(0)
+            target_state[key] = {
+                "start": match.start(),
+                "end": match.end(),
+                "current_tag": match.group(0),
+            }
+
+        applied = []
+        progress_step = 100 if total >= 500 else 25 if total >= 100 else 10
+
+        for index, (tag, xml_id, attrs) in enumerate(normalized_changes, start=1):
+            key = (tag, xml_id)
+            state = target_state[key]
+            before_tag = state["current_tag"]
             after_tag = before_tag
             before_attrs = {}
 
-            for key, value in attrs.items():
-                attr_re = re.compile(rf'\b{re.escape(key)}\s*=\s*(["\'])(.*?)\1', re.DOTALL)
+            for attr_key, value in attrs.items():
+                attr_re = re.compile(
+                    rf'\b{re.escape(attr_key)}\s*=\s*(["\'])(.*?)\1',
+                    re.DOTALL,
+                )
                 old = attr_re.search(before_tag)
-                before_attrs[key] = old.group(2) if old else None
-                after_tag = self._set_attribute(after_tag, key, str(value))
+                before_attrs[attr_key] = old.group(2) if old else None
+                after_tag = self._set_attribute(
+                    after_tag,
+                    attr_key,
+                    str(value),
+                )
 
-            updated = updated[:match.start()] + after_tag + updated[match.end():]
+            state["current_tag"] = after_tag
             applied.append({
                 "tag": tag,
                 "xml_id": xml_id,
                 "before": before_attrs,
                 "after": {k: str(v) for k, v in attrs.items()},
             })
+
+            if (
+                index == 1
+                or index == total
+                or index % progress_step == 0
+            ):
+                self.log(
+                    f"G 文件回写进度：{index}/{total}；"
+                    f"tag={tag}；XML ID={xml_id}"
+                )
+
+        # Replace from the end of the file towards the beginning so all
+        # original offsets remain valid.  Each unique target is written once.
+        replacements = sorted(
+            (
+                (
+                    state["start"],
+                    state["end"],
+                    state["current_tag"],
+                )
+                for state in target_state.values()
+            ),
+            reverse=True,
+        )
+
+        updated = raw
+        for start, end, replacement in replacements:
+            updated = updated[:start] + replacement + updated[end:]
 
         temp_path = g_path.with_name(g_path.name + ".tmp_model_manager")
         try:

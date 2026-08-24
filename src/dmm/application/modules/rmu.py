@@ -263,6 +263,11 @@ class RmuModelModule(ModelModule):
             for changes in changes_by_file.values()
             for change in changes
         }
+        selected_by_rmu = defaultdict(int)
+        for _changes in changes_by_file.values():
+            for _change in _changes:
+                selected_by_rmu[str(_change.get("rmu_name", "") or "")] += 1
+        started_rmus = set()
         log_callback(
             f"执行模型关联：仅复核已选择的 {len(selected_rmus)} 个环网柜、"
             f"{selected_count} 个设备，不再重新扫描整张 G 图。"
@@ -313,6 +318,13 @@ class RmuModelModule(ModelModule):
                     or change.get("device_name")
                     or ""
                 ).strip()
+
+                if rmu_name not in started_rmus:
+                    started_rmus.add(rmu_name)
+                    log_callback(
+                        f"正在执行环网柜模型关联：RMU={rmu_name}；"
+                        f"已选设备={selected_by_rmu.get(rmu_name, 0)}"
+                    )
 
                 if rmu_name not in rmu_cache:
                     rmu_cache[rmu_name] = db.get_rmu_records(rmu_name)
@@ -527,6 +539,9 @@ class RmuModelModule(ModelModule):
                         break
                     index += 1
 
+            log_callback(
+                f"正在复制 G 文件到安全输出目录：{source.name}"
+            )
             shutil.copy2(source, target)
             copied[str(source.resolve())] = target
             log_callback(
@@ -547,6 +562,10 @@ class RmuModelModule(ModelModule):
             if target is None or not changes:
                 continue
 
+            log_callback(
+                f"正在回写 G 文件安全副本：{target.name}；"
+                f"待写设备数={len(changes)}"
+            )
             result = service.apply_attribute_changes(
                 target,
                 changes,

@@ -1632,6 +1632,11 @@ class FeederModelModule(ModelModule):
                 )].append(dict(change))
 
             for (region_index, feeder_id_text), selected_changes in grouped.items():
+                log_callback(
+                    f"正在执行馈线模型关联：文件={Path(source_file).name}；"
+                    f"区域={region_index or '-'}；FEEDER_ID={feeder_id_text or '-'}；"
+                    f"已选对象={len(selected_changes)}"
+                )
                 feeder_id = int_or_none(feeder_id_text)
                 if feeder_id is None:
                     for change in selected_changes:
@@ -2061,6 +2066,9 @@ class FeederModelModule(ModelModule):
                         target = candidate
                         break
                     idx += 1
+            log_callback(
+                f"正在复制 G 文件到安全输出目录：{source.name}"
+            )
             shutil.copy2(source, target)
             copied[str(source.resolve())] = target
             log_callback(f"安全复制 G 文件：{source} -> {target}")
@@ -2073,6 +2081,10 @@ class FeederModelModule(ModelModule):
             if target is None:
                 raise RuntimeError(f"无法定位 G 文件安全副本：{source_file}")
             if changes:
+                log_callback(
+                    f"正在回写 G 文件安全副本：{target.name}；"
+                    f"待写FeedLine数={len(changes)}"
+                )
                 result = service.apply_attribute_changes(
                     target,
                     changes,

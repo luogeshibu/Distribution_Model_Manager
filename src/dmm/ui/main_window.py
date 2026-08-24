@@ -15,7 +15,7 @@ import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEventLoop
 from PySide6.QtGui import QIcon, QPixmap, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox as QtMessageBox,
@@ -132,6 +132,89 @@ class QMessageBox(QtMessageBox):
         )
 
 
+class RemoteGFileListWorker(QThread):
+    """Read the remote G-file directory without blocking the Qt GUI thread.
+
+    This worker is presentation/I/O scheduling only. It delegates to the same
+    read-only SSH client and returns the same RemoteGFile rows used previously.
+    """
+
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, ssh_config: dict):
+        super().__init__()
+        self.ssh_config = dict(ssh_config)
+
+    def run(self):
+        try:
+            cfg = self.ssh_config
+            with ReadOnlySshClient(
+                cfg["host"],
+                cfg["port"],
+                cfg["username"],
+                cfg["password"],
+            ) as client:
+                rows = client.list_g_files(cfg["remote_directory"])
+            self.completed.emit(rows)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class AssociationExecutionWorker(QThread):
+    """Execute model association outside the GUI thread.
+
+    v4.1.33 keeps the exact validated snapshot, Oracle checks, module
+    association decisions and G-file write-back implementation unchanged.
+    Only execution scheduling moves to QThread so Qt can continuously animate
+    the busy progress bar and repaint the console while association is busy.
+    """
+
+    log = Signal(str)
+    completed = Signal(object)
+    failed = Signal(object)
+
+    def __init__(
+        self,
+        db_config: dict,
+        module,
+        files,
+        settings: dict,
+        execution_preview: dict,
+        output_g_dir: Path,
+    ):
+        super().__init__()
+        self.db_config = dict(db_config)
+        self.module = module
+        self.files = list(files)
+        self.settings = settings
+        self.execution_preview = execution_preview
+        self.output_g_dir = Path(output_g_dir)
+
+    def run(self):
+        db = None
+        try:
+            self.log.emit("\n开始执行模型关联：重新验证 Oracle 数据库连接。")
+            db = OracleClient(self.db_config)
+            self.log.emit(db.test_connection())
+            result_bundle = self.module.apply_association(
+                db,
+                self.files,
+                self.settings,
+                self.execution_preview,
+                lambda text: self.log.emit(str(text)),
+                output_g_dir=self.output_g_dir,
+            )
+            self.completed.emit(result_bundle)
+        except Exception as exc:
+            # Preserve the original exception object so the existing UI error
+            # handling shows exactly the same business error text as before.
+            self.failed.emit(exc)
+        finally:
+            if db:
+                db.close()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -163,6 +246,13 @@ class MainWindow(QMainWindow):
         self._remote_filter_timer.setInterval(120)
         self._remote_filter_timer.timeout.connect(self._run_remote_file_filter)
         self.remote_list_signature = None
+        self.remote_list_worker = None
+        self._remote_refresh_started_at = None
+        self._remote_refresh_timer = QTimer(self)
+        self._remote_refresh_timer.setInterval(1000)
+        self._remote_refresh_timer.timeout.connect(
+            self._update_remote_refresh_wait_status
+        )
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} - {APP_EDITION}")
         self.resize(1600, 960)
@@ -272,6 +362,13 @@ class MainWindow(QMainWindow):
             top: 1px;
             padding: 0 7px;
             background: #F1F6F3;
+        }
+
+        /* Console-adjacent Task Progress should visually merge with its
+           white card instead of showing the generic pale-green title chip. */
+        QGroupBox#progressBox::title {
+            background: white;
+            padding: 0 5px;
         }
 
         QScrollArea#workspaceScroll,
@@ -854,15 +951,15 @@ class MainWindow(QMainWindow):
         ssh_buttons = QHBoxLayout()
         test_ssh_btn = QPushButton("测试 SSH 连接")
         save_ssh_btn = QPushButton("保存 SSH 配置")
-        refresh_ssh_btn = QPushButton("刷新 G 文件列表")
+        self.refresh_ssh_btn = QPushButton("刷新 G 文件列表")
         download_ssh_btn = QPushButton("下载所选 G 文件")
         test_ssh_btn.clicked.connect(self.test_ssh_connection)
         save_ssh_btn.clicked.connect(self.save_ssh_settings)
-        refresh_ssh_btn.clicked.connect(self.refresh_remote_g_files)
+        self.refresh_ssh_btn.clicked.connect(self.refresh_remote_g_files)
         download_ssh_btn.clicked.connect(self.download_selected_remote_g_files)
         ssh_buttons.addWidget(test_ssh_btn)
         ssh_buttons.addWidget(save_ssh_btn)
-        ssh_buttons.addWidget(refresh_ssh_btn)
+        ssh_buttons.addWidget(self.refresh_ssh_btn)
         ssh_buttons.addWidget(download_ssh_btn)
         ssh_buttons.addStretch()
         ssh_grid.addLayout(ssh_buttons, len(ssh_fields), 1, 1, 3)
@@ -1030,10 +1127,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.module_stack)
 
         # --------------------------------------------------------
-        # 任务进度
+        # 任务进度控件
+        #
+        # v4.1.33: keep the task progress visually attached to the Console
+        # area instead of placing it above the (potentially tall) association
+        # candidate table.  This is presentation/layout only; all validation,
+        # association and write-back execution paths are unchanged.
         # --------------------------------------------------------
-        progress_box = QGroupBox("任务进度")
-        progress_layout = QVBoxLayout(progress_box)
+        self.progress_box = QGroupBox("任务进度")
+        self.progress_box.setObjectName("progressBox")
+        progress_layout = QVBoxLayout(self.progress_box)
+        progress_layout.setContentsMargins(10, 10, 10, 8)
+        progress_layout.setSpacing(5)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -1042,10 +1147,10 @@ class MainWindow(QMainWindow):
 
         self.progress_message = QLabel("等待执行任务")
         self.progress_message.setStyleSheet("color:#60756d;")
+        self.progress_message.setWordWrap(True)
 
         progress_layout.addWidget(self.progress_bar)
         progress_layout.addWidget(self.progress_message)
-        layout.addWidget(progress_box)
 
         # --------------------------------------------------------
         # RMU 模型校验后的可选择关联设备明细
@@ -1199,6 +1304,10 @@ class MainWindow(QMainWindow):
         log_actions.addWidget(self.open_report_dir_btn)
         log_layout.addLayout(log_actions)
 
+        # Keep the animated task state immediately next to the Console so it
+        # remains visible while the user watches live execution logs.
+        log_layout.addWidget(self.progress_box)
+
         self.log_edit = QPlainTextEdit()
         self.log_edit.setReadOnly(True)
         self.log_edit.setMinimumHeight(260)
@@ -1233,7 +1342,11 @@ class MainWindow(QMainWindow):
             self.apply_btn,
             database_btn,
         ):
-            button.setFixedSize(168, 42)
+            # Keep the compact Chinese baseline width, but allow longer
+            # translated captions (for example "Apply Model Association")
+            # to use their natural size instead of clipping characters.
+            button.setMinimumWidth(168)
+            button.setFixedHeight(42)
 
         actions.addWidget(self.validate_btn)
         actions.addWidget(self.apply_btn)
@@ -2739,54 +2852,22 @@ class MainWindow(QMainWindow):
             )
 
     def refresh_remote_g_files(self):
-        try:
-            cfg = self._current_ssh_config()
+        """Refresh the remote directory in a worker thread.
+
+        v4.1.31: SSH connect/open_sftp/listdir_attr used to run synchronously on
+        the GUI thread. A slow server therefore made Windows mark the whole
+        application as "Not Responding". The read-only SSH logic and returned
+        file rows are unchanged; only the I/O scheduling moved to QThread.
+        """
+        if self.remote_list_worker is not None and self.remote_list_worker.isRunning():
             self._set_ssh_connection_status(
-                "SSH/SFTP 已连接；正在读取远程 G 文件列表……",
+                "SSH/SFTP 正在后台读取远程 G 文件列表，请稍候……",
                 "working",
             )
-            QApplication.processEvents()
+            return
 
-            with ReadOnlySshClient(
-                cfg["host"],
-                cfg["port"],
-                cfg["username"],
-                cfg["password"],
-            ) as client:
-                rows = client.list_g_files(
-                    cfg["remote_directory"]
-                )
-
-            current_names = {item.name for item in rows}
-            self.remote_selected_names.intersection_update(
-                current_names
-            )
-            self.remote_file_rows = rows
-            self.remote_list_signature = (
-                cfg["host"],
-                int(cfg["port"]),
-                cfg["username"],
-                cfg["remote_directory"],
-            )
-            self.cfg["ssh"] = cfg
-            self.cfg["input_source"] = "SSH"
-            save_settings(self.cfg)
-            self._rebuild_remote_file_table()
-            self._apply_remote_file_filter(
-                self.remote_search_edit.text()
-            )
-            self._invalidate_validation_snapshot(
-                "远程文件列表已刷新"
-            )
-            self._set_ssh_connection_status(
-                f"SSH/SFTP 连接正常；远程文件源为只读。"
-                f" 已加载 {len(rows)} 个 .g 文件。",
-                "success",
-            )
-            self.log(
-                f"SSH远程目录：{cfg['remote_directory']} | "
-                f"*.g={len(rows)}；已排除 .g.h/.g.data/.g.png"
-            )
+        try:
+            cfg = self._current_ssh_config()
         except Exception as exc:
             self._set_ssh_connection_status(
                 f"读取远程 G 文件列表失败：{exc}",
@@ -2797,6 +2878,153 @@ class MainWindow(QMainWindow):
                 "读取远程 G 文件失败",
                 str(exc),
             )
+            return
+
+        self._set_ssh_connection_status(
+            "SSH/SFTP 正在后台连接并读取远程 G 文件列表……",
+            "working",
+        )
+        self.refresh_ssh_btn.setEnabled(False)
+        self._remote_refresh_started_at = datetime.now()
+        self._remote_refresh_timer.start()
+
+        worker = RemoteGFileListWorker(cfg)
+        self.remote_list_worker = worker
+        worker.completed.connect(
+            lambda rows, cfg=dict(cfg): self._on_remote_g_files_loaded(rows, cfg)
+        )
+        worker.failed.connect(self._on_remote_g_files_failed)
+        worker.finished.connect(self._on_remote_g_file_worker_finished)
+        worker.start()
+
+    def _update_remote_refresh_wait_status(self):
+        worker = self.remote_list_worker
+        started = self._remote_refresh_started_at
+        if worker is None or not worker.isRunning() or started is None:
+            return
+        seconds = max(0, int((datetime.now() - started).total_seconds()))
+        if self.language == "en_US":
+            message = (
+                "SSH/SFTP is reading the remote G-file list in the background; "
+                f"elapsed {seconds}s. The application remains responsive."
+            )
+        else:
+            message = (
+                "SSH/SFTP 正在后台读取远程 G 文件列表；"
+                f"已等待 {seconds} 秒。界面仍可正常操作。"
+            )
+        self._set_ssh_connection_status(message, "working")
+
+    @staticmethod
+    def _remote_rows_signature(rows):
+        """Return the visible remote-file metadata signature.
+
+        Refresh still asks the server for one read-only directory listing so a
+        changed file can be detected safely.  When name/size/mtime are exactly
+        unchanged, the GUI table is reused instead of creating thousands of
+        QTableWidgetItem objects again.
+        """
+        return tuple(
+            (item.name, int(item.size), int(item.mtime_epoch))
+            for item in rows
+        )
+
+    def _on_remote_g_files_loaded(self, rows, cfg):
+        try:
+            endpoint_signature = (
+                cfg["host"],
+                int(cfg["port"]),
+                cfg["username"],
+                cfg["remote_directory"],
+            )
+            same_endpoint = self.remote_list_signature == endpoint_signature
+            same_files = (
+                same_endpoint
+                and bool(self.remote_file_rows)
+                and self._remote_rows_signature(self.remote_file_rows)
+                == self._remote_rows_signature(rows)
+            )
+
+            current_names = {item.name for item in rows}
+            self.remote_selected_names.intersection_update(current_names)
+            self.remote_list_signature = endpoint_signature
+            self.cfg["ssh"] = cfg
+            self.cfg["input_source"] = "SSH"
+            save_settings(self.cfg)
+
+            if same_files:
+                # Important fast path: the server was checked, but nothing in
+                # the loaded G-file metadata changed. Reuse the existing rows,
+                # selection, search visibility, validation snapshot and large
+                # association table exactly as-is.
+                if self.language == "en_US":
+                    status = (
+                        "SSH/SFTP refresh completed; no remote G-file changes "
+                        f"detected. Reused the existing {len(rows)}-file list."
+                    )
+                    log_text = (
+                        f"SSH remote directory unchanged: {cfg['remote_directory']} | "
+                        f"*.g={len(rows)}; table rebuild skipped"
+                    )
+                else:
+                    status = (
+                        "SSH/SFTP 刷新完成；远程 G 文件没有变化。"
+                        f" 已复用当前 {len(rows)} 个文件列表。"
+                    )
+                    log_text = (
+                        f"SSH远程目录无变化：{cfg['remote_directory']} | "
+                        f"*.g={len(rows)}；已跳过表格重建"
+                    )
+                self._set_ssh_connection_status(status, "success")
+                self.log(log_text)
+                self._update_remote_count_label()
+                return
+
+            self._set_ssh_connection_status(
+                f"远程目录读取完成；检测到变化，正在更新 {len(rows)} 个 G 文件到列表……",
+                "working",
+            )
+            QApplication.processEvents()
+
+            self.remote_file_rows = rows
+
+            # Only a genuinely changed remote list reaches this expensive UI
+            # path. _rebuild_remote_file_table() also suppresses continuous
+            # header ResizeToContents work while the 2k+ rows are populated.
+            self._rebuild_remote_file_table()
+            self._apply_remote_file_filter(self.remote_search_edit.text())
+            self._invalidate_validation_snapshot("远程 G 文件列表已变化")
+            self._set_ssh_connection_status(
+                f"SSH/SFTP 连接正常；远程文件源为只读。"
+                f" 已加载 {len(rows)} 个 .g 文件。",
+                "success",
+            )
+            self.log(
+                f"SSH远程目录：{cfg['remote_directory']} | "
+                f"*.g={len(rows)}；已排除 .g.h/.g.data/.g.png"
+            )
+        except Exception as exc:
+            self._on_remote_g_files_failed(str(exc))
+
+    def _on_remote_g_files_failed(self, message):
+        self._set_ssh_connection_status(
+            f"读取远程 G 文件列表失败：{message}",
+            "error",
+        )
+        QMessageBox.critical(
+            self,
+            "读取远程 G 文件失败",
+            str(message),
+        )
+
+    def _on_remote_g_file_worker_finished(self):
+        self._remote_refresh_timer.stop()
+        self._remote_refresh_started_at = None
+        self.refresh_ssh_btn.setEnabled(True)
+        worker = self.remote_list_worker
+        self.remote_list_worker = None
+        if worker is not None:
+            worker.deleteLater()
 
     def download_selected_remote_g_files(self):
         selected=self._selected_remote_files()
@@ -2832,10 +3060,19 @@ class MainWindow(QMainWindow):
         recreating thousands of QTableWidgetItem objects on the GUI thread.
         """
         table = self.remote_file_table
+        header = table.horizontalHeader()
         self._remote_table_populating = True
         table.blockSignals(True)
         table.setUpdatesEnabled(False)
         try:
+            # QHeaderView.ResizeToContents is expensive while thousands of
+            # items are inserted because Qt may repeatedly recalculate size
+            # hints. Temporarily make every column non-auto-resizing, populate
+            # once, then calculate content widths once at the end (the same
+            # pattern used by GFileStudio's fast remote-file table refresh).
+            for column in range(table.columnCount()):
+                header.setSectionResizeMode(column, QHeaderView.Interactive)
+
             table.clearContents()
             table.setRowCount(len(self.remote_file_rows))
             self._remote_row_by_name = {}
@@ -2865,6 +3102,13 @@ class MainWindow(QMainWindow):
                     item = QTableWidgetItem(str(value))
                     item.setToolTip(str(value))
                     table.setItem(row_index, column, item)
+
+            # One content-width calculation after all rows exist. The file-name
+            # column then stretches to use the remaining space; the other
+            # columns retain their calculated widths without continuous
+            # ResizeToContents recalculation during later refreshes.
+            table.resizeColumnsToContents()
+            header.setSectionResizeMode(1, QHeaderView.Stretch)
         finally:
             table.setUpdatesEnabled(True)
             table.blockSignals(False)
@@ -3788,10 +4032,10 @@ class MainWindow(QMainWindow):
                 self.association_table.setItem(row_index, 0, check_item)
 
                 if module_id == "RMU":
-                    current_text = str(
+                    current_text = self._rt(str(
                         row.get("model_link_status", "")
                         or (self._t("已关联") if row.get("model_linked") == "YES" else self._t("未关联"))
-                    )
+                    ))
                     values = [
                         row["_file_name"], row["_frame_index"], row.get("rmu_name", ""),
                         row.get("object_type", ""),
@@ -3881,20 +4125,31 @@ class MainWindow(QMainWindow):
                 for row in range(self.association_table.rowCount())
                 if not self.association_table.isRowHidden(row)
             ) if hasattr(self, "association_table") else 0
-            suffix = (
-                f"；当前显示 {visible_count} 行"
-                if filter_text
-                else ""
+            is_feeder = (
+                str(self.module_combo.currentData() or "").upper() == "FEEDER"
             )
-            unit = (
-                "个馈线对象"
-                if str(self.module_combo.currentData() or "").upper() == "FEEDER"
-                else "个设备"
-            )
-            self.selection_count_label.setText(
-                f"已选择 {selected_count} {unit} / "
-                f"可关联 {total_candidates} {unit}{suffix}"
-            )
+            if self.language == "en_US":
+                unit = "feeder objects" if is_feeder else "devices"
+                suffix = (
+                    f"; visible {visible_count} rows"
+                    if filter_text
+                    else ""
+                )
+                self.selection_count_label.setText(
+                    f"Selected {selected_count} {unit} / "
+                    f"Eligible {total_candidates} {unit}{suffix}"
+                )
+            else:
+                suffix = (
+                    f"；当前显示 {visible_count} 行"
+                    if filter_text
+                    else ""
+                )
+                unit = "个馈线对象" if is_feeder else "个设备"
+                self.selection_count_label.setText(
+                    f"已选择 {selected_count} {unit} / "
+                    f"可关联 {total_candidates} {unit}{suffix}"
+                )
 
         module_id = str(self.module_combo.currentData() or "")
         module = self.modules.get(module_id)
@@ -4181,16 +4436,28 @@ class MainWindow(QMainWindow):
         target_label = "馈线对象" if module_id == "FEEDER" else "设备图元"
 
         if module_id.upper() == "RMU":
-            message = (
-                f"本次将只处理已勾选的 {change_count} 个{target_label}。\n"
-                f"涉及 G 文件：{selected_file_count} 个\n"
-                f"候选状态：{status_summary}\n\n"
-                "执行阶段不会重新扫描整张 G 图，也不会重新循环全部环网柜。"
-                "程序只会对这些设备所属环网柜和设备做轻量数据库复核，"
-                "然后按 XML ID 精确写回 Workspace 安全副本。\n\n"
-                "最终 HTML / CSV 只汇报本次选中的环网柜和设备。\n\n"
-                "是否确认执行？"
-            )
+            if self.language == "en_US":
+                message = (
+                    f"This run will process only the {change_count} selected device objects.\n"
+                    f"G files involved: {selected_file_count}\n"
+                    f"Candidate status: {status_summary}\n\n"
+                    "The execution stage will not rescan the entire G drawing or iterate through all RMUs again. "
+                    "Only the RMUs and devices containing the selected objects will receive lightweight database revalidation, "
+                    "followed by precise XML-ID write-back to the Workspace safe copy.\n\n"
+                    "The final HTML / CSV reports will include only the RMUs and devices selected in this run.\n\n"
+                    "Proceed with model association?"
+                )
+            else:
+                message = (
+                    f"本次将只处理已勾选的 {change_count} 个{target_label}。\n"
+                    f"涉及 G 文件：{selected_file_count} 个\n"
+                    f"候选状态：{status_summary}\n\n"
+                    "执行阶段不会重新扫描整张 G 图，也不会重新循环全部环网柜。"
+                    "程序只会对这些设备所属环网柜和设备做轻量数据库复核，"
+                    "然后按 XML ID 精确写回 Workspace 安全副本。\n\n"
+                    "最终 HTML / CSV 只汇报本次选中的环网柜和设备。\n\n"
+                    "是否确认执行？"
+                )
         elif module_id.upper() == "FEEDER":
             feeder_settings = self.module_widgets[
                 module_id
@@ -4217,40 +4484,74 @@ class MainWindow(QMainWindow):
                     ).get("db_create_needed") == "YES"
                 )
             )
-            db_write_notice = (
-                f"\n数据库补齐：已启用；当前勾选中最多涉及 "
-                f"{planned_create_count} 条缺失馈线段。"
-                "\n执行时会再次查询数据库，只 INSERT 确实缺失的 "
-                "DMS_SECTION_DEVICE；不会 UPDATE / DELETE 已有设备。\n"
-                if create_enabled
-                else
-                "\n数据库补齐：未启用，不会创建缺失馈线段。\n"
-            )
-            message = (
-                f"本次将只处理已勾选的 {change_count} 个FeedLine 图元。\n"
-                f"涉及 G 文件：{selected_file_count} 个\n"
-                f"候选状态：{status_summary}\n"
-                f"{db_write_notice}\n"
-                "程序会重新确认当前数据库馈线段占用情况；如数据库数量不足且启用了补齐，"
-                "会先创建缺失馈线段并重新查询数据库，再计算 Expected KeyID。\n"
-                "FeedLine 只回写 app、p_ReportType、state、voltype、keyid 这 5 个属性；若原 G.facID 为空且通过文件名/人工输入唯一确定馈线，还会额外把根节点 facID 回写为最终 FEEDER_ID。原 facID 非空时绝不修改。\n\n"
-                "原始 G 文件和 SSH 服务器文件都不会被修改，"
-                "只修改 Workspace/g_output 安全副本。\n\n"
-                "是否确认执行？"
-            )
+            if self.language == "en_US":
+                db_write_notice = (
+                    f"\nDatabase completion: enabled; the current selection may require up to "
+                    f"{planned_create_count} missing feeder sections. "
+                    "The database will be queried again at execution time; only genuinely missing "
+                    "DMS_SECTION_DEVICE rows will be INSERTed. Existing devices will never be UPDATEd or DELETEd.\n"
+                    if create_enabled
+                    else
+                    "\nDatabase completion: disabled; missing feeder sections will not be created.\n"
+                )
+                message = (
+                    f"This run will process only the {change_count} selected FeedLine objects.\n"
+                    f"G files involved: {selected_file_count}\n"
+                    f"Candidate status: {status_summary}\n"
+                    f"{db_write_notice}\n"
+                    "The program will recheck current feeder-section occupancy in the database. If the database has insufficient sections and completion is enabled, "
+                    "the missing sections will be created first, the database will be queried again, and Expected KeyID will then be recalculated.\n"
+                    "FeedLine write-back is limited to app, p_ReportType, state, voltype, and keyid. If the original G.facID is empty and the feeder is uniquely resolved by file name or manual input, "
+                    "the root facID will also be written as the final FEEDER_ID. A non-empty original facID is never modified.\n\n"
+                    "Original G files and SSH server files will not be modified; only the Workspace/g_output safe copy is changed.\n\n"
+                    "Proceed with model association?"
+                )
+            else:
+                db_write_notice = (
+                    f"\n数据库补齐：已启用；当前勾选中最多涉及 "
+                    f"{planned_create_count} 条缺失馈线段。"
+                    "\n执行时会再次查询数据库，只 INSERT 确实缺失的 "
+                    "DMS_SECTION_DEVICE；不会 UPDATE / DELETE 已有设备。\n"
+                    if create_enabled
+                    else
+                    "\n数据库补齐：未启用，不会创建缺失馈线段。\n"
+                )
+                message = (
+                    f"本次将只处理已勾选的 {change_count} 个FeedLine 图元。\n"
+                    f"涉及 G 文件：{selected_file_count} 个\n"
+                    f"候选状态：{status_summary}\n"
+                    f"{db_write_notice}\n"
+                    "程序会重新确认当前数据库馈线段占用情况；如数据库数量不足且启用了补齐，"
+                    "会先创建缺失馈线段并重新查询数据库，再计算 Expected KeyID。\n"
+                    "FeedLine 只回写 app、p_ReportType、state、voltype、keyid 这 5 个属性；若原 G.facID 为空且通过文件名/人工输入唯一确定馈线，还会额外把根节点 facID 回写为最终 FEEDER_ID。原 facID 非空时绝不修改。\n\n"
+                    "原始 G 文件和 SSH 服务器文件都不会被修改，"
+                    "只修改 Workspace/g_output 安全副本。\n\n"
+                    "是否确认执行？"
+                )
         else:
-            message = (
-                f"本次将只处理已勾选的 {change_count} 个{target_label}。\n"
-                f"因校验不通过而跳过的{skip_label}：{skipped_count} 个。\n\n"
-                "原始 G 文件不会被修改。程序会复制全部选中 G 文件到 "
-                "Workspace/g_output，再只修改安全副本。\n"
-                "关联完成后，程序会立即重新校验这些安全副本，并生成与模型校验"
-                "同规格的 HTML / CSV 最终报告。\n\n"
-                "是否确认执行？"
-            )
+            if self.language == "en_US":
+                target_text = "feeder objects" if module_id == "FEEDER" else "device objects"
+                skip_text = "feeder files" if module_id == "FEEDER" else "RMUs"
+                message = (
+                    f"This run will process only the {change_count} selected {target_text}.\n"
+                    f"{skip_text} skipped by validation: {skipped_count}.\n\n"
+                    "Original G files will not be modified. All selected G files will be copied to Workspace/g_output, and only the safe copies will be changed.\n"
+                    "After association, the safe copies will be revalidated immediately and final HTML / CSV reports with the same specification as Model Validation will be generated.\n\n"
+                    "Proceed with model association?"
+                )
+            else:
+                message = (
+                    f"本次将只处理已勾选的 {change_count} 个{target_label}。\n"
+                    f"因校验不通过而跳过的{skip_label}：{skipped_count} 个。\n\n"
+                    "原始 G 文件不会被修改。程序会复制全部选中 G 文件到 "
+                    "Workspace/g_output，再只修改安全副本。\n"
+                    "关联完成后，程序会立即重新校验这些安全副本，并生成与模型校验"
+                    "同规格的 HTML / CSV 最终报告。\n\n"
+                    "是否确认执行？"
+                )
         reply = QMessageBox.question(
             self,
-            "确认执行模型关联",
+            self._t("确认执行模型关联"),
             message,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -4304,19 +4605,65 @@ class MainWindow(QMainWindow):
                         "没有找到已勾选设备对应的 G 文件，请重新执行模型校验。"
                     )
 
-            self.log("\n开始执行模型关联：重新验证 Oracle 数据库连接。")
-            db = OracleClient(self.current_db_config())
-            self.log(db.test_connection())
+            # Run the association backend in QThread so the GUI event loop keeps
+            # repainting continuously.  The validated file snapshot, settings,
+            # Oracle checks, module association decisions and write-back logic are
+            # exactly the same; only execution scheduling changes.  A nested Qt
+            # event loop preserves the existing sequential control flow while the
+            # busy/indeterminate progress bar remains animated.
+            def live_association_log(text):
+                self.log(text)
+                message_text = translate_runtime_text(text, self.language)
+                if message_text:
+                    last_line = str(message_text).splitlines()[-1].strip()
+                    if last_line:
+                        self.progress_message.setText(last_line[:220])
 
-            self.progress_bar.setValue(15)
-            self.progress_message.setText(self._t("正在写入安全 G 文件副本……"))
-            result_bundle = module.apply_association(
-                db,
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setTextVisible(False)
+            self.progress_message.setText(
+                self._t("正在执行模型关联，请查看实时日志……")
+            )
+
+            association_loop = QEventLoop(self)
+            association_result = {}
+            association_worker = AssociationExecutionWorker(
+                self.current_db_config(),
+                module,
                 files,
                 settings,
                 execution_preview,
-                self.log,
-                output_g_dir=Path(self.current_run_dir) / "g_output",
+                Path(self.current_run_dir) / "g_output",
+            )
+
+            def _association_completed(bundle):
+                association_result["bundle"] = bundle
+                association_loop.quit()
+
+            def _association_failed(exc):
+                association_result["error"] = exc
+                association_loop.quit()
+
+            association_worker.log.connect(live_association_log)
+            association_worker.completed.connect(_association_completed)
+            association_worker.failed.connect(_association_failed)
+            association_worker.start()
+            association_loop.exec()
+            association_worker.wait()
+            association_worker.deleteLater()
+
+            if "error" in association_result:
+                raise association_result["error"]
+            if "bundle" not in association_result:
+                raise RuntimeError(
+                    "模型关联后台任务异常结束，未返回执行结果。"
+                )
+            result_bundle = association_result["bundle"]
+
+            # Keep the same left-right busy indicator through report generation.
+            # Exact counts remain visible in the status text and Console logs.
+            self.progress_message.setText(
+                self._rt("模型关联写回完成，正在整理执行结果……")
             )
 
             total = int(result_bundle.get("applied_count", 0))
@@ -4352,8 +4699,9 @@ class MainWindow(QMainWindow):
                 }
                 self.progress_bar.setValue(90)
                 self.progress_message.setText(
-                    "正在生成本次模型关联执行报告……"
+                    self._rt("正在生成本次模型关联执行报告……")
                 )
+                QApplication.processEvents()
                 self.log(
                     (
                         "已完成已选馈线段的轻量数据库复核、剩余段重算与精确回写；"
@@ -4475,13 +4823,16 @@ class MainWindow(QMainWindow):
             self.cfg["last_run_dir"] = str(self.current_run_dir)
             save_settings(self.cfg)
 
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setTextVisible(True)
+            self.progress_bar.setFormat("%p%")
             self.progress_bar.setValue(100)
             self.progress_message.setText(
-                "模型关联完成，最终 HTML / CSV 报告已生成"
+                self._t("模型关联完成，最终 HTML / CSV 报告已生成")
             )
             self.workspace_status.show()
             self.workspace_status.setText(
-                "模型关联完成，最终报告已生成"
+                self._t("模型关联完成，最终报告已生成")
             )
             apply_status_style(self.workspace_status, True)
             QTimer.singleShot(3500, self.workspace_status.hide)
@@ -4534,30 +4885,44 @@ class MainWindow(QMainWindow):
             self.refresh_history_table()
 
             summary_box = QMessageBox(self)
-            summary_box.setWindowTitle("模型关联完成")
+            summary_box.setWindowTitle(self._t("模型关联完成"))
             summary_box.setIcon(QMessageBox.Information)
-            summary_box.setText(
-                f"模型关联处理完成。\n\n"
-                f"本次选择：{selected_total} 个{object_label}\n"
-                f"成功写回：{total} 个\n"
-                f"执行时跳过：{skipped_total} 个\n\n"
-                f"原始 G 文件未修改。\n"
-                f"修改记录：{change_log_csv}"
-            )
+            if self.language == "en_US":
+                selected_object_label = (
+                    "FeedLine objects" if is_feeder else "device objects"
+                )
+                summary_text = (
+                    "Model association processing completed.\n\n"
+                    f"Selected: {selected_total} {selected_object_label}\n"
+                    f"Written successfully: {total}\n"
+                    f"Skipped during execution: {skipped_total}\n\n"
+                    "Original G files were not modified.\n"
+                    f"Change log: {change_log_csv}"
+                )
+            else:
+                summary_text = (
+                    f"模型关联处理完成。\n\n"
+                    f"本次选择：{selected_total} 个{object_label}\n"
+                    f"成功写回：{total} 个\n"
+                    f"执行时跳过：{skipped_total} 个\n\n"
+                    f"原始 G 文件未修改。\n"
+                    f"修改记录：{change_log_csv}"
+                )
+            summary_box.setText(summary_text)
             open_dir_button = summary_box.addButton(
-                "打开结果目录",
+                self._t("打开结果目录"),
                 QMessageBox.ActionRole,
             )
             open_html_button = summary_box.addButton(
-                "打开 HTML",
+                self._t("打开 HTML"),
                 QMessageBox.ActionRole,
             )
             open_change_button = summary_box.addButton(
-                "打开修改记录",
+                self._t("打开修改记录"),
                 QMessageBox.ActionRole,
             )
             summary_box.addButton(
-                "关闭",
+                self._t("关闭"),
                 QMessageBox.AcceptRole,
             )
             summary_box.exec()
@@ -4569,7 +4934,12 @@ class MainWindow(QMainWindow):
                 self.open_artifact("change_log_csv")
 
         except Exception as exc:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setTextVisible(True)
+            self.progress_bar.setFormat("%p%")
+            self.progress_bar.setValue(0)
             self.progress_message.setText(self._t("模型关联失败"))
+            QApplication.processEvents()
             self.workspace_status.show()
             self.workspace_status.setText(self._t("模型关联失败"))
             apply_status_style(self.workspace_status, False)

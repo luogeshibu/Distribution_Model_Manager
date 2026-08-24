@@ -2180,3 +2180,19 @@ SSH 模式的硬规则：
 
 Searchable RMU and feeder HTML tables support both fuzzy text filtering and a single status-color filter. The two filters are combined, and the UI is localized for Simplified Chinese and English.
 
+
+## v4.1.32 运行体验
+
+模型关联和 G 文件安全回写在后台工作线程执行。任务进行期间进度条使用持续左右移动的 Busy 模式，精确对象数量通过状态文字与 Console 日志显示。该变更仅影响执行调度与界面反馈，不改变 RMU/馈线/Oracle/KeyID/回写业务规则。
+
+## v4.1.33 Console-adjacent progress
+The task progress panel is displayed inside the Current Run Console section, directly above the live Console output. Long association/write-back operations continue to use the indeterminate busy indicator from v4.1.32; exact object counts remain in the status text and Console log. This is a UI layout change only.
+
+
+## v4.1.35 Task Progress title styling
+The Console-adjacent Task Progress group keeps the v4.1.33 layout and v4.1.32 busy-progress behavior, but its title background now matches the white card so no pale-green title chip is visible. This is presentation-only.
+
+
+## v4.1.36 Remote refresh fast path
+
+`Refresh G File List` still performs one read-only SFTP directory listing so server-side changes can be detected safely. The returned list is compared by file name, size, and modification time. When unchanged, the existing GUI table is reused and the current validation/association view is not cleared. When changed, the remote table is populated in one batch with header auto-resizing disabled during insertion, followed by one content-width calculation.

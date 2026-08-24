@@ -1,3 +1,48 @@
+# v4.1.36
+
+- Optimized **Refresh G File List** only; no RMU/feeder/Oracle/write-back business rules changed.
+- After the read-only SFTP directory check, compares `(name, size, mtime)` with the currently loaded list. If unchanged, reuses the existing 2k+ row table, selection, search visibility, validation snapshot, and association table instead of rebuilding them.
+- When the remote list really changed, disables continuous `ResizeToContents` while rows are populated and calculates column widths only once after the batch, matching the fast table-update pattern used by GFileStudio.
+- Chinese and English refresh status messages both indicate whether the table rebuild was skipped.
+
+# v4.1.35
+
+- English UI presentation-only fix: `Apply Model Association` action buttons now size to the full translated caption instead of clipping.
+- Model-association confirmation/completion dialogs, final task status, and completion action buttons are fully localized in English mode.
+- No RMU/feeder validation, Oracle, KeyID, candidate-selection, association, or G-file write-back business logic changed.
+
+# Distribution Model Manager v4.1.34
+
+- UI-only refinement: Task Progress / 任务进度 title now uses the same white background as the Console card, removing the pale-green title patch.
+- No validation, Oracle, RMU, feeder, KeyID, association, write-back, SSH, report-data, or execution logic changed.
+
+# Distribution Model Manager v4.1.33
+
+- Model Association now executes Oracle revalidation, RMU/feeder association, and G-file write-back in a background QThread while the Qt GUI event loop remains responsive.
+- The association progress bar stays in indeterminate/busy mode (left-right animation) for the whole association/write-back/report phase; exact counts remain in the status text and Console log.
+- Completion restores the normal percentage progress bar at 100%; failure restores it at 0%.
+- This is execution scheduling/presentation only. Validated snapshots, Oracle queries, RMU/feeder decisions, KeyID calculation, target selection, write-back attributes, and report data rules are unchanged.
+- Simplified Chinese and English status text are both supported.
+
+## v4.1.31
+
+- SSH remote G-file refresh now performs connection/SFTP directory listing in a background QThread so slow `listdir_attr` operations no longer freeze the Qt GUI.
+- Refresh status now reports elapsed wait time while the remote read is running; the refresh button is temporarily disabled to prevent duplicate refresh jobs.
+- Remote file selection/filtering, read-only SSH behavior, RMU/feeder validation, Oracle logic, KeyID calculation and G-file write-back rules are unchanged.
+- Chinese and English refresh status text are both supported.
+
+- Optimized G-file bulk write-back by indexing requested `(tag, XML ID)` targets once instead of rescanning the complete G file for every selected object.
+- Added live batch write-back progress logs for large RMU/feeder associations.
+- No RMU/feeder validation, Oracle matching, KeyID calculation, association decision, or write-back attribute rules were changed.
+
+## v4.1.29
+
+- Model Association now repaints the console and progress message continuously during synchronous execution.
+- RMU execution logs the current RMU, safe-copy stage, and G-file write-back stage in real time.
+- Feeder execution logs the current feeder region, safe-copy stage, and G-file write-back stage in real time.
+- Presentation/progress only: no RMU, feeder, Oracle, KeyID, validation, allocation, or write-back decision logic changed.
+- Chinese and English runtime messages are both supported.
+
 # v4.1.28
 
 - Added an independent status-color filter to every searchable HTML report table.
@@ -1719,3 +1764,7 @@ All notable changes to Distribution Model Manager are documented here.
 ### Packaging
 - Retained a dedicated PyInstaller hook for `oracledb`.
 - Build fails if the Oracle dependency is not found in packaged output.
+## v4.1.33
+- UI only: moved Task Progress into the Current Run Console area so the busy indicator and live status remain visible beside execution logs.
+- Kept the v4.1.32 background association worker and indeterminate/busy progress behavior unchanged.
+- No RMU, feeder, Oracle, KeyID, candidate-selection, or G-file write-back business logic changes.
