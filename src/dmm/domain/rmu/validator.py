@@ -1565,12 +1565,23 @@ class RmuValidator:
                 f"智能标识={','.join(smart_info.get('marker_types', [])) or '-'}"
             )
             if not type_info.get("consistent", True):
-                self.log(
-                    f"  RMU类型交叉校验不一致："
-                    f"图内文字={type_info.get('text_type')}；"
-                    f"devref={type_info.get('devref_type')}；"
-                    "最终按devref类型。"
-                )
+                if type_info.get("devref_status") != "PASS":
+                    self.log(
+                        f"  RMU devref模板结构校验异常："
+                        f"图内文字={type_info.get('text_type')}；"
+                        f"devref类型={type_info.get('devref_type')}；"
+                        f"Y类模板={','.join(type_info.get('devref_templates_y', [])) or '-'}；"
+                        f"Q类模板={','.join(type_info.get('devref_templates_q', [])) or '-'}；"
+                        f"原因={type_info.get('devref_reason') or '-'}；"
+                        f"最终类型来源={type_info.get('source', 'UNRESOLVED')}。"
+                    )
+                else:
+                    self.log(
+                        f"  RMU类型交叉校验不一致："
+                        f"图内文字={type_info.get('text_type')}；"
+                        f"devref={type_info.get('devref_type')}；"
+                        "最终按有效devref类型。"
+                    )
 
             rmu_result = {
                 "frame_index": index,
@@ -1588,11 +1599,25 @@ class RmuValidator:
                     ""
                     if type_info.get("consistent")
                     else (
-                        "RMU_TYPE_CROSS_CHECK_MISMATCH: "
-                        f"环网柜={{RMU_NAME}}；"
-                        f"柜内Y/Q文字类型={type_info.get('text_type', 'UNKNOWN')}；"
-                        f"devref类型={type_info.get('devref_type', 'UNKNOWN')}；"
-                        "最终采用devref类型，请检查该环网柜的Y/Q文字命名与开关devref模板是否一致。"
+                        (
+                            "RMU_DEVREF_TEMPLATE_INVALID: "
+                            f"环网柜={{RMU_NAME}}；"
+                            "仅检查柜内CBreakerDis，ZhaiWaiJieDiDaoZha等其它图元不参与；"
+                            f"Y类devref模板={','.join(type_info.get('devref_templates_y', [])) or '-'}；"
+                            f"Q类devref模板={','.join(type_info.get('devref_templates_q', [])) or '-'}；"
+                            f"devref类型={type_info.get('devref_type', 'UNKNOWN')}；"
+                            f"原因={type_info.get('devref_reason') or '-'}；"
+                            f"最终类型来源={type_info.get('source', 'UNRESOLVED')}。"
+                            "请检查同类Y/Q开关是否混用了不同devref模板。"
+                        )
+                        if type_info.get("devref_status") != "PASS"
+                        else (
+                            "RMU_TYPE_CROSS_CHECK_MISMATCH: "
+                            f"环网柜={{RMU_NAME}}；"
+                            f"柜内Y/Q文字类型={type_info.get('text_type', 'UNKNOWN')}；"
+                            f"devref类型={type_info.get('devref_type', 'UNKNOWN')}；"
+                            "最终采用有效devref类型，请检查该环网柜的Y/Q文字命名与开关devref模板是否一致。"
+                        )
                     )
                 ),
                 "rmu_type_labels": ", ".join(type_info.get("text_labels", [])),

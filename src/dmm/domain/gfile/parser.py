@@ -12,6 +12,7 @@ from dmm.config.constants import (
     BREAKER_LABEL_SEARCH_MAX_DISTANCE,
     BREAKER_LABEL_AMBIGUITY_DELTA,
 )
+from dmm.domain.gfile.xml_diagnostics import build_gfile_xml_error
 
 
 def _f(v, default=0.0):
@@ -154,18 +155,35 @@ class GParser:
         label_regex: str = r"^\d+$",
         max_distance: float = 120.0,
         overlap_tolerance: float = 20.0,
+        excluded_rmu_name_strings: Iterable[str] | str | None = None,
     ):
         self.required_rmu_tags = set(required_rmu_tags or {
             "CBreakerDis", "ZhaiWaiJieDiDaoZha", "BusDis"
         })
         self.label_re = re.compile(label_regex)
+        if isinstance(excluded_rmu_name_strings, str):
+            exclusion_values = re.split(r"[,;\n\r]+", excluded_rmu_name_strings)
+        else:
+            exclusion_values = list(excluded_rmu_name_strings or [])
+        self.excluded_rmu_name_strings = {
+            re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+            for value in exclusion_values
+            if str(value or "").strip()
+        }
         self.max_distance = float(max_distance)
         self.overlap_tolerance = float(overlap_tolerance)
 
     def parse(self, path: str | Path) -> ParsedG:
         path = Path(path)
-        tree = ET.parse(path)
-        root = tree.getroot()
+        # Strict XML parsing by design.  The parser obeys the source XML
+        # declaration and does not guess/fallback to another encoding.  Invalid
+        # exports are rejected with a detailed source-file diagnostic instead of
+        # being silently converted.
+        try:
+            tree = ET.parse(path)
+            root = tree.getroot()
+        except (ET.ParseError, UnicodeError, LookupError) as exc:
+            raise build_gfile_xml_error(path, exc) from exc
         layer = root.find("Layer")
         if layer is None:
             raise ValueError(f"No <Layer> found in G file: {path}")
@@ -227,16 +245,34 @@ class GParser:
     def classify_rmu_type(self, parsed: ParsedG, frame: RmuFrame | GObject) -> Dict[str, object]:
         """Identify RMU cabinet type such as 2L1T.
 
-        Field workflow rule (v4.1.4):
-        1. Independently calculate the cabinet type from Text/DText labels
-           inside the RMU rectangle: Y* -> L, Q* -> T.
-        2. Independently calculate the cabinet type from CBreakerDis.devref:
-           * contains Load_Breaker    -> L
-           * contains Circuit_Breaker -> T
-        3. When both sources exist and disagree, devref is authoritative for
-           the final RMU type.  The text/devref mismatch is still exposed as
-           a WARN diagnostic for engineering review.
-        4. When only one source exists, use the available source.
+        Field workflow rule (v4.1.21):
+        1. Text/DText inside the RMU rectangle remains one independent source:
+           visible Y* labels count as L ways and Q* labels count as T ways.
+        2. The devref source ONLY inspects ``CBreakerDis`` objects.  Ground
+           disconnectors (``ZhaiWaiJieDiDaoZha``), BusDis and every other
+           object type are intentionally excluded.
+        3. No site-specific devref keywords are interpreted.  The program does
+           not care whether a template is named ``Load_Breaker``, ``RMU_LBS``,
+           ``Circuit_Breaker``, ``RMU_BRK`` or anything else.  It only checks
+           the structural relationship inside this RMU:
+
+             * all Y-way CBreakerDis objects must use one identical devref
+               template;
+             * all Q-way CBreakerDis objects must use one identical devref
+               template;
+             * when both Y and Q groups exist, their templates must differ so
+               that the two classes are actually distinguishable.
+
+           The Y/Q role is taken first from the CBreakerDis ``p_NameString``
+           (Y1/Y2/... or Q1/Q2/...).  If a particular element does not carry a
+           usable p_NameString, its already-supported visible graphical name is
+           used only as a fallback for determining that element's Y/Q role.
+        4. If the devref structure is complete and valid, its type participates
+           in the normal text/devref cross-check.  When text and devref disagree
+           the valid devref result is authoritative, preserving the existing
+           field rule.  If the devref structure itself is ambiguous/incomplete,
+           it is reported as UNKNOWN and is never guessed from template words;
+           a valid text result may still be used as the final display type.
         """
         rect = frame.frame if isinstance(frame, RmuFrame) else frame
         inside = [
@@ -255,6 +291,7 @@ class GParser:
         # Avoid duplicate rendering labels for one way, and keep a stable
         # engineering order: Y1,Y2,Y3... then Q1,Q2,Q3...
         text_labels = list(dict.fromkeys(text_labels))
+
         def _way_key(value: str):
             prefix = 0 if value.startswith("Y") else 1
             try:
@@ -262,33 +299,159 @@ class GParser:
             except Exception:
                 number = 10**9
             return (prefix, number)
+
         text_labels = sorted(text_labels, key=_way_key)
         text_l = sum(1 for value in text_labels if value.startswith("Y"))
         text_t = sum(1 for value in text_labels if value.startswith("Q"))
 
+        # ------------------------------------------------------------------
+        # DEVREF structural classification
+        # ------------------------------------------------------------------
+        # IMPORTANT: only CBreakerDis participates.  In particular,
+        # ZhaiWaiJieDiDaoZha devrefs such as RMU_ES must never affect 2L1T /
+        # 3L1T cabinet-type inference.
         breakers = [obj for obj in inside if obj.tag == "CBreakerDis"]
-        devref_l = 0
-        devref_t = 0
-        devref_unknown = []
-        for obj in breakers:
-            devref = (obj.attrs.get("devref") or "").strip()
-            lower = devref.lower()
-            if "load_breaker" in lower:
-                devref_l += 1
-            elif "circuit_breaker" in lower:
-                devref_t += 1
-            else:
-                devref_unknown.append({
-                    "xml_id": obj.xml_id,
-                    "xml_p_name_string": obj.xml_p_name_string,
-                    "devref": devref,
-                })
 
+        def _canonical_devref(value: str) -> str:
+            """Return a comparable template name without interpreting it.
+
+            D5000 references normally look like:
+              #RMU_LBS_NON.zwk.icn.g:RMU_LBS_NON
+              #Load_Breaker_Switch_SMART.zwk.icn.g:Load_Breaker_Switch_SMART
+
+            We keep only the referenced terminal template token when possible.
+            Escaped underscores/colons are normalized for defensive equality
+            comparison.  No semantic keyword mapping is performed.
+            """
+            raw = (value or "").strip()
+            if not raw:
+                return ""
+            raw = raw.replace(r"\_", "_").replace(r"\:", ":")
+            terminal = raw.rsplit(":", 1)[-1].strip() if ":" in raw else raw
+            terminal = terminal.lstrip("#").strip()
+            if ".zwk.icn.g" in terminal.lower():
+                # Handles a non-standard reference that has no ':' suffix.
+                terminal = re.split(r"\.zwk\.icn\.g", terminal, flags=re.I)[0]
+            return terminal.strip()
+
+        # Determine each CBreakerDis logical Y/Q role.  p_NameString is an
+        # element-local structural cue; graphical text is only a fallback when
+        # that cue is absent/non-standard.
+        graphical_names = None
+
+        def _breaker_role(obj: GObject) -> str:
+            nonlocal graphical_names
+            raw_name = (obj.xml_p_name_string or "").strip().upper()
+            if re.fullmatch(r"Y\d+", raw_name):
+                return "Y"
+            if re.fullmatch(r"Q\d+", raw_name):
+                return "Q"
+            if graphical_names is None:
+                try:
+                    graphical_names = self.resolve_breaker_graphical_names(
+                        parsed,
+                        frame,
+                        breakers,
+                    )
+                except Exception:
+                    graphical_names = {}
+            info = graphical_names.get(obj.xml_id, {}) if graphical_names else {}
+            visible = (
+                str(info.get("name") or "").strip().upper()
+                if info.get("status") == "PASS"
+                else ""
+            )
+            if re.fullmatch(r"Y\d+", visible):
+                return "Y"
+            if re.fullmatch(r"Q\d+", visible):
+                return "Q"
+            return ""
+
+        devref_groups = {"Y": [], "Q": []}
+        devref_unknown = []
+        devref_issues = []
+        breaker_details = []
+
+        for obj in breakers:
+            role = _breaker_role(obj)
+            raw_devref = (obj.attrs.get("devref") or "").strip()
+            template = _canonical_devref(raw_devref)
+            detail = {
+                "xml_id": obj.xml_id,
+                "xml_p_name_string": obj.xml_p_name_string,
+                "role": role or "UNKNOWN",
+                "devref": raw_devref,
+                "template": template,
+            }
+            breaker_details.append(detail)
+
+            if not role:
+                devref_unknown.append(detail)
+                devref_issues.append(
+                    f"CBreakerDis XML ID={obj.xml_id or '-'} 无法确定Y/Q同类分组"
+                )
+                continue
+            if not template:
+                devref_unknown.append(detail)
+                devref_issues.append(
+                    f"{obj.xml_p_name_string or obj.xml_id or '-'} 的devref为空"
+                )
+                continue
+            devref_groups[role].append((template, detail))
+
+        def _unique_templates(role: str):
+            # case-insensitive equality, while retaining the first original
+            # spelling for report readability.
+            seen = {}
+            for template, _detail in devref_groups[role]:
+                seen.setdefault(template.casefold(), template)
+            return list(seen.values())
+
+        y_templates = _unique_templates("Y")
+        q_templates = _unique_templates("Q")
+
+        if len(y_templates) > 1:
+            devref_issues.append(
+                "Y类CBreakerDis的devref模板不一致：" + ", ".join(y_templates)
+            )
+        if len(q_templates) > 1:
+            devref_issues.append(
+                "Q类CBreakerDis的devref模板不一致：" + ", ".join(q_templates)
+            )
+        if (
+            len(y_templates) == 1
+            and len(q_templates) == 1
+            and y_templates[0].casefold() == q_templates[0].casefold()
+        ):
+            devref_issues.append(
+                "Y类与Q类CBreakerDis使用相同devref模板，无法通过devref区分两类开关："
+                + y_templates[0]
+            )
+
+        devref_l = len(devref_groups["Y"])
+        devref_t = len(devref_groups["Q"])
         breaker_count = len(breakers)
+        classified_breaker_count = devref_l + devref_t
+
+        # A usable devref type requires every CBreakerDis to have a role and a
+        # devref, internal homogeneity in each role group, and distinct Y/Q
+        # templates when both groups are present.
+        devref_complete = (
+            breaker_count > 0
+            and classified_breaker_count == breaker_count
+            and not devref_unknown
+            and len(y_templates) <= 1
+            and len(q_templates) <= 1
+            and not (
+                len(y_templates) == 1
+                and len(q_templates) == 1
+                and y_templates[0].casefold() == q_templates[0].casefold()
+            )
+        )
+        devref_found = devref_complete and (devref_l + devref_t) > 0
+
         text_found = (text_l + text_t) > 0
         text_complete = text_found and (text_l + text_t) == breaker_count
-        devref_found = (devref_l + devref_t) > 0
-        devref_complete = devref_found and (devref_l + devref_t) == breaker_count
 
         def fmt(l_count: int, t_count: int) -> str:
             parts = []
@@ -299,14 +462,8 @@ class GParser:
             return "".join(parts) or "UNKNOWN"
 
         text_type = fmt(text_l, text_t)
-        devref_type = fmt(devref_l, devref_t)
+        devref_type = fmt(devref_l, devref_t) if devref_found else "UNKNOWN"
 
-        # v4.1.4 field rule:
-        # - keep the two sources independent for cross-checking;
-        # - if both exist and disagree, DEVREF is authoritative;
-        # - if they agree, keep TEXT_YQ as the normal source label to avoid
-        #   changing otherwise-valid historical reports;
-        # - if only one source exists, use that source.
         if text_found and devref_found:
             if text_type == devref_type:
                 rmu_type = text_type
@@ -324,10 +481,28 @@ class GParser:
             rmu_type = "UNKNOWN"
             source = "UNRESOLVED"
 
-        consistent = (
-            not (text_found and devref_found)
-            or text_type == devref_type
-        )
+        if devref_found:
+            consistent = (
+                not text_found
+                or text_type == devref_type
+            )
+        else:
+            # CBreakerDis always exists in a recognized RMU frame.  If its
+            # devref structure cannot be validated, expose that as a cross-check
+            # warning rather than pretending the devref source passed.
+            consistent = False if breaker_count else True
+
+        if devref_found:
+            devref_status = "PASS"
+            devref_reason = "DEVREF_TEMPLATE_GROUPS_VALID"
+        else:
+            devref_status = "WARN"
+            devref_reason = (
+                "；".join(dict.fromkeys(devref_issues))
+                if devref_issues
+                else "DEVREF_TEMPLATE_GROUPS_INCOMPLETE"
+            )
+
         return {
             "rmu_type": rmu_type,
             "source": source,
@@ -337,9 +512,16 @@ class GParser:
             "text_labels": text_labels,
             "text_l_count": text_l,
             "text_t_count": text_t,
+            "text_complete": text_complete,
             "devref_l_count": devref_l,
             "devref_t_count": devref_t,
             "breaker_count": breaker_count,
+            "devref_complete": devref_complete,
+            "devref_status": devref_status,
+            "devref_reason": devref_reason,
+            "devref_templates_y": y_templates,
+            "devref_templates_q": q_templates,
+            "devref_breakers": breaker_details,
             "unknown_devrefs": devref_unknown,
         }
 
@@ -471,11 +653,28 @@ class GParser:
         value = self._text_value(obj)
         if not value or not any(ch.isalnum() for ch in value):
             return False
+
+        # User-configured exclusions are exact strings (case-insensitive after
+        # trimming/collapsing whitespace).  They are checked BEFORE the RMU
+        # name regex so operational annotations such as DAS/OK can be listed
+        # explicitly even when punctuation would already make them invalid.
+        exclusion_key = re.sub(r"\s+", " ", value.strip()).casefold()
+        if exclusion_key in self.excluded_rmu_name_strings:
+            return False
+
         if not self.label_re.fullmatch(value):
             return False
         compact = re.sub(r"\s+", "", value).upper()
         if re.fullmatch(r"Y\d+", compact) or re.fullmatch(r"Q\d+", compact):
             return False
+
+        # N.O.P = Normally Open Point.  It is an operating-status marker near
+        # an RMU, not an RMU cabinet name.  Field drawings use variants such as
+        # N.O.P / NOP / N-O-P / N_O_P, so normalize punctuation before testing.
+        status_token = re.sub(r"[\s._-]+", "", value).upper()
+        if status_token == "NOP":
+            return False
+
         if compact in {"SMART", "SMR", "G", "I"}:
             return False
         return True
@@ -525,9 +724,18 @@ class GParser:
                 if (
                     r.left - tol <= b.cx <= r.right + tol
                     and b.cy < r.top
-                    and gap >= -tol
                 ):
-                    score = max(0.0, gap) + axis_offset * 0.08
+                    if gap >= -tol:
+                        score = max(0.0, gap) + axis_offset * 0.08
+                    else:
+                        # Large-font Text objects may report a bounding box
+                        # that overlaps the RMU even though the visible label
+                        # and its center are clearly above the frame (e.g.
+                        # BABJ 38995).  Preserve the legacy edge-gap score for
+                        # normal labels and use center-gap only for this overlap
+                        # fallback.
+                        gap = r.top - b.cy
+                        score = max(0.0, gap) + axis_offset * 0.08
 
             elif direction == "bottom":
                 gap = b.top - r.bottom
@@ -535,9 +743,12 @@ class GParser:
                 if (
                     r.left - tol <= b.cx <= r.right + tol
                     and b.cy > r.bottom
-                    and gap >= -tol
                 ):
-                    score = max(0.0, gap) + axis_offset * 0.08
+                    if gap >= -tol:
+                        score = max(0.0, gap) + axis_offset * 0.08
+                    else:
+                        gap = b.cy - r.bottom
+                        score = max(0.0, gap) + axis_offset * 0.08
 
             elif direction == "left":
                 gap = r.left - b.right
@@ -545,9 +756,12 @@ class GParser:
                 if (
                     r.top - tol <= b.cy <= r.bottom + tol
                     and b.cx < r.left
-                    and gap >= -tol
                 ):
-                    score = max(0.0, gap) + axis_offset * 0.08
+                    if gap >= -tol:
+                        score = max(0.0, gap) + axis_offset * 0.08
+                    else:
+                        gap = r.left - b.cx
+                        score = max(0.0, gap) + axis_offset * 0.08
 
             elif direction == "right":
                 gap = b.left - r.right
@@ -555,9 +769,12 @@ class GParser:
                 if (
                     r.top - tol <= b.cy <= r.bottom + tol
                     and b.cx > r.right
-                    and gap >= -tol
                 ):
-                    score = max(0.0, gap) + axis_offset * 0.08
+                    if gap >= -tol:
+                        score = max(0.0, gap) + axis_offset * 0.08
+                    else:
+                        gap = b.cx - r.right
+                        score = max(0.0, gap) + axis_offset * 0.08
 
             return score, gap, axis_offset
 

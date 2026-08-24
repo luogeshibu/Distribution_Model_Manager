@@ -10,6 +10,7 @@ from dmm.domain.feeder.validator import FeederValidator, natural_section_key, in
 from dmm.domain.gfile.parser import GParser
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 from dmm.domain.feeder.topology import FeederDrawingTopologyClassifier
+from dmm.config.defaults import DEFAULT_RMU_NAME_EXCLUSIONS, DEFAULT_NAME_POSITIONS
 
 
 class FeederModelModule(ModelModule):
@@ -40,6 +41,8 @@ class FeederModelModule(ModelModule):
             feeder_table_id=int(
                 settings.get("feeder_table_id", 13500)
             ),
+            rmu_name_positions=settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS),
+            rmu_name_exclusions=settings.get("rmu_name_exclusions", DEFAULT_RMU_NAME_EXCLUSIONS),
             log=log_callback,
         )
 

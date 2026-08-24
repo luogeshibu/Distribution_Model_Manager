@@ -51,3 +51,43 @@
 8. 代码中不得增加 SSH `put/upload/remove/rename/delete/mkdir` 等写接口
 
 - [ ] RMU 名称未解析/解析异常时为红色 FAIL，且 RMU级关联阻断原因准确。
+
+- [ ] SSH 配置保存与启动恢复：自定义 host/port/username/password/remote_directory 后保存，重启可恢复。
+- [ ] SSH 大目录性能：加载 2000+ 个 G 文件后，搜索、全选当前结果、清空选择和搜索均应保持界面响应，不应出现“未响应”。
+- [ ] RMU devref 柜型识别仅统计 `CBreakerDis`；确认 `ZhaiWaiJieDiDaoZha/RMU_ES` 不参与。
+- [ ] 抽查至少一个吉达和一个麦加 RMU：Y 类 devref 同模板、Q 类 devref 同模板、Y/Q 模板不同；不得依赖 Load_Breaker/Circuit_Breaker/RMU_LBS/RMU_BRK 关键字。
+- [ ] 人工制造同一 RMU 内 Y1/Y2 devref 不同的样例，确认 devref 类型为 UNKNOWN/WARN，程序不猜测。
+
+## 双语发布检查
+
+- [ ] 设置页切换 `简体中文 / English` 后主界面即时刷新，无需重启。
+- [ ] 保存语言后重启程序，确认自动恢复最后一次语言选择。
+- [ ] 抽查数据库、SSH、RMU、馈线页面的按钮、标签、提示框和运行日志。
+- [ ] 中文模式导出中文 HTML/CSV；English 模式导出英文标题、表头、筛选文字和英文报告文件名。
+- [ ] `PASS / FAIL / RELINK / CREATE_PENDING`、错误码、KeyID、FEEDER_ID、BV_ID、Domain、设备名称和数据库工程数据保持原值。
+
+
+## v4.1.25 English Release / RMU Name Checks
+
+- [ ] Switch to English and verify the Windows title bar, header brand/edition, Run History page/table, Settings/Safety Policy, Help/About and current-model help contain no Chinese UI copy.
+- [ ] Export one RMU and one feeder HTML/CSV report in English; headers and user-facing explanations are English while engineering codes/IDs remain unchanged.
+- [ ] `JED-CTL-AMR.sln.pic.g`: RMU frame XML ID `2000597` must resolve name `66 B` from the top label.
+- [ ] Verify `66 B` and `123 C2` are accepted, while arbitrary spaced labels such as `RMU 42646` remain rejected as RMU name candidates.
+
+## v4.1.26 English Console Translation Checks
+
+- [ ] English mode: RMU validation Console lines contain no Chinese, including RMU index, frame XML ID, type source, SMART markers and devref cross-check diagnostics.
+- [ ] English mode: Feeder validation/association, SSH snapshot and strict XML diagnostic messages contain no Chinese presentation text.
+- [ ] Verify engineering/status tokens and values remain unchanged: PASS/FAIL/RELINK, KeyID, FEEDER_ID, XML ID, DB IDs, file names and raw engineering values.
+- [ ] Confirm Chinese mode output is unchanged.
+- [ ] Confirm no RMU/feeder/Oracle/SSH/validation/association/write-back business source file changed for this release.
+
+
+## v4.1.27 RMU Name Recognition Checks
+
+- [ ] RMU Recognition shows the configurable RMU Name Exclusion Strings field in Chinese and English.
+- [ ] Default exclusions contain N.O.P / NOP / N-O-P / N_O_P / SFI / DAS/OK.
+- [ ] Exclusions use exact full-string matching; similar but different engineering names are not removed.
+- [ ] `JED-CTL-BABJ.sln.pic.g` frame XML ID 2001193 resolves top label 38995.
+- [ ] Existing normal RMU label assignment keeps legacy edge-gap scoring.
+- [ ] RMU/feeder/database/SSH/write-back business rules remain unchanged.

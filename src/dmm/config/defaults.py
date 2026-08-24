@@ -34,7 +34,17 @@ DEFAULT_NAME_POSITIONS = {
     "bottom": False,
 }
 
+DEFAULT_RMU_NAME_EXCLUSIONS = [
+    "N.O.P",
+    "NOP",
+    "N-O-P",
+    "N_O_P",
+    "SFI",
+    "DAS/OK",
+]
+
 DEFAULT_SETTINGS = {
+    "language": "zh_CN",
     "model_module": "RMU",
     "operation": "VALIDATE",
     "input_source": "LOCAL",
@@ -51,6 +61,7 @@ DEFAULT_SETTINGS = {
     "last_run_dir": "",
     "db": DEFAULT_DB_CONFIG,
     "rmu_name_positions": DEFAULT_NAME_POSITIONS,
+    "rmu_name_exclusions": DEFAULT_RMU_NAME_EXCLUSIONS,
     "device_rules": {},
     "breaker_name_source": "GRAPHICAL_TEXT",
     "feeder_table_id": 13500,

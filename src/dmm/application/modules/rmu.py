@@ -11,7 +11,7 @@ from dmm.config.constants import (
     RMU_LABEL_EDGE_TOLERANCE,
     RMU_LABEL_PATTERN,
 )
-from dmm.config.defaults import DEFAULT_DEVICE_RULES, DEFAULT_NAME_POSITIONS
+from dmm.config.defaults import DEFAULT_DEVICE_RULES, DEFAULT_NAME_POSITIONS, DEFAULT_RMU_NAME_EXCLUSIONS
 from dmm.domain.gfile.parser import GParser
 from dmm.domain.rmu.validator import RmuValidator, KEYID_STEP, norm, int_or_none
 from dmm.infrastructure.gfile.writeback import GWriteBackService
@@ -33,6 +33,9 @@ class RmuModelModule(ModelModule):
             label_regex=RMU_LABEL_PATTERN,
             max_distance=RMU_LABEL_SEARCH_MAX_DISTANCE,
             overlap_tolerance=RMU_LABEL_EDGE_TOLERANCE,
+            excluded_rmu_name_strings=settings.get(
+                "rmu_name_exclusions", DEFAULT_RMU_NAME_EXCLUSIONS
+            ),
         )
         return RmuValidator(
             db,

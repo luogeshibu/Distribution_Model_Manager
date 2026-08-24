@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from dmm.i18n import tr, translate_runtime_text
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QGroupBox,
     QGridLayout, QSpinBox, QPushButton, QSizePolicy,
@@ -91,6 +93,7 @@ class FeederSettingsWidget(QWidget):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.language = str(config.get("language", "zh_CN") or "zh_CN")
 
         self.setSizePolicy(
             QSizePolicy.Expanding,
@@ -351,9 +354,12 @@ class FeederSettingsWidget(QWidget):
                 self._facid_reverting = False
             QMessageBox.information(
                 self,
-                "馈线 facID 已锁定",
-                f"当前 G 文件 facID={locked}，馈线归属已经由 facID 确定。\n\n"
-                "禁止使用文件名或人工输入重新查询馈线。"
+                tr("馈线 facID 已锁定", self.config.get("language", self.language)),
+                translate_runtime_text(
+                    f"当前 G 文件 facID={locked}，馈线归属已经由 facID 确定。\n\n"
+                    "禁止使用文件名或人工输入重新查询馈线。",
+                    self.config.get("language", self.language),
+                )
             )
             return
         self._sync_manual_enabled()
@@ -372,12 +378,16 @@ class FeederSettingsWidget(QWidget):
             self.feeder_resolution_mode.setEnabled(True)
             self.manual_feeder_name.clear()
             self.manual_feeder_name.setEnabled(False)
+            lang = self.config.get("language", self.language)
             self.manual_feeder_name.setPlaceholderText(
-                "当前 G 文件 facID 非空，禁止人工输入"
+                tr("当前 G 文件 facID 非空，禁止人工输入", lang)
             )
             self.facid_policy_notice.setText(
-                f"检测到 G.facID={value}：馈线已由 facID 强制锁定。"
-                "文件名和人工输入禁止参与查询。"
+                translate_runtime_text(
+                    f"检测到 G.facID={value}：馈线已由 facID 强制锁定。"
+                    "文件名和人工输入禁止参与查询。",
+                    lang,
+                )
             )
             self.facid_policy_notice.setStyleSheet(
                 "background:#E8F7F1;color:#006B52;"
@@ -386,12 +396,16 @@ class FeederSettingsWidget(QWidget):
             )
         else:
             self.feeder_resolution_mode.setEnabled(True)
-            self.manual_feeder_name.setPlaceholderText("例如：AJWD 43")
+            lang = self.config.get("language", self.language)
+            self.manual_feeder_name.setPlaceholderText(tr("例如：AJWD 43", lang))
             self._sync_manual_enabled()
             self.facid_policy_notice.setText(
-                "当前 G.facID 为空：可选择文件名或人工输入。"
-                "名称必须精准匹配；AJWD 6 与 AJWD 06 不等价。"
-                "执行关联成功后，会把最终 FEEDER_ID 回写到 G 根节点 facID。"
+                tr(
+                    "当前 G.facID 为空：可选择文件名或人工输入。"
+                    "名称必须精准匹配；AJWD 6 与 AJWD 06 不等价。"
+                    "执行关联成功后，会把最终 FEEDER_ID 回写到 G 根节点 facID。",
+                    lang,
+                )
             )
             self.facid_policy_notice.setStyleSheet(
                 "background:#FFF7E6;color:#8A5A00;"

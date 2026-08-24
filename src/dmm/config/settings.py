@@ -21,6 +21,8 @@ def load_settings() -> dict:
     for key, value in saved.items():
         if key == "db" and isinstance(value, dict):
             settings["db"].update(value)
+        elif key == "ssh" and isinstance(value, dict):
+            settings["ssh"].update(value)
         elif key == "rmu_name_positions" and isinstance(value, dict):
             settings["rmu_name_positions"].update(value)
         else:

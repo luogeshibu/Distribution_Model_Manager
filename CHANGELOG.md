@@ -1,3 +1,85 @@
+# v4.1.27
+
+- Added configurable RMU name exclusion strings in RMU Recognition. Default exclusions: `N.O.P`, `NOP`, `N-O-P`, `N_O_P`, `SFI`, `DAS/OK`. Matching is exact (case-insensitive after whitespace normalization), not substring-based.
+- The exclusion list is saved with workspace settings and is applied consistently to RMU name recognition, including feeder-side RMU anchor analysis.
+- Fixed large-font RMU labels whose XML Text bounding box overlaps the RMU frame edge even though the text center is clearly on the selected side. Normal labels keep the previous edge-gap scoring; center-gap is used only as an overlap fallback.
+- Verified the supplied `JED-CTL-BABJ.sln.pic.g`: RMU frame XML ID `2001193` now owns label `38995` (Text XML ID `8001222`) from the Top direction.
+- Added Chinese/English UI strings for the new exclusion setting.
+- No database association, KeyID, devref, feeder, SSH, or write-back rules were changed.
+
+# v4.1.26
+
+- English-mode Console, progress messages, validation diagnostics, feeder/RMU runtime messages, SSH snapshot messages, and strict XML diagnostics are now translated at the presentation layer.
+- No business logic changed: RMU/feeder recognition, Oracle queries/writes, SSH behavior, validation rules, association rules, KeyID calculation, report data, and G-file write-back remain identical to v4.1.25.
+- Engineering/status codes and raw engineering values remain untranslated.
+- Added regression coverage that fails if user-visible Console log literals still contain Chinese after English translation.
+
+# v4.1.25
+
+- English release hardening: English mode removes the remaining Chinese presentation text reported in the header edition label, Run History, Settings/Safety Policy, About information and current-model help.
+- `QApplication` application/display name now follows the selected UI language so the Windows title bar does not append the Chinese product name in English mode.
+- Dynamic artifact buttons and selected feeder facID notices now follow the current language after an immediate language switch.
+- English CSV export localizes user-facing reason/action/status-description fields while preserving engineering codes, IDs, XML values and database data.
+- RMU name recognition adds a deliberately narrow field naming pattern for `number + space + suffix`, e.g. `66 B` / `123 C2`. Arbitrary descriptive labels with internal spaces remain rejected.
+- Real-file verification: `JED-CTL-AMR.sln.pic.g`, RMU frame XML ID `2000597`, uniquely receives the top label `66 B`; compared with v4.1.24, no other RMU name candidate changes.
+- Full regression: 194 passed, 1 skipped.
+
+# v4.1.24
+
+- 修复 SSH 远程 G 文件列表在点击“清空选择和搜索 / Clear Selection & Search”时的 UI 卡顿/Windows“未响应”问题。
+- 根因：v4.1.23 清空搜索后会在 GUI 主线程重新创建全部远程文件表格行；当目录包含 2000+ 个 G 文件时会同步创建数千个 QTableWidgetItem。
+- 远程文件表改为“刷新目录时创建一次，搜索时只隐藏/显示已有行”；清空按钮不再重建表格。
+- 批量清空/全选时暂停表格 signals 和 repaint，完成后一次刷新，避免每个 checkbox 单独触发 UI 更新。
+- 搜索输入增加 120 ms debounce，快速输入时不再每个字符立即遍历/刷新远程列表。
+- “全选当前结果 / Select Visible Results”仍严格只作用于当前可见搜索结果；“清空选择和搜索 / Clear Selection & Search”中英文行为保持一致。
+- SSH 远程目录仍只读，本次性能优化不会增加任何服务器访问或写操作。
+
+# v4.1.23
+
+- SSH 远程 G 文件列表删除“取消当前结果 / Unselect Visible Results”按钮，避免与全局清空操作重复。
+- 原“清空全部选择”升级为“清空选择和搜索 / Clear Selection & Search”：一次清空全部远程文件勾选状态、清空搜索关键字，并恢复完整文件列表。
+- “全选当前结果 / Select Visible Results”仍只勾选当前筛选可见结果。
+- 新增操作及输入变化提示同步支持中文/英文即时切换。
+- 保留 v4.1.22 全部 i18n、RMU、馈线、SSH 只读、严格 XML 校验与安全回写逻辑。
+
+# v4.1.22
+
+- 新增统一 i18n 国际化层，应用支持 `简体中文 / English` 两种语言并可在设置页面即时切换。
+- 语言选择保存到 Workspace 配置中的 `language` 字段，程序下次启动自动恢复最后一次选择。
+- 主导航、数据库/SSH 配置、模型工作区、RMU/馈线设置、常用提示与用户可见运行日志接入统一翻译。
+- RMU/馈线 HTML 报告支持中英文标题、表头、状态说明和筛选控件；CSV 报告支持中英文表头及英文文件名。
+- `PASS / FAIL / RELINK / CREATE_PENDING`、错误码、XML/G 图元类型、KeyID/FEEDER_ID/BV_ID/Domain 及数据库工程数据保持原值，不随 UI 语言翻译。
+- 保留 v4.1.21 的 RMU devref 模板结构识别、N.O.P 过滤和严格 XML 编码校验逻辑。
+
+# v4.1.21
+
+- RMU `devref` 柜型识别改为现场无关的模板结构判断，不再依赖 `Load_Breaker`、`Circuit_Breaker`、`RMU_LBS`、`RMU_BRK` 等任何固定名称。
+- `devref` 柜型统计严格只分析 RMU 矩形框内的 `CBreakerDis`；`ZhaiWaiJieDiDaoZha`（例如 `RMU_ES`）、`BusDis` 及其它图元完全不参与 2L1T/3L1T 判断。
+- Y 类 `CBreakerDis` 必须使用同一个 devref 模板，Q 类必须使用同一个 devref 模板；同时存在 Y/Q 时，两组模板必须不同，才能形成有效 devref 类型。
+- devref 名称只做规范化后相等性比较，不解释名称含义；支持吉达、麦加以及未来其它现场自定义图元库名称。
+- 同类模板混用、devref 缺失、Y/Q 使用相同模板或元素无法归入 Y/Q 时，`devref类型=UNKNOWN` 并输出 WARN，不根据关键字猜测类型；如图内 Y/Q 文字有效，则仅用文字类型作为最终显示类型。
+- 保留既有规则：当有效 devref 类型与图内文字类型都存在但不一致时，最终采用有效 devref 类型，同时保留交叉校验 WARN。
+- 真实文件回归：麦加样例 149 个 RMU（143×2L1T、6×3L1T）devref 结构全部通过；吉达 ADF-16 样例 5 个 RMU（3×2L1T、2×3L1T）全部通过；`RMU_ES` 进入柜型统计数量为 0。
+
+# v4.1.20
+
+- 保留 RMU 名称候选过滤 N.O.P/NOP 等 Normally Open Point 状态标识。
+- 撤销异常 G 文件的 UTF-8 -> GB18030 自动回退，不再猜测、转换或修复源文件编码。
+- XML 解析失败时输出详细诊断：文件名、声明编码、错误行列、原始字节、文本预览和处理建议。
+- 回写恢复标准 UTF-8 处理，异常编码文件必须先修复源 G 文件。
+
+# v4.1.19
+
+- RMU 名称候选过滤 N.O.P/NOP 等 Normally Open Point 状态标识。
+- 曾加入异常编码兼容逻辑；该逻辑已于 v4.1.20 撤销。
+
+# v4.1.18
+
+- SSH 只读文件源新增“保存 SSH 配置”按钮，支持保存用户自定义的 IP/主机、端口、用户名、密码和远程目录。
+- 保存后的 SSH 配置与 Oracle 数据库配置一样持久化到 Workspace 配置文件，下次启动自动恢复最后一次保存值。
+- SSH 配置读取改为与默认配置深度合并，后续新增 SSH 配置字段时旧配置不会覆盖掉新默认项。
+- 保存前增加 SSH 主机、端口、用户名和远程目录基础校验；保存配置不发起网络连接，也不会修改远程服务器。
+
 # v4.1.17
 
 - RMU 名称未解析/解析异常时继续检查柜内已有设备 KeyID，不再因 `rmu_name` 为空直接把正确设备误报为 `RMU_LINK_MISMATCH`。

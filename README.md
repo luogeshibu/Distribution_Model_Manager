@@ -1,4 +1,82 @@
-# 配网模型管理工具 v4.1.17
+# 配网模型管理工具 / Distribution Model Manager v4.1.27
+
+## v4.1.27: RMU Name Exclusions and Large-label Recognition
+
+- RMU Recognition now includes a configurable **RMU Name Exclusion Strings** field. Enter exact values separated by commas or semicolons, for example `N.O.P, NOP, SFI, DAS/OK`.
+- Defaults already include common operational annotations so they cannot become RMU-name candidates.
+- Matching is exact rather than substring-based: excluding `SFI` does not exclude `SFI-9001`.
+- Large-font labels are supported when the XML text bounding box overlaps the RMU border but the text center is still clearly in the selected name direction.
+- Chinese and English UI are both supported for this setting.
+
+
+
+## v4.1.26: English Console Translation Completion
+
+- English mode now translates runtime Console/progress/diagnostic presentation text without changing any model, database, SSH, validation, association, or write-back rules.
+- Engineering/status identifiers such as PASS/FAIL/RELINK, KeyID, FEEDER_ID, XML IDs, database IDs, file names, and raw values remain unchanged.
+
+## v4.1.25: English Release Completion + RMU `66 B` Name Support
+
+- English mode is treated as a release UI: header/title-bar edition text, Run History, Settings/Safety Policy, Help/current-model help, About and dynamic artifact controls are fully localized.
+- Engineering/status codes and raw G/Oracle values remain unchanged across languages.
+- RMU name filtering now accepts the narrow field form `number + space + suffix` such as `66 B`, while arbitrary labels such as `RMU 42646` remain excluded.
+- Verified against `JED-CTL-AMR.sln.pic.g`: frame XML ID `2000597` resolves `66 B` from the configured top direction.
+- Regression result: `194 passed, 1 skipped`.
+
+
+## v4.1.24：SSH 大目录筛选/清空性能优化 / SSH Large-Directory Performance
+
+- 修复远程目录包含 2000+ 个 G 文件时，“清空选择和搜索 / Clear Selection & Search”可能导致界面短暂无响应的问题。
+- 远程文件表现在只在“刷新 G 文件列表”后创建一次；搜索和清空只切换现有行的显示状态，不再重建数千个表格单元格。
+- 搜索输入加入短延迟合并（debounce），连续输入多个字符只执行最后一次筛选。
+- 批量全选/清空时暂时关闭表格信号和重绘，操作完成后统一刷新。
+- 中文和 English 模式同步保持相同操作逻辑和按钮文案。
+
+
+## v4.1.23：SSH 文件选择操作简化 / Simplified SSH Selection Controls
+
+- 删除 SSH 文件列表中的“取消当前结果 / Unselect Visible Results”按钮，减少与“清空”操作的功能重叠。
+- “清空全部选择”升级为“清空选择和搜索 / Clear Selection & Search”：一次清空所有已勾选远程 G 文件、清空搜索关键字，并恢复完整远程文件列表。
+- “全选当前结果 / Select Visible Results”继续只作用于当前搜索结果，不影响被筛选隐藏的文件。
+- 新增功能同步维护简体中文与 English 文案；工程数据与业务状态码保持不翻译。
+
+## v4.1.22：简体中文 / English 双语切换
+
+- 设置页新增“语言 / Language”，支持 `简体中文` 与 `English` 即时切换。
+- 最后一次语言选择保存到 Workspace 配置，重启程序后自动恢复。
+- 主界面、数据库/SSH、模型工作区、RMU/馈线配置、常用提示和用户可见日志使用统一 i18n 翻译层。
+- HTML/CSV 报告跟随当前语言输出标题、表头、筛选和说明。
+- 工程数据、数据库内容、XML 属性、设备名称、状态码与诊断代码保持原始值，不因语言切换被修改。
+
+
+## v4.1.21：RMU devref 柜型识别改为模板结构判断
+
+- 只分析环网柜矩形框内的 `CBreakerDis.devref`；`ZhaiWaiJieDiDaoZha` / `RMU_ES`、BusDis 等其它图元不参与柜型判断。
+- 不再识别 devref 名称中的业务关键字；无论现场使用 `Load_Breaker...`、`Circuit_Breaker...`、`RMU_LBS...`、`RMU_BRK...` 或其它名称，都只比较模板是否相同。
+- Y1/Y2/Y3... 属于 Y 类：同一个 RMU 内所有 Y 类 CBreakerDis 的 devref 必须一致；Q1/Q2... 属于 Q 类，同理必须一致。
+- 同时存在 Y/Q 时，两组 devref 模板必须不同；否则 devref 无法独立区分两类开关，报告为 `UNKNOWN/WARN`，不做关键字猜测。
+- 元素 Y/Q 角色优先使用 CBreakerDis 自身的 `p_NameString`，缺失时才回退使用已支持的图上 Y/Q 文字定位。
+- 有效 devref 类型继续与图内文字类型交叉校验；两者不一致时仍以有效 devref 类型为准。
+
+## v4.1.20：严格 XML 解析与异常编码诊断
+
+- 保留 RMU 名称候选对 `N.O.P` / `NOP` / `N-O-P` / `N_O_P` 等 Normally Open Point 状态文字的过滤。
+- 撤销 v4.1.19 的 GB18030 自动回退与混合编码兼容解析；G 文件继续严格遵守 XML 自身的编码声明，不对异常文件自动猜测、转换或修复编码。
+- 当 XML 解析失败时输出面向现场用户的详细诊断：文件名、XML 声明编码、解析器错误、行/列、附近原始字节/文本预览，以及“编码声明与实际字节不一致或存在非法 XML 字符”的修复建议。
+- 回写逻辑恢复标准 UTF-8 文本处理；异常编码 G 文件必须先由源系统重新导出或人工修复后再进入模型校验/关联。
+
+## v4.1.19：RMU N.O.P 过滤
+
+- RMU 名称候选明确排除 `N.O.P` / `NOP` / `N-O-P` / `N_O_P` 等 Normally Open Point 状态文字，避免误当环网柜名称。
+- v4.1.19 曾加入的异常编码兼容逻辑已在 v4.1.20 撤销。
+
+
+## v4.1.18：SSH 文件服务器配置可显式保存
+
+- SSH 文件源允许自定义 IP/主机、端口、用户名、密码和远程目录。
+- 点击“保存 SSH 配置”后写入 Workspace 配置，下次启动自动回填最后一次保存值。
+- 保存动作只写本地配置，不连接或修改 SSH 服务器；SSH 服务器仍严格只读。
+
 
 ## v4.1.17：RMU 名称未解析时用现有设备关联反推实际环网柜
 

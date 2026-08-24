@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import sys
+import re
 from pathlib import Path
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QGridLayout, QLabel, QCheckBox,
     QPushButton, QGroupBox, QSpinBox, QAbstractSpinBox,
-    QComboBox, QHBoxLayout, QSizePolicy,
+    QComboBox, QHBoxLayout, QSizePolicy, QLineEdit,
 )
 
-from dmm.config.defaults import DEFAULT_DEVICE_RULES, DEFAULT_NAME_POSITIONS
+from dmm.config.defaults import DEFAULT_DEVICE_RULES, DEFAULT_NAME_POSITIONS, DEFAULT_RMU_NAME_EXCLUSIONS
+from dmm.i18n import tr
 
 def _resource_dir():
     if getattr(sys, "frozen", False):
@@ -71,6 +73,7 @@ class NoWheelComboBox(QComboBox):
 class RmuSettingsWidget(QWidget):
     def __init__(self, config):
         super().__init__()
+        self.config = config
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
         root = QVBoxLayout(self)
@@ -97,7 +100,7 @@ class RmuSettingsWidget(QWidget):
 
         recog = QGroupBox("RMU 环网柜识别")
         recog.setMinimumWidth(330)
-        recog.setMinimumHeight(285)
+        recog.setMinimumHeight(355)
         rg = QGridLayout(recog)
         rg.setContentsMargins(14, 18, 14, 14)
         rg.setHorizontalSpacing(18)
@@ -113,14 +116,25 @@ class RmuSettingsWidget(QWidget):
             rg.addWidget(cb, 1 + idx // 2, idx % 2)
             self.pos_checks[pos] = cb
 
-        rg.addWidget(QLabel("开关名称来源"), 3, 0)
+        rg.addWidget(QLabel("环网柜名称排除字符串"), 3, 0, 1, 2)
+        self.name_exclusions_edit = QLineEdit()
+        saved_exclusions = config.get("rmu_name_exclusions", DEFAULT_RMU_NAME_EXCLUSIONS)
+        if isinstance(saved_exclusions, str):
+            saved_exclusions_text = saved_exclusions
+        else:
+            saved_exclusions_text = ", ".join(str(x) for x in saved_exclusions or [])
+        self.name_exclusions_edit.setText(saved_exclusions_text)
+        self.name_exclusions_edit.setPlaceholderText("例如：N.O.P, NOP, SFI, DAS/OK")
+        rg.addWidget(self.name_exclusions_edit, 4, 0, 1, 2)
+
+        rg.addWidget(QLabel("开关名称来源"), 5, 0)
         fixed_source = QLabel("环网柜内图上文字（固定）")
         fixed_source.setStyleSheet(
             "font-weight:700;color:#006B52;"
             "background:#EAF8F2;border:1px solid #B9DACD;"
             "border-radius:6px;padding:7px 9px;"
         )
-        rg.addWidget(fixed_source, 3, 1)
+        rg.addWidget(fixed_source, 5, 1)
 
         note = QLabel(
             "开关名称不再读取 XML p_NameString。CBreakerDis 仅使用环网柜内"
@@ -129,12 +143,12 @@ class RmuSettingsWidget(QWidget):
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#60756d;")
-        rg.addWidget(note, 4, 0, 1, 2)
-        rg.setRowStretch(5, 1)
+        rg.addWidget(note, 6, 0, 1, 2)
+        rg.setRowStretch(7, 1)
 
         rules_box = QGroupBox("RMU 设备数据库表与域配置")
         rules_box.setMinimumWidth(590)
-        rules_box.setMinimumHeight(285)
+        rules_box.setMinimumHeight(355)
         rules = QGridLayout(rules_box)
         rules.setContentsMargins(14, 18, 14, 14)
         rules.setHorizontalSpacing(12)
@@ -184,6 +198,7 @@ class RmuSettingsWidget(QWidget):
             self.domain_spins[tag].setValue(int(rule["domain"]))
         for pos, value in DEFAULT_NAME_POSITIONS.items():
             self.pos_checks[pos].setChecked(bool(value))
+        self.name_exclusions_edit.setText(", ".join(DEFAULT_RMU_NAME_EXCLUSIONS))
 
     def collect_settings(self):
         positions = {
@@ -191,7 +206,7 @@ class RmuSettingsWidget(QWidget):
             for key, checkbox in self.pos_checks.items()
         }
         if not any(positions.values()):
-            raise ValueError("请至少选择一个环网柜名称位置。")
+            raise ValueError(tr("请至少选择一个环网柜名称位置。", self.config.get("language", "zh_CN")))
 
         saved_rules = {}
         runtime_rules = {}
@@ -212,8 +227,16 @@ class RmuSettingsWidget(QWidget):
                 "description": default["description"],
             }
 
+        exclusion_text = self.name_exclusions_edit.text()
+        exclusion_values = [
+            item.strip()
+            for item in re.split(r"[,;\n\r]+", exclusion_text)
+            if item.strip()
+        ]
+
         return {
             "rmu_name_positions": positions,
+            "rmu_name_exclusions": exclusion_values,
             "breaker_name_source": "GRAPHICAL_TEXT",
             "device_rules": saved_rules,
             "_runtime_rules": runtime_rules,

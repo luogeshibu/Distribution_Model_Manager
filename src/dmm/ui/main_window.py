@@ -18,7 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QGuiApplication
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox,
+    QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox as QtMessageBox,
     QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QPlainTextEdit, QFrame, QStackedWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
@@ -34,6 +34,7 @@ from dmm.config.constants import (
     WORKSPACE_RETENTION_DAYS,
 )
 from dmm.config.settings import load_settings, save_settings
+from dmm.i18n import normalize_language, tr, translate_runtime_text, retranslate_qt_tree
 from dmm.infrastructure.database.oracle import OracleClient
 from dmm.infrastructure.reporting.writer import (
     flatten_device_rows, flatten_rmu_rows,
@@ -90,6 +91,47 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
+class QMessageBox(QtMessageBox):
+    """QMessageBox adapter that localizes user-facing title/body text.
+
+    Engineering values and status codes remain untouched because the runtime
+    translator only replaces known UI phrases.
+    """
+
+    @staticmethod
+    def _localized(parent, value):
+        language = getattr(parent, "language", "zh_CN")
+        return translate_runtime_text(value, language)
+
+    @classmethod
+    def critical(cls, parent, title, text, *args, **kwargs):
+        return QtMessageBox.critical(
+            parent, cls._localized(parent, title), cls._localized(parent, text),
+            *args, **kwargs
+        )
+
+    @classmethod
+    def warning(cls, parent, title, text, *args, **kwargs):
+        return QtMessageBox.warning(
+            parent, cls._localized(parent, title), cls._localized(parent, text),
+            *args, **kwargs
+        )
+
+    @classmethod
+    def information(cls, parent, title, text, *args, **kwargs):
+        return QtMessageBox.information(
+            parent, cls._localized(parent, title), cls._localized(parent, text),
+            *args, **kwargs
+        )
+
+    @classmethod
+    def question(cls, parent, title, text, *args, **kwargs):
+        return QtMessageBox.question(
+            parent, cls._localized(parent, title), cls._localized(parent, text),
+            *args, **kwargs
+        )
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -98,6 +140,8 @@ class MainWindow(QMainWindow):
         cleanup_workspace(WORKSPACE_RETENTION_DAYS)
 
         self.cfg = load_settings()
+        self.language = normalize_language(self.cfg.get("language", "zh_CN"))
+        self.cfg["language"] = self.language
         self.modules = get_model_modules()
         self.module_widgets = {}
 
@@ -112,6 +156,12 @@ class MainWindow(QMainWindow):
         self.remote_file_rows = []
         self.remote_selected_names = set()
         self._remote_table_populating = False
+        self._remote_row_by_name = {}
+        self._remote_visible_count = 0
+        self._remote_filter_timer = QTimer(self)
+        self._remote_filter_timer.setSingleShot(True)
+        self._remote_filter_timer.setInterval(120)
+        self._remote_filter_timer.timeout.connect(self._run_remote_file_filter)
         self.remote_list_signature = None
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} - {APP_EDITION}")
@@ -124,6 +174,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_style()
         self._restore_ui_state()
+        self._apply_language(save=False)
         self._check_saved_input_path_on_startup()
 
         self.log(f"{APP_NAME} v{APP_VERSION} 已启动。")
@@ -499,14 +550,17 @@ class MainWindow(QMainWindow):
 
         brand = QLabel("NARI国际业务部内部工具")
         brand.setObjectName("brandTag")
+        self.header_brand_label = brand
 
         title = QLabel(APP_NAME)
         title.setObjectName("headerTitle")
+        self.header_title_label = title
 
         subtitle = QLabel(
             f"{APP_NAME_EN} · 模型校验 · 校验候选 · 安全回写"
         )
         subtitle.setObjectName("headerSub")
+        self.header_subtitle_label = subtitle
 
         titles.addStretch()
         titles.addWidget(brand)
@@ -518,6 +572,7 @@ class MainWindow(QMainWindow):
 
         version = QLabel(f"{APP_EDITION}  |  v{APP_VERSION}")
         version.setObjectName("headerSub")
+        self.header_version_label = version
         header_layout.addWidget(
             version,
             alignment=Qt.AlignRight | Qt.AlignVCenter,
@@ -798,12 +853,15 @@ class MainWindow(QMainWindow):
 
         ssh_buttons = QHBoxLayout()
         test_ssh_btn = QPushButton("测试 SSH 连接")
+        save_ssh_btn = QPushButton("保存 SSH 配置")
         refresh_ssh_btn = QPushButton("刷新 G 文件列表")
         download_ssh_btn = QPushButton("下载所选 G 文件")
         test_ssh_btn.clicked.connect(self.test_ssh_connection)
+        save_ssh_btn.clicked.connect(self.save_ssh_settings)
         refresh_ssh_btn.clicked.connect(self.refresh_remote_g_files)
         download_ssh_btn.clicked.connect(self.download_selected_remote_g_files)
         ssh_buttons.addWidget(test_ssh_btn)
+        ssh_buttons.addWidget(save_ssh_btn)
         ssh_buttons.addWidget(refresh_ssh_btn)
         ssh_buttons.addWidget(download_ssh_btn)
         ssh_buttons.addStretch()
@@ -847,7 +905,7 @@ class MainWindow(QMainWindow):
             "例如：ABH-06、SAMR、JED-NTH"
         )
         self.remote_search_edit.textChanged.connect(
-            self._apply_remote_file_filter
+            self._schedule_remote_file_filter
         )
         search_row.addWidget(self.remote_search_edit, 1)
         self.remote_count_label = QLabel("尚未加载远程文件")
@@ -856,17 +914,12 @@ class MainWindow(QMainWindow):
 
         remote_actions = QHBoxLayout()
         select_visible_btn = QPushButton("全选当前结果")
-        unselect_visible_btn = QPushButton("取消当前结果")
-        clear_remote_btn = QPushButton("清空全部选择")
+        clear_remote_btn = QPushButton("清空选择和搜索")
         select_visible_btn.clicked.connect(
             lambda: self._set_visible_remote_selection(True)
         )
-        unselect_visible_btn.clicked.connect(
-            lambda: self._set_visible_remote_selection(False)
-        )
         clear_remote_btn.clicked.connect(self._clear_remote_selection)
         remote_actions.addWidget(select_visible_btn)
-        remote_actions.addWidget(unselect_visible_btn)
         remote_actions.addWidget(clear_remote_btn)
         remote_actions.addStretch()
         remote_layout.addLayout(remote_actions)
@@ -1266,6 +1319,97 @@ class MainWindow(QMainWindow):
     def _current_module_help_html(self):
         module_id = str(self.module_combo.currentData() or "RMU").upper()
 
+        if self.language == "en_US":
+            if module_id == "FEEDER":
+                return """
+                <h2>Feeder Model Help</h2>
+                <h3>1. Feeder Resolution</h3>
+                <ol>
+                  <li><b>G root facID</b>: use facID first to query 13500 / dms_feeder_device exactly.</li>
+                  <li><b>File name</b>: for example JED-CTL-ADF-16.sln.pic.g; normalize and uniquely match the database feeder name.</li>
+                  <li><b>Manual input</b>: the entered feeder name must uniquely match 13500 / dms_feeder_device.</li>
+                  <li><b>facID has highest priority:</b> whenever G root facID is non-empty, file-name and manual resolution are ignored.</li>
+                  <li>RMU data and reverse FEEDER_ID inference are not used to determine the feeder.</li>
+                  <li>If the feeder cannot be uniquely resolved, processing is blocked; no feeder section is created and no FeedLine association is performed.</li>
+                </ol>
+                <h3>2. Database Query / Create Boundary</h3>
+                <ul>
+                  <li>13500 / dms_feeder_device: read-only, used to identify the unique feeder.</li>
+                  <li>405 / substation and 402 / voltagelevel + 401 / basevoltage: read-only, used to resolve the feeder substation and supported voltage level/BV_ID.</li>
+                  <li>13503 / dms_section_device: the only writable table, and only missing feeder sections may be INSERTed.</li>
+                  <li>No UPDATE / DELETE is performed on 13503, 13500, 405, or any other database table.</li>
+                  <li>Existing feeder sections are reused and never duplicated.</li>
+                  <li>New IDs are checked again before INSERT; batch creation uses one transaction and any error causes a full ROLLBACK.</li>
+                </ul>
+                <h3>3. FeedLine Allocation and Association</h3>
+                <ul>
+                  <li>Correct existing FeedLine associations are preserved. Unlinked/stale FeedLines use currently unused database sections in deterministic order; only the true shortage is created.</li>
+                  <li>ls=2 → SECTION_TYPE=0; ls=1 → SECTION_TYPE=1; missing/empty ls → SECTION_TYPE=3.</li>
+                  <li>After creation, 13503 is queried again and the final database ID / BV_ID is used to calculate Expected KeyID.</li>
+                  <li>The existing LINK / RELINK and duplicate-association rules then continue normally.</li>
+                </ul>
+                <h3>4. Safe G-file Write-back</h3>
+                <pre>
+    app="6500000"
+    p_ReportType="1"
+    state="20"
+    voltype="dms_section_device.BV_ID"
+    keyid="Expected KeyID"
+                </pre>
+                <p><b>Only these five FeedLine attributes are changed.</b> key_name, ls, coordinates, colors, line style, and all other attributes remain unchanged.</p>
+                """
+            return """
+            <h2>RMU Model Help</h2>
+            <h3>1. RMU Recognition</h3>
+            <ul>
+              <li><b>Structural hard condition:</b> the rectangle must contain CBreakerDis, ZhaiWaiJieDiDaoZha, and BusDis (at least one of each).</li>
+              <li><b>Text type:</b> Y1/Y2/Y3... each count as one L way; Q1/Q2/Q3... each count as one T way. Example: Y1, Y2, Q1 → <b>2L1T</b>.</li>
+              <li><b>Dual-source type recognition:</b> Y*/Q* graphical text and CBreakerDis.devref template structure are calculated independently and cross-checked.</li>
+              <li><b>devref names are not interpreted:</b> only CBreakerDis participates. Y devices must share one template, Q devices must share one template, and the Y/Q templates must differ. ZhaiWaiJieDiDaoZha (for example RMU_ES), BusDis, and all other objects are excluded.</li>
+              <li>If text type and valid devref type disagree, the final RMU type uses the devref result and the report raises WARN.</li>
+              <li><b>SMART/NORMAL:</b> SMART and SMR graphical markers are globally assigned to the nearest RMU. Any SMART/SMR marker makes the cabinet SMART; otherwise it is NORMAL.</li>
+              <li>RMU names are read only from enabled directions: top / bottom / left / right.</li>
+              <li>Selected directions are searched globally across the G file; the old 120-coordinate name-distance limit is not used.</li>
+              <li>Each Text / DText belongs to only one nearest RMU. A single candidate is used directly; with multiple candidates, the nearest green label is preferred, otherwise the nearest candidate is used.</li>
+              <li>Names are strings. Standard compact names are supported, plus the field form <b>number + space + suffix</b> such as <b>66 B</b>. Arbitrary descriptive text containing spaces is still rejected.</li>
+            </ul>
+            <h3>2. Device Naming Rules</h3>
+            <ul>
+              <li><b>CBreakerDis:</b> use only the graphical text spatially associated with the breaker inside the RMU. XML p_NameString is not a naming source.</li>
+              <li><b>ZhaiWaiJieDiDaoZha:</b> pair uniquely with the nearest CBreakerDis; logical name = paired breaker graphical name + D.</li>
+              <li><b>BusDis:</b> logical name is always <b>BUS</b>.</li>
+              <li>The logical name must uniquely match database <b>CODE</b> inside the current RMU; NAME is not used.</li>
+            </ul>
+            <h3>3. Validation and Repair Principles</h3>
+            <p><b>Core principle:</b> when current database facts are correct and uniquely identify a target, stale/incorrect G-file associations may be repaired. Processing is blocked only when database truth itself is ambiguous.</p>
+            <ul>
+              <li>The RMU database record must be unique.</li>
+              <li>Device CODE must equal the current graphical logical name.</li>
+              <li>For a unique RMU, each G device is validated independently and the target database device must belong to that RMU.</li>
+              <li>Old device ID, table ID, Domain, or KeyID may be repaired when the current target is unique.</li>
+              <li>If an old KeyID points to another RMU but the correct current-RMU device is uniquely determined, the row is marked RMU_RELINK and may be repaired.</li>
+              <li>RMU validation does not perform feeder validation.</li>
+            </ul>
+            <h3>4. Safe RMU Write-back</h3>
+            <p>CBreakerDis / ZhaiWaiJieDiDaoZha:</p>
+            <pre>
+    app="6500000"
+    voltype="Database device BV_ID"
+    p_ReportType="1"
+    state="41"
+    keyid="Expected KeyID"
+            </pre>
+            <p>BusDis:</p>
+            <pre>
+    app="6500000"
+    voltype="Database device BV_ID"
+    p_ReportType="1"
+    state="15"
+    keyid="Expected KeyID"
+            </pre>
+            <p>Original G files are never modified. Only safe Workspace copies are changed.</p>
+            """
+
         if module_id == "FEEDER":
             return """
             <h2>馈线模型帮助</h2>
@@ -1316,7 +1460,7 @@ class MainWindow(QMainWindow):
           <li><b>结构硬条件：</b>矩形框内必须同时包含 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元（每类至少 1 个），缺少任意一类不识别为 RMU。</li>
           <li><b>RMU 类型识别：</b>首先读取矩形框内部 Text / DText。Y1/Y2/Y3/Y4… 每个计为 1 个 L，Q1/Q2/Q3/Q4… 每个计为 1 个 T，例如 Y1、Y2、Q1 → <b>2L1T</b>。编号按自然递增顺序展示。</li>
           <li><b>柜型双源识别：</b>柜内 Y*/Q* 文字与 CBreakerDis.devref 分别独立计算柜型；两者一致时正常通过交叉校验。</li>
-          <li>CBreakerDis.devref 中包含 <b>Load_Breaker</b> 计 L，包含 <b>Circuit_Breaker</b> 计 T；当图内文字类型与 devref 类型不一致时，<b>最终柜型以 devref 为准</b>，并保留 WARN 供人工检查。</li>
+          <li><b>devref 不解析现场图元名称含义：</b>柜型判断只统计 RMU 框内 CBreakerDis；Y1/Y2/Y3... 同类开关的 devref 必须使用同一个模板，Q1/Q2... 同类开关也必须使用同一个模板，同时存在 Y/Q 时两组模板必须不同。ZhaiWaiJieDiDaoZha（例如 RMU_ES）、BusDis 等其它图元完全不参与柜型统计。</li>
           <li>如果文字类型与 devref 类型不一致，报告中显示“类型交叉校验=NO”，最终“环网柜类型”采用 devref 类型；该差异本身不改变 RMU 数据库关联资格。</li>
           <li><b>智能环网柜识别：</b>在整张 G 图全局寻找 Text / DText 中精确的 SMART 和 SMR，并把每个标识唯一归属给距离最近的 RMU。SMART 通常在柜内、SMR 可以在柜外，因此不设置最大距离限制。</li>
           <li>一个 RMU 只要命中 SMART 或 SMR 任意一种，报告“是否智能”列显示 <b>SMART</b>；未命中则显示 <b>NORMAL</b>。若两种标识都归属于同一个柜，“智能标识”仍记录 <b>SMART, SMR</b>。</li>
@@ -1339,7 +1483,7 @@ class MainWindow(QMainWindow):
         <h3>2.1 RMU 柜型两套规则与交叉验证</h3>
         <ul>
           <li><b>规则一：</b>柜内 Y1/Y2/Y3/Y4… 每个计 1 个 L，Q1/Q2/Q3/Q4… 每个计 1 个 T，形成图内文字柜型。</li>
-          <li><b>规则二：</b>独立使用 CBreakerDis.devref 判断：Load_Breaker=L，Circuit_Breaker=T，形成 devref 柜型。</li>
+          <li><b>规则二：</b>只使用 CBreakerDis.devref 的模板结构判断：Y 类必须同模板、Q 类必须同模板、Y/Q 两组模板必须可区分；不识别 Load_Breaker、Circuit_Breaker、RMU_LBS、RMU_BRK 等任何现场关键字。</li>
           <li><b>全面验证：</b>当文字结果和 devref 结果同时存在时，两套结果必须进行交叉验证。</li>
           <li>若两套结果冲突，最终采用 <b>devref 柜型</b>，同时该 RMU 产生 WARN，并在 HTML / CSV / Console 中输出环网柜名称、文字柜型和 devref 柜型供检查。</li>
           <li>柜型交叉验证告警本身不阻断已经由数据库唯一事实确定的设备关联。</li>
@@ -1387,7 +1531,7 @@ class MainWindow(QMainWindow):
         module_name = self.module_combo.currentText() or "模型"
 
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"{module_name} - 模型帮助")
+        dialog.setWindowTitle(f"{module_name} - {self._t("模型帮助")}")
         dialog.resize(820, 680)
         dialog.setMinimumSize(680, 520)
 
@@ -1632,8 +1776,8 @@ class MainWindow(QMainWindow):
         for row_idx, item in enumerate(rows):
             operation = str(item.get("operation", ""))
             operation_text = {
-                "VALIDATE": "模型校验",
-                "APPLY_ASSOCIATION": "模型关联",
+                "VALIDATE": self._t("模型校验"),
+                "APPLY_ASSOCIATION": self._t("模型关联"),
             }.get(operation, operation)
 
             artifacts = dict(item.get("artifacts", {}) or {})
@@ -1717,6 +1861,23 @@ class MainWindow(QMainWindow):
             )
         )
 
+        language_box = QGroupBox("语言设置")
+        language_layout = QGridLayout(language_box)
+        language_layout.setContentsMargins(14, 18, 14, 14)
+        language_layout.addWidget(QLabel("应用语言"), 0, 0)
+        self.language_combo = NoWheelComboBox()
+        self.language_combo.addItem("简体中文", "zh_CN")
+        self.language_combo.addItem("英文", "en_US")
+        lang_index = self.language_combo.findData(self.language)
+        self.language_combo.setCurrentIndex(lang_index if lang_index >= 0 else 0)
+        self.language_combo.setMinimumHeight(36)
+        language_layout.addWidget(self.language_combo, 0, 1)
+        language_tip = QLabel("语言切换立即生效，并自动保存最后一次选择。")
+        language_tip.setWordWrap(True)
+        language_layout.addWidget(language_tip, 1, 0, 1, 2)
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
+        layout.addWidget(language_box)
+
         safety_box = QGroupBox("安全策略")
         safety_layout = QVBoxLayout(safety_box)
 
@@ -1737,6 +1898,121 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         return page
+
+    def _on_language_changed(self, _index):
+        if not hasattr(self, "language_combo"):
+            return
+        self.language = normalize_language(self.language_combo.currentData())
+        self.cfg["language"] = self.language
+        self._apply_language(save=True)
+
+    def _apply_language(self, save=False):
+        self.language = normalize_language(getattr(self, "language", "zh_CN"))
+        self.cfg["language"] = self.language
+        retranslate_qt_tree(self, self.language)
+
+        if self.language == "en_US":
+            self.setWindowTitle(f"{APP_NAME_EN} v{APP_VERSION} - Internal Team Edition")
+            QApplication.setApplicationName(APP_NAME_EN)
+            QApplication.setApplicationDisplayName(APP_NAME_EN)
+        else:
+            self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} - {APP_EDITION}")
+            QApplication.setApplicationName(APP_NAME)
+            QApplication.setApplicationDisplayName(APP_NAME)
+
+        # Module names are presentation text only; module IDs remain stable.
+        if hasattr(self, "module_combo"):
+            labels = {
+                "RMU": "RMU Model" if self.language == "en_US" else "RMU 环网柜模型",
+                "FEEDER": "Feeder Model" if self.language == "en_US" else "馈线模型",
+            }
+            for i in range(self.module_combo.count()):
+                module_id = str(self.module_combo.itemData(i) or "").upper()
+                if module_id in labels:
+                    self.module_combo.setItemText(i, labels[module_id])
+
+        # Header product/edition text is rebuilt explicitly because the version
+        # label contains dynamic values and therefore cannot be translated by
+        # an exact static dictionary key.
+        if hasattr(self, "header_brand_label"):
+            self.header_brand_label.setText(
+                "NARI International Business Internal Tool"
+                if self.language == "en_US"
+                else "NARI国际业务部内部工具"
+            )
+        if hasattr(self, "header_title_label"):
+            self.header_title_label.setText(
+                APP_NAME_EN if self.language == "en_US" else APP_NAME
+            )
+        if hasattr(self, "header_subtitle_label"):
+            self.header_subtitle_label.setText(
+                "Distribution Model Manager · Model Validation · Validated Candidates · Safe Write-back"
+                if self.language == "en_US"
+                else f"{APP_NAME_EN} · 模型校验 · 校验候选 · 安全回写"
+            )
+        if hasattr(self, "header_version_label"):
+            self.header_version_label.setText(
+                f"Internal Team Edition  |  v{APP_VERSION}"
+                if self.language == "en_US"
+                else f"{APP_EDITION}  |  v{APP_VERSION}"
+            )
+        if hasattr(self, "about_text_label"):
+            if self.language == "en_US":
+                self.about_text_label.setText(
+                    f"<b>{APP_NAME_EN}</b><br><br>"
+                    f"Version: v{APP_VERSION}<br>"
+                    f"Build date: {APP_BUILD_DATE}<br>"
+                    "Edition: Internal Team Edition<br><br>"
+                    "Purpose: distribution G-file model validation, RMU/feeder model association, and safe write-back.<br>"
+                    "Data safety: original G files are never modified; association writes only Workspace safe copies; "
+                    "feeder completion may only INSERT missing DMS_SECTION_DEVICE records and never UPDATE/DELETE existing devices; "
+                    "run results, Console logs, and change records are retained in independent run directories."
+                )
+            else:
+                self.about_text_label.setText(
+                    f"<b>{APP_NAME}</b><br>"
+                    f"{APP_NAME_EN}<br><br>"
+                    f"版本：v{APP_VERSION}<br>"
+                    f"构建日期：{APP_BUILD_DATE}<br>"
+                    f"版本类型：{APP_EDITION}<br><br>"
+                    "用途：配网 G 文件模型校验、RMU/馈线模型关联及安全回写。<br>"
+                    "数据安全：原始 G 文件不修改；每次关联只写 Workspace 安全副本；"
+                    "馈线自动补齐仅允许 INSERT 缺失 DMS_SECTION_DEVICE，禁止 UPDATE/DELETE；"
+                    "运行结果、Console 日志和修改记录均保留在独立 run 目录。"
+                )
+
+        # Refresh dynamic presentation that is populated after widget creation.
+        if hasattr(self, "history_table"):
+            self.refresh_history_table()
+        if hasattr(self, "module_widgets"):
+            feeder_widget = self.module_widgets.get("FEEDER")
+            if feeder_widget is not None and hasattr(feeder_widget, "set_facid_lock"):
+                try:
+                    feeder_widget.language = self.language
+                    feeder_widget.set_facid_lock(
+                        getattr(feeder_widget, "_facid_locked_value", "")
+                    )
+                except Exception:
+                    pass
+        if hasattr(self, "current_artifacts"):
+            try:
+                self._update_artifact_buttons()
+            except Exception:
+                pass
+
+        if save:
+            save_settings(self.cfg)
+            self.log(
+                "Language switched to English."
+                if self.language == "en_US"
+                else "语言已切换为简体中文。"
+            )
+
+    def _t(self, text):
+        return tr(text, self.language)
+
+    def _rt(self, text):
+        return translate_runtime_text(text, self.language)
 
     # ------------------------------------------------------------
     # Help
@@ -1782,7 +2058,7 @@ class MainWindow(QMainWindow):
         rmu_naming_layout = QVBoxLayout(rmu_naming)
         rmu_naming_text = QLabel(
             "• 环网柜只有在矩形框内同时存在 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元时才识别为 RMU。\n"
-            "• RMU 柜型：柜内 Y*/Q* 文字与 devref 独立计算并交叉验证；两者冲突时最终以 devref（Load_Breaker=L、Circuit_Breaker=T）为准，同时 WARN 并指出具体环网柜。\n"
+            "• RMU 柜型：柜内 Y*/Q* 文字与 CBreakerDis.devref 模板结构独立计算并交叉验证；devref 不解析任何现场图元关键字，只检查 Y 类同模板、Q 类同模板且 Y/Q 模板可区分。有效 devref 与文字冲突时仍以 devref 为准，同时 WARN。\n"
             "• 环网柜名称严格只按照用户勾选的方向读取：上方 / 下方 / 左侧 / 右侧；未勾选方向绝不参与。\n"
             "• 对所选方向执行整张 G 图全局搜索，柜名不再受旧的 120 坐标单位距离上限限制。\n"
             "• 每个 Text / DText 全局只分配给距离最近的一个环网柜，避免同一个名字被两个柜重复使用。\n"
@@ -1804,7 +2080,7 @@ class MainWindow(QMainWindow):
             "• 图上开关名称必须与当前 RMU 下数据库 CODE 唯一对应；失败时明确告警对应环网柜并提示检查命名方式。\n\n"
             "【RMU 柜型识别】\n"
             "• 第一套：柜内 Y1/Y2/Y3... 每个计 L；Q1/Q2/Q3... 每个计 T，形成文字柜型。\n"
-            "• 第二套：独立使用 devref：Load_Breaker=L，Circuit_Breaker=T，形成 devref 柜型。\n"
+            "• 第二套：只分析 CBreakerDis.devref 模板结构；Y 类同模板、Q 类同模板，且 Y/Q 模板必须不同。ZhaiWaiJieDiDaoZha/RMU_ES 等不参与，且不解析任何现场 devref 名称含义。\n"
             "• 两套结果都存在时必须交叉验证；冲突时最终采用 devref 柜型，同时产生 WARN 并指出具体环网柜。\n\n"
 "• 环网柜数据库记录为 0 条或多条时，环网柜汇总直接 FAIL。若 G 设备未关联，禁止自动关联。\n"
             "• 环网柜数据库记录为 0 条或多条，但 G 设备已经有人为 KeyID 时，不丢弃该模型：继续反解当前设备并校验 CODE/图上逻辑名称 和实际所属环网柜。\n"
@@ -1897,6 +2173,7 @@ class MainWindow(QMainWindow):
         ssh_help_text = QLabel(
             "• SSH 模式只允许读取目录、读取文件属性和下载 G 文件；"
             "程序没有上传、覆盖、删除、重命名服务器文件的功能。\n"
+            "• IP/主机、端口、用户名、密码和远程目录都可以自定义；点击【保存 SSH 配置】后写入本地 Workspace 配置，下次启动自动恢复最后一次保存值。\n"
             "• 点击【刷新 G 文件列表】只刷新浏览列表；搜索只在当前已加载列表中本地过滤。\n"
             "• RMU 环网柜模型与馈线模型使用完全相同的 SSH 文件源。"
             "无论当前模型类型是哪一个，每次点击【模型校验】都会重新从服务器下载"
@@ -1942,6 +2219,7 @@ class MainWindow(QMainWindow):
         )
         about_text.setWordWrap(True)
         about_text.setTextFormat(Qt.RichText)
+        self.about_text_label = about_text
         about_layout.addWidget(about_text)
         layout.addWidget(about)
 
@@ -2006,9 +2284,9 @@ class MainWindow(QMainWindow):
             hasattr(self, "input_source_combo")
             and self._current_input_source() == "SSH"
         ):
-            self.workspace_status.setText(
+            self.workspace_status.setText(self._rt(
                 "SSH只读模式：RMU/馈线模型校验都会重新下载服务器当前最新 G 文件。"
-            )
+            ))
             apply_status_style(self.workspace_status, False)
 
         # 等 Qt 完成本次 stacked page 切换后，再计算新页面高度。
@@ -2045,7 +2323,7 @@ class MainWindow(QMainWindow):
                 module.supports("APPLY_ASSOCIATION") and has_preview
             )
 
-        self.workspace_status.setText("请选择下方具体任务按钮执行。")
+        self.workspace_status.setText(self._t("请选择下方具体任务按钮执行。"))
         apply_status_style(self.workspace_status, False)
 
     def _set_task_buttons_enabled(self, enabled: bool):
@@ -2110,11 +2388,11 @@ class MainWindow(QMainWindow):
             task_type,
             ("打开 HTML", "打开汇总 CSV", "打开明细 CSV"),
         )
-        self.open_html_btn.setText(html_text)
-        self.open_rmu_csv_btn.setText(first_csv_text)
-        self.open_device_csv_btn.setText(second_csv_text)
+        self.open_html_btn.setText(self._t(html_text))
+        self.open_rmu_csv_btn.setText(self._t(first_csv_text))
+        self.open_device_csv_btn.setText(self._t(second_csv_text))
 
-        self.open_change_log_btn.setText("打开修改记录 CSV")
+        self.open_change_log_btn.setText(self._t("打开修改记录 CSV"))
 
         for key, button in (
             ("html", self.open_html_btn),
@@ -2133,13 +2411,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------
     def log(self, text):
         if hasattr(self, "log_edit"):
-            self.log_edit.appendPlainText(str(text))
+            self.log_edit.appendPlainText(translate_runtime_text(text, self.language))
             scrollbar = self.log_edit.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
 
 
     def db_log(self, text):
-        message = str(text)
+        message = translate_runtime_text(text, self.language)
         if hasattr(self, "db_log_edit"):
             self.db_log_edit.appendPlainText(message)
             scrollbar = self.db_log_edit.verticalScrollBar()
@@ -2190,7 +2468,7 @@ class MainWindow(QMainWindow):
         try:
             self.cfg["db"] = self.current_db_config()
             save_settings(self.cfg)
-            self.statusBar().showMessage("数据库配置已保存。", 3000)
+            self.statusBar().showMessage(self._rt("数据库配置已保存。"), 3000)
         except Exception as exc:
             QMessageBox.critical(self, "数据库配置", str(exc))
 
@@ -2204,16 +2482,16 @@ class MainWindow(QMainWindow):
             self.cfg["db"] = config
             save_settings(self.cfg)
 
-            self.db_status.setText("数据库连接正常")
+            self.db_status.setText(self._t("数据库连接正常"))
             self.db_status.show()
             apply_status_style(self.db_status, True)
             QTimer.singleShot(3500, self.db_status.hide)
 
             self.db_log(message)
-            self.statusBar().showMessage("Oracle 数据库连接验证通过。", 3500)
+            self.statusBar().showMessage(self._rt("Oracle 数据库连接验证通过。"), 3500)
 
         except Exception as exc:
-            self.db_status.setText("数据库连接失败")
+            self.db_status.setText(self._t("数据库连接失败"))
             self.db_status.show()
             apply_status_style(self.db_status, False)
 
@@ -2244,7 +2522,37 @@ class MainWindow(QMainWindow):
             cfg["port"] = int(cfg.get("port") or 22)
         except Exception as exc:
             raise ValueError("SSH 端口必须是整数。") from exc
+
+        if not 1 <= cfg["port"] <= 65535:
+            raise ValueError("SSH 端口必须在 1~65535 之间。")
+        if not cfg.get("host"):
+            raise ValueError("SSH IP / 主机不能为空。")
+        if not cfg.get("username"):
+            raise ValueError("SSH 用户名不能为空。")
+        if not cfg.get("remote_directory"):
+            raise ValueError("SSH 远程目录不能为空。")
         return cfg
+
+    def save_ssh_settings(self):
+        """Persist the current SSH/SFTP read-only source configuration.
+
+        This mirrors the database module's explicit save action.  The password
+        is stored in the same workspace config JSON used by the existing
+        database settings so the last user-entered values are restored on the
+        next application launch.
+        """
+        try:
+            cfg = self._current_ssh_config()
+            self.cfg["ssh"] = cfg
+            self.cfg["input_source"] = "SSH"
+            save_settings(self.cfg)
+            self._set_ssh_connection_status(
+                "SSH 配置已保存；下次启动将自动恢复最后一次保存的输入。",
+                "success",
+            )
+            self.statusBar().showMessage(self._rt("SSH 配置已保存。"), 3000)
+        except Exception as exc:
+            QMessageBox.critical(self, "SSH 配置", str(exc))
 
     def _save_input_source_settings(self):
         self.cfg["input_source"] = self._current_input_source()
@@ -2292,9 +2600,9 @@ class MainWindow(QMainWindow):
         self._clear_association_table()
         if reason:
             self.workspace_status.show()
-            self.workspace_status.setText(
+            self.workspace_status.setText(self._rt(
                 f"输入已变化，请重新执行模型校验：{reason}"
-            )
+            ))
             apply_status_style(self.workspace_status, False)
 
     def _on_input_source_changed(self, *_args):
@@ -2310,13 +2618,13 @@ class MainWindow(QMainWindow):
                 "SSH只读模式：请先测试连接或刷新 G 文件列表。",
                 "neutral",
             )
-            self.workspace_status.setText(
+            self.workspace_status.setText(self._t(
                 "SSH模式：请选择远程 G 文件后执行模型校验。"
-            )
+            ))
         else:
-            self.workspace_status.setText(
+            self.workspace_status.setText(self._t(
                 "本地模式：请选择 G 文件或目录。"
-            )
+            ))
         apply_status_style(self.workspace_status, False)
 
     def _update_input_source_stack_height(self):
@@ -2385,7 +2693,7 @@ class MainWindow(QMainWindow):
                 "border:1px solid #D7E0E4;"
             ),
         }
-        self.ssh_connection_status.setText(str(text))
+        self.ssh_connection_status.setText(self._rt(text))
         self.ssh_connection_status.setStyleSheet(
             styles.get(state, styles["neutral"])
             + "border-radius:6px; padding:7px 10px;"
@@ -2463,6 +2771,7 @@ class MainWindow(QMainWindow):
             self.cfg["ssh"] = cfg
             self.cfg["input_source"] = "SSH"
             save_settings(self.cfg)
+            self._rebuild_remote_file_table()
             self._apply_remote_file_filter(
                 self.remote_search_edit.text()
             )
@@ -2509,18 +2818,30 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self,"下载远程 G 文件失败",str(exc))
 
-    def _apply_remote_file_filter(self, text=""):
-        query = str(text or "").strip().lower()
-        visible = [
-            item
-            for item in self.remote_file_rows
-            if not query or query in item.name.lower()
-        ]
+    def _schedule_remote_file_filter(self, _text=""):
+        """Debounce remote-file filtering so fast typing never rebuilds UI work."""
+        self._remote_filter_timer.start()
 
+    def _run_remote_file_filter(self):
+        self._apply_remote_file_filter(self.remote_search_edit.text())
+
+    def _rebuild_remote_file_table(self):
+        """Build remote rows once after an SSH directory refresh.
+
+        Search/reset operations only hide/show these existing rows. This avoids
+        recreating thousands of QTableWidgetItem objects on the GUI thread.
+        """
+        table = self.remote_file_table
         self._remote_table_populating = True
+        table.blockSignals(True)
+        table.setUpdatesEnabled(False)
         try:
-            self.remote_file_table.setRowCount(len(visible))
-            for row_index, remote_file in enumerate(visible):
+            table.clearContents()
+            table.setRowCount(len(self.remote_file_rows))
+            self._remote_row_by_name = {}
+            for row_index, remote_file in enumerate(self.remote_file_rows):
+                self._remote_row_by_name[remote_file.name] = row_index
+
                 check = QTableWidgetItem()
                 check.setFlags(
                     Qt.ItemIsEnabled
@@ -2533,7 +2854,7 @@ class MainWindow(QMainWindow):
                     else Qt.Unchecked
                 )
                 check.setData(Qt.UserRole, remote_file.name)
-                self.remote_file_table.setItem(row_index, 0, check)
+                table.setItem(row_index, 0, check)
 
                 values = [
                     remote_file.name,
@@ -2543,27 +2864,40 @@ class MainWindow(QMainWindow):
                 for column, value in enumerate(values, start=1):
                     item = QTableWidgetItem(str(value))
                     item.setToolTip(str(value))
-                    self.remote_file_table.setItem(
-                        row_index,
-                        column,
-                        item,
-                    )
+                    table.setItem(row_index, column, item)
         finally:
+            table.setUpdatesEnabled(True)
+            table.blockSignals(False)
             self._remote_table_populating = False
 
+        self._remote_visible_count = len(self.remote_file_rows)
+
+    def _apply_remote_file_filter(self, text=""):
+        """Filter by row visibility; never recreate table items."""
+        query = str(text or "").strip().lower()
+        table = self.remote_file_table
+        visible_count = 0
+
+        table.setUpdatesEnabled(False)
+        try:
+            for row_index, remote_file in enumerate(self.remote_file_rows):
+                matched = not query or query in remote_file.name.lower()
+                table.setRowHidden(row_index, not matched)
+                if matched:
+                    visible_count += 1
+        finally:
+            table.setUpdatesEnabled(True)
+
+        self._remote_visible_count = visible_count
+        table.viewport().update()
         self._update_remote_count_label()
 
     def _update_remote_count_label(self):
-        query = self.remote_search_edit.text().strip().lower()
-        visible_count = sum(
-            1
-            for item in self.remote_file_rows
-            if not query or query in item.name.lower()
-        )
+        visible_count = self._remote_visible_count
         self.remote_count_label.setText(
-            f"总数 {len(self.remote_file_rows)} | "
-            f"当前显示 {visible_count} | "
-            f"已选择 {len(self.remote_selected_names)}"
+            (f"Total {len(self.remote_file_rows)} | Visible {visible_count} | Selected {len(self.remote_selected_names)}")
+            if self.language == "en_US" else
+            (f"总数 {len(self.remote_file_rows)} | 当前显示 {visible_count} | 已选择 {len(self.remote_selected_names)}")
         )
 
     def _on_remote_file_item_changed(self, item):
@@ -2582,33 +2916,72 @@ class MainWindow(QMainWindow):
         )
 
     def _set_visible_remote_selection(self, selected: bool):
+        table = self.remote_file_table
         self._remote_table_populating = True
+        table.blockSignals(True)
+        table.setUpdatesEnabled(False)
         try:
-            for row in range(self.remote_file_table.rowCount()):
-                item = self.remote_file_table.item(row, 0)
+            for row in range(table.rowCount()):
+                if table.isRowHidden(row):
+                    continue
+                item = table.item(row, 0)
                 if item is None:
                     continue
                 name = str(item.data(Qt.UserRole) or "")
                 if selected:
                     self.remote_selected_names.add(name)
-                    item.setCheckState(Qt.Checked)
+                    if item.checkState() != Qt.Checked:
+                        item.setCheckState(Qt.Checked)
                 else:
                     self.remote_selected_names.discard(name)
-                    item.setCheckState(Qt.Unchecked)
+                    if item.checkState() != Qt.Unchecked:
+                        item.setCheckState(Qt.Unchecked)
         finally:
+            table.setUpdatesEnabled(True)
+            table.blockSignals(False)
             self._remote_table_populating = False
+        table.viewport().update()
         self._update_remote_count_label()
         self._invalidate_validation_snapshot(
             "远程 G 文件选择发生变化"
         )
 
     def _clear_remote_selection(self):
+        """Clear selection/search without rebuilding thousands of table cells."""
         self.remote_selected_names.clear()
-        self._apply_remote_file_filter(
-            self.remote_search_edit.text()
-        )
+        self._remote_filter_timer.stop()
+
+        table = self.remote_file_table
+        self._remote_table_populating = True
+        table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+        try:
+            # Reuse the existing table items. Only checked rows are changed.
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)
+                if item is not None and item.checkState() != Qt.Unchecked:
+                    item.setCheckState(Qt.Unchecked)
+
+            self.remote_search_edit.blockSignals(True)
+            try:
+                self.remote_search_edit.clear()
+            finally:
+                self.remote_search_edit.blockSignals(False)
+
+            # Clearing the search means every already-created row is visible.
+            for row in range(table.rowCount()):
+                if table.isRowHidden(row):
+                    table.setRowHidden(row, False)
+        finally:
+            table.setUpdatesEnabled(True)
+            table.blockSignals(False)
+            self._remote_table_populating = False
+
+        self._remote_visible_count = len(self.remote_file_rows)
+        table.viewport().update()
+        self._update_remote_count_label()
         self._invalidate_validation_snapshot(
-            "远程 G 文件选择已清空"
+            "远程 G 文件选择和搜索条件已清空"
         )
 
     def _selected_remote_files(self) -> list[RemoteGFile]:
@@ -2882,6 +3255,7 @@ class MainWindow(QMainWindow):
 
             for key in (
                 "rmu_name_positions",
+                "rmu_name_exclusions",
                 "device_rules",
                 "breaker_name_source",
                 "feeder_table_id",
@@ -2922,7 +3296,7 @@ class MainWindow(QMainWindow):
         self.log_edit.clear()
 
         self.progress_bar.setValue(0)
-        self.progress_message.setText("任务准备中……")
+        self.progress_message.setText(self._t("任务准备中……"))
         self.current_artifacts = {}
         self.current_task_type = ""
         for button in (
@@ -2938,14 +3312,14 @@ class MainWindow(QMainWindow):
         try:
             if source_type == "SSH":
                 self.workspace_status.show()
-                self.workspace_status.setText(
+                self.workspace_status.setText(self._rt(
                     "正在从 SSH 服务器重新获取本次选择文件的最新稳定版本……"
-                )
+                ))
                 apply_status_style(self.workspace_status, False)
                 self.progress_bar.setValue(3)
-                self.progress_message.setText(
+                self.progress_message.setText(self._rt(
                     "正在下载服务器最新 G 文件快照……"
-                )
+                ))
                 QApplication.processEvents()
 
                 ssh_cfg = self._current_ssh_config()
@@ -2988,8 +3362,8 @@ class MainWindow(QMainWindow):
 
         except Exception as exc:
             self._set_task_buttons_enabled(True)
-            self.progress_message.setText("文件准备失败")
-            self.workspace_status.setText("文件准备失败")
+            self.progress_message.setText(self._t("文件准备失败"))
+            self.workspace_status.setText(self._t("文件准备失败"))
             apply_status_style(self.workspace_status, False)
             self.log(f"文件准备失败：{exc}")
             QMessageBox.critical(
@@ -3013,6 +3387,7 @@ class MainWindow(QMainWindow):
             f"{input_description or self._current_input_description()}"
         )
 
+        settings["language"] = self.language
         self.worker = JobWorker(
             self.cfg,
             module,
@@ -3030,14 +3405,14 @@ class MainWindow(QMainWindow):
     def on_worker_progress(self, percent, message):
         self.progress_bar.setValue(max(0, min(100, int(percent))))
         if message:
-            self.progress_message.setText(str(message))
+            self.progress_message.setText(translate_runtime_text(message, self.language))
 
     def on_worker_log(self, text):
         self.log(text)
 
         if "Oracle 预检查：通过" in text:
             self.workspace_status.show()
-            self.workspace_status.setText("Oracle 数据库预检查通过")
+            self.workspace_status.setText(self._t("Oracle 数据库预检查通过"))
             apply_status_style(self.workspace_status, True)
 
     def _sync_feeder_facid_lock_from_preview(self, preview_data):
@@ -3126,10 +3501,10 @@ class MainWindow(QMainWindow):
             self._clear_association_table()
 
         self.progress_bar.setValue(100)
-        self.progress_message.setText(
+        self.progress_message.setText(self._rt(
             "模型校验完成，报告和可关联清单已生成"
-        )
-        self.workspace_status.setText("任务执行完成")
+        ))
+        self.workspace_status.setText(self._t("任务执行完成"))
         apply_status_style(self.workspace_status, True)
         QTimer.singleShot(3500, self.workspace_status.hide)
 
@@ -3184,15 +3559,15 @@ class MainWindow(QMainWindow):
         self.refresh_history_table()
 
         self.statusBar().showMessage(
-            "模型校验完成，校验报告和可关联清单已生成。",
+            self._rt("模型校验完成，校验报告和可关联清单已生成。"),
             5000,
         )
 
     def on_job_failed(self, text):
         self._set_task_buttons_enabled(True)
-        self.progress_message.setText("任务执行失败")
+        self.progress_message.setText(self._t("任务执行失败"))
         self.workspace_status.show()
-        self.workspace_status.setText("任务执行失败")
+        self.workspace_status.setText(self._t("任务执行失败"))
         apply_status_style(self.workspace_status, False)
 
         self.log(text)
@@ -3235,7 +3610,7 @@ class MainWindow(QMainWindow):
             self.association_table.clearContents()
             self.association_table.setRowCount(0)
             self._association_candidate_keys = set()
-            self.selection_count_label.setText("已选择 0 个对象")
+            self.selection_count_label.setText(self._t("已选择 0 个对象"))
             if hasattr(self, "rmu_filter_edit"):
                 self.rmu_filter_edit.blockSignals(True)
                 self.rmu_filter_edit.clear()
@@ -3309,20 +3684,22 @@ class MainWindow(QMainWindow):
 
         if module_id == "RMU":
             self.association_selection_box.setTitle(
-                "可关联设备选择（模型校验结果）"
+                self._t("可关联设备选择（模型校验结果）")
             )
-            self.association_selection_tip.setText(
+            self.association_selection_tip.setText(self._rt(
                 "模型校验完成后，这里展示 G 文件设备明细。只有数据库当前事实已经唯一确定、"
                 "并且需要关联或重新关联的设备才允许勾选。执行模型关联时只处理你勾选的设备。"
-            )
-            self.association_filter_label.setText("环网柜名称筛选")
+            ))
+            self.association_filter_label.setText(self._t("环网柜名称筛选"))
             self.rmu_filter_edit.setPlaceholderText(
-                "输入环网柜名称快速筛选，例如：17613 / RMU-42646"
+                self._t("输入环网柜名称快速筛选，例如：17613 / RMU-42646")
             )
             headers = [
-                "选择", "G文件", "环网柜序号", "环网柜名称", "G图元类型",
-                "逻辑设备名称（图上规则）", "数据库CODE", "状态", "当前关联",
-                "目标设备ID", "Expected KeyID", "处理说明",
+                self._t(x) for x in [
+                    "选择", "G文件", "环网柜序号", "环网柜名称", "G图元类型",
+                    "逻辑设备名称（图上规则）", "数据库CODE", "状态", "当前关联",
+                    "目标设备ID", "Expected KeyID", "处理说明",
+                ]
             ]
             for report in reports:
                 source_file = str(report.get("g_file", "") or "")
@@ -3339,22 +3716,24 @@ class MainWindow(QMainWindow):
                         display_rows.append(item)
         else:
             self.association_selection_box.setTitle(
-                "可关联馈线 / 馈线段选择（模型校验结果）"
+                self._t("可关联馈线 / 馈线段选择（模型校验结果）")
             )
-            self.association_selection_tip.setText(
+            self.association_selection_tip.setText(self._rt(
                 "模型校验完成后，这里展示可执行的馈线根关联和 FeedLine 明细。"
                 "当 G 文件没有 FeedLine、但人工输入/文件名已唯一确定 13500 馈线时，"
                 "可单独勾选 G 根节点 facID 关联；不会创建 13503 馈线段。"
                 "其余 FeedLine 仍按原规则逐条选择。"
-            )
-            self.association_filter_label.setText("馈线段快速筛选")
+            ))
+            self.association_filter_label.setText(self._t("馈线段快速筛选"))
             self.rmu_filter_edit.setPlaceholderText(
-                "输入 FEEDER_ID / 馈线名称 / FeedLine XML ID / 目标馈线段名称"
+                self._t("输入 FEEDER_ID / 馈线名称 / FeedLine XML ID / 目标馈线段名称")
             )
             headers = [
-                "选择", "G文件", "连接区域", "FEEDER_ID", "FeedLine序号",
-                "图元XML ID", "当前关联", "状态", "目标馈线段",
-                "目标设备ID", "Expected KeyID", "处理说明",
+                self._t(x) for x in [
+                    "选择", "G文件", "连接区域", "FEEDER_ID", "FeedLine序号",
+                    "图元XML ID", "当前关联", "状态", "目标馈线段",
+                    "目标设备ID", "Expected KeyID", "处理说明",
+                ]
             ]
             for report in reports:
                 source_file = str(report.get("g_file", "") or "")
@@ -3399,19 +3778,19 @@ class MainWindow(QMainWindow):
                         Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
                     )
                     check_item.setCheckState(Qt.Unchecked)
-                    check_item.setToolTip(
+                    check_item.setToolTip(self._rt(
                         "数据库当前事实唯一正确，可选择执行关联/重新关联。"
-                    )
+                    ))
                 else:
                     check_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                     check_item.setText("—")
-                    check_item.setToolTip("当前记录无需回写或已被校验阻断。")
+                    check_item.setToolTip(self._t("当前记录无需回写或已被校验阻断。"))
                 self.association_table.setItem(row_index, 0, check_item)
 
                 if module_id == "RMU":
                     current_text = str(
                         row.get("model_link_status", "")
-                        or ("已关联" if row.get("model_linked") == "YES" else "未关联")
+                        or (self._t("已关联") if row.get("model_linked") == "YES" else self._t("未关联"))
                     )
                     values = [
                         row["_file_name"], row["_frame_index"], row.get("rmu_name", ""),
@@ -3419,7 +3798,7 @@ class MainWindow(QMainWindow):
                         row.get("logical_code", "") or row.get("selected_device_name", ""),
                         row.get("db_code", ""), self._row_status_text(row), current_text,
                         row.get("db_device_id", ""), row.get("expected_keyid", ""),
-                        row.get("reason", ""),
+                        self._rt(row.get("reason", "")),
                     ]
                 else:
                     is_root_row = (
@@ -3427,11 +3806,11 @@ class MainWindow(QMainWindow):
                         and str(row.get("xml_id", "")) == "root"
                     )
                     current_text = (
-                        "根facID未关联"
+                        self._t("根facID未关联")
                         if is_root_row
                         else (
                             f"KeyID={row.get('current_keyid')} / {row.get('current_db_name') or '-'}"
-                            if row.get("model_linked") == "YES" else "未关联"
+                            if row.get("model_linked") == "YES" else self._t("未关联")
                         )
                     )
                     status_text = (
@@ -3444,7 +3823,7 @@ class MainWindow(QMainWindow):
                         row.get("order_index", ""), row.get("xml_id", ""), current_text,
                         status_text, row.get("assigned_section_name", ""),
                         row.get("assigned_device_id", ""), row.get("expected_keyid", ""),
-                        row.get("reason", ""),
+                        self._rt(row.get("reason", "")),
                     ]
 
                 brush = self._association_status_brush(
@@ -3883,7 +4262,7 @@ class MainWindow(QMainWindow):
         try:
             self._set_task_buttons_enabled(False)
             self.progress_bar.setValue(5)
-            self.progress_message.setText("正在准备模型关联……")
+            self.progress_message.setText(self._t("正在准备模型关联……"))
 
             module_id = self.module_combo.currentData()
             module = self.modules[module_id]
@@ -3930,7 +4309,7 @@ class MainWindow(QMainWindow):
             self.log(db.test_connection())
 
             self.progress_bar.setValue(15)
-            self.progress_message.setText("正在写入安全 G 文件副本……")
+            self.progress_message.setText(self._t("正在写入安全 G 文件副本……"))
             result_bundle = module.apply_association(
                 db,
                 files,
@@ -3994,9 +4373,9 @@ class MainWindow(QMainWindow):
                     )
 
                 self.progress_bar.setValue(65)
-                self.progress_message.setText(
+                self.progress_message.setText(self._rt(
                     "关联完成，正在重新校验安全副本……"
-                )
+                ))
                 self.log(
                     "模型关联写入完成，开始对 g_output 中的安全副本"
                     "执行最终模型校验。"
@@ -4031,9 +4410,9 @@ class MainWindow(QMainWindow):
                 )
 
                 self.progress_bar.setValue(94)
-                self.progress_message.setText(
+                self.progress_message.setText(self._rt(
                     "正在生成模型关联完成报告……"
-                )
+                ))
 
             if module_id in {"RMU", "FEEDER"} and not reports:
                 raise RuntimeError(
@@ -4047,10 +4426,11 @@ class MainWindow(QMainWindow):
 
             html_path = report_dir / "report.html"
             csv_base = report_dir / "report.csv"
-            export_html_bundle(reports, html_path, final_rules)
+            export_html_bundle(reports, html_path, final_rules, language=self.language)
             csv_paths = export_csv_bundle(
                 reports,
                 csv_base,
+                language=self.language,
             )
             change_log_csv = self._export_model_change_log(
                 result_bundle,
@@ -4189,9 +4569,9 @@ class MainWindow(QMainWindow):
                 self.open_artifact("change_log_csv")
 
         except Exception as exc:
-            self.progress_message.setText("模型关联失败")
+            self.progress_message.setText(self._t("模型关联失败"))
             self.workspace_status.show()
-            self.workspace_status.setText("模型关联失败")
+            self.workspace_status.setText(self._t("模型关联失败"))
             apply_status_style(self.workspace_status, False)
             self.log(f"模型关联失败：{exc}")
             try:
@@ -4221,7 +4601,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------
     def copy_log(self):
         QGuiApplication.clipboard().setText(self.log_edit.toPlainText())
-        self.statusBar().showMessage("运行日志已复制。", 2500)
+        self.statusBar().showMessage(self._rt("运行日志已复制。"), 2500)
 
     def open_artifact(self, key):
         path_value = self.current_artifacts.get(key, "")

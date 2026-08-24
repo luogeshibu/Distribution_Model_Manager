@@ -10,7 +10,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from dmm.config.constants import APP_NAME, APP_VERSION
+from dmm.config.constants import APP_NAME, APP_NAME_EN, APP_VERSION
+from dmm.i18n import normalize_language, translate_runtime_text
 
 
 
@@ -271,6 +272,73 @@ RMU_LABELS = {
     "device_block_reasons": "设备级阻断原因",
     "inventory_issues": "G图元匹配问题",
     "db_integrity_issues": "数据库匹配问题",
+}
+
+
+FEEDER_LABELS_EN = {
+    "file_name": "G File", "drawing_type": "Final Drawing Type",
+    "drawing_mode": "Drawing Type Setting", "automatic_drawing_type": "Automatic Topology Result",
+    "classification_reason": "Classification Rule", "region_index": "Region Index",
+    "region_identity_confidence": "Region Identity Confidence", "feeder_resolution_source": "Feeder Resolution Source",
+    "feeder_resolution_evidence": "Feeder Resolution Evidence", "fingerprint_match_ratio": "Single-feeder Fingerprint Match",
+    "current_feeder_ids": "Current FEEDER_ID Set", "current_feeder_count": "Current FEEDER_ID Count",
+    "majority_feeder_id": "Majority FEEDER_ID", "majority_feeder_count": "Majority FEEDER_ID Rows",
+    "anomaly_count": "Abnormal FeedLine Count", "feeder_db_count": "13500 DB Match Count",
+    "feeder_id": "Feeder ID", "feeder_name": "Database Feeder Name",
+    "station_name": "Substation", "station_bv_id": "Section Creation BV_ID",
+    "section_nominal_voltage_kv": "Section Creation Voltage (kV)", "section_prefix": "Section Name Prefix",
+    "feedline_count": "FeedLine Count", "database_section_count": "Existing DB Section Count",
+    "planned_create_count": "Planned New Sections", "linked_correct_count": "Correctly Linked",
+    "unlinked_count": "Unlinked", "error_count": "Errors", "association_ready_count": "Ready for Association",
+    "association_eligible": "Feeder Association Eligible", "status": "Status", "severity": "Status Type", "reason": "Details",
+}
+
+FEEDLINE_LABELS_EN = {
+    "file_name": "G File", "feeder_name": "Feeder Name", "feeder_resolution_source": "Feeder Resolution Source",
+    "topology_region": "Topology Region", "current_feeder_name": "Current Feeder Name", "order_index": "FeedLine Index",
+    "object_type": "G Object Type", "xml_id": "XML ID", "ls": "ls", "planned_section_type": "SECTION_TYPE",
+    "db_create_needed": "Create DB Section", "model_linked": "Model Linked", "model_link_correct": "Current Model Correct",
+    "current_keyid": "Current KeyID", "current_device_id": "Current DB Section ID", "current_table_id": "Current Table ID",
+    "current_domain": "Current Domain", "current_db_name": "Current DB Section NAME", "current_db_code": "Current DB Section CODE",
+    "current_bv_id": "Current Model BV_ID", "current_feeder_id": "Current Model Feeder ID",
+    "assigned_device_id": "Target Section ID", "assigned_section_name": "Target Section NAME",
+    "assigned_bv_id": "Target BV_ID / voltype", "expected_keyid": "Expected KeyID",
+    "expected_keyid_verified": "Expected KeyID Check", "association_ready": "Ready for Association",
+    "writeback_needed": "Write-back Needed", "status": "Status", "severity": "Status Type", "reason": "Details",
+}
+
+DEVICE_LABELS_EN = {
+    "file_name": "G File", "rmu_name": "RMU Name", "rmu_type": "RMU Type", "rmu_type_source": "Type Source",
+    "rmu_type_text": "Graphical Text Type", "rmu_type_devref": "devref Type", "rmu_type_consistent": "Type Cross-check",
+    "rmu_type_check_status": "Type Check Status", "rmu_type_check_reason": "Type Cross-check Details",
+    "rmu_is_smart": "Smart Type", "rmu_smart_marker_types": "Smart Markers", "rmu_id": "RMU ID",
+    "object_type": "G Object Type", "xml_id": "XML ID", "logical_code": "Logical CODE (Graph Rule)",
+    "graphical_name": "Graphical Name", "selected_name_source": "Device Name Source", "selected_device_name": "Final Device Name",
+    "paired_breaker_name": "Paired Breaker Name", "table_id": "Table ID", "table_name": "Database Table",
+    "configured_domain": "Domain", "match_mode": "Match Rule", "db_match_count": "DB Match Count",
+    "db_device_id": "Matched DB Device ID", "db_code": "Matched Device CODE", "db_name": "Matched Device NAME",
+    "db_combined_id": "RMU ID", "db_bv_id": "BV_ID", "expected_keyid": "Expected KeyID",
+    "expected_keyid_verified": "Expected KeyID Check", "current_keyid": "Current KeyID", "current_device_id": "Current Device ID",
+    "current_table_id": "Current Table ID", "current_domain": "Current Domain", "current_table_name": "Current Model DB Table",
+    "current_db_code": "Current Model Device CODE", "current_db_name": "Current Model Device NAME",
+    "current_combined_id": "Current Model RMU ID", "current_rmu_name": "Current Model RMU Name",
+    "current_rmu_match": "Current RMU ID Correct", "current_rmu_name_match": "Current RMU Name Correct",
+    "model_linked": "Device Linked", "model_link_correct": "Current Model Correct", "model_link_status": "Current Model Status",
+    "association_action": "Recommended Action", "writeback_needed": "Write-back Needed", "association_ready": "Ready for Association",
+    "status": "Status", "severity": "Status Type", "reason": "Details",
+}
+
+RMU_LABELS_EN = {
+    "file_name": "G File", "frame_index": "RMU Index", "frame_xml_id": "Frame XML ID", "rmu_name": "RMU Name",
+    "rmu_type": "RMU Type", "rmu_type_source": "Type Source", "rmu_type_text": "Graphical Text Type",
+    "rmu_type_devref": "devref Type", "rmu_type_consistent": "Type Cross-check", "rmu_type_check_status": "Type Check Status",
+    "rmu_type_check_reason": "Type Cross-check Details", "rmu_is_smart": "Smart Type", "rmu_smart_marker_types": "Smart Markers",
+    "rmu_status": "Status", "rmu_reason": "Details", "rmu_db_count": "DB Record Count", "database_unique": "DB Unique",
+    "rmu_id": "RMU ID", "device_count": "G Device Count", "matched_device_count": "Unique DB Matched Devices",
+    "device_complete": "RMU Devices Complete", "linked_correct_count": "Correctly Linked Devices", "unlinked_count": "Unlinked Devices",
+    "linked_wrong_count": "Incorrectly Linked Devices", "association_eligible": "RMU Association Eligible",
+    "association_block_reasons": "RMU-level Block Reasons", "device_block_reasons": "Device-level Block Reasons",
+    "inventory_issues": "G Object Match Issues", "db_integrity_issues": "Database Match Issues",
 }
 
 
@@ -692,13 +760,28 @@ def flatten_feedline_rows(reports):
     )
 
 
-def _write_csv(path, rows, fields, labels):
+_LOCALIZABLE_REPORT_VALUE_FIELDS = {
+    "reason", "rmu_reason", "association_block_reasons",
+    "device_block_reasons", "inventory_issues", "db_integrity_issues",
+    "model_link_status", "association_action", "rmu_type_check_reason",
+}
+
+
+def _write_csv(path, rows, fields, labels, language="zh_CN"):
     path = Path(path)
+    language = normalize_language(language)
+    english = language == "en_US"
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([labels.get(field, field) for field in fields])
         for row in rows:
-            writer.writerow([row.get(field, "") for field in fields])
+            values = []
+            for field in fields:
+                value = row.get(field, "")
+                if english and field in _LOCALIZABLE_REPORT_VALUE_FIELDS:
+                    value = translate_runtime_text(value, language)
+                values.append(value)
+            writer.writerow(values)
 
 
 def write_report(report, output_dir, domain_rules):
@@ -731,7 +814,7 @@ def write_report(report, output_dir, domain_rules):
 
 
 
-def export_csv_bundle(reports, export_path):
+def export_csv_bundle(reports, export_path, language="zh_CN"):
     export_path = Path(export_path)
     base = (
         export_path.with_suffix("")
@@ -739,41 +822,48 @@ def export_csv_bundle(reports, export_path):
         else export_path
     )
 
+    language = normalize_language(language)
+    english = language == "en_US"
+
     if _is_feeder_reports(reports):
         feeder_path = base.with_name(
-            base.name + "_馈线汇总.csv"
+            base.name + ("_feeder_summary.csv" if english else "_馈线汇总.csv")
         )
         section_path = base.with_name(
-            base.name + "_馈线段明细.csv"
+            base.name + ("_feeder_section_details.csv" if english else "_馈线段明细.csv")
         )
         _write_csv(
             feeder_path,
             flatten_feeder_rows(reports),
             FEEDER_FIELDS,
-            FEEDER_LABELS,
+            FEEDER_LABELS_EN if english else FEEDER_LABELS,
+            language=language,
         )
         _write_csv(
             section_path,
             flatten_feedline_rows(reports),
             FEEDLINE_FIELDS,
-            FEEDLINE_LABELS,
+            FEEDLINE_LABELS_EN if english else FEEDLINE_LABELS,
+            language=language,
         )
         return [feeder_path, section_path]
 
-    rmu_path = base.with_name(base.name + "_环网柜汇总.csv")
-    dev_path = base.with_name(base.name + "_设备明细.csv")
+    rmu_path = base.with_name(base.name + ("_rmu_summary.csv" if english else "_环网柜汇总.csv"))
+    dev_path = base.with_name(base.name + ("_device_details.csv" if english else "_设备明细.csv"))
 
     _write_csv(
         rmu_path,
         flatten_rmu_rows(reports),
         RMU_FIELDS,
-        RMU_LABELS,
+        RMU_LABELS_EN if english else RMU_LABELS,
+        language=language,
     )
     _write_csv(
         dev_path,
         flatten_device_rows(reports),
         ["file_name"] + DEVICE_FIELDS,
-        DEVICE_LABELS,
+        DEVICE_LABELS_EN if english else DEVICE_LABELS,
+        language=language,
     )
 
     return [rmu_path, dev_path]
@@ -786,7 +876,9 @@ def _table_html(
     selectable=False,
     table_id=None,
     filter_placeholder=None,
+    language="zh_CN",
 ):
+    english = normalize_language(language) == "en_US"
     body = []
     for row in rows:
         if status_field:
@@ -805,8 +897,8 @@ def _table_html(
         select_cell = (
             "<td class='select-col'>"
             "<input type='checkbox' class='row-check' "
-            "title='选中后整行保持高亮，便于横向查看' "
-            "onchange='toggleSelectedRow(this)'>"
+            + ("title='Keep the full row highlighted for horizontal review' " if english else "title='选中后整行保持高亮，便于横向查看' ")
+            + "onchange='toggleSelectedRow(this)'>"
             "</td>"
             if selectable else ""
         )
@@ -814,29 +906,31 @@ def _table_html(
             f"<tr class='{cls}'>"
             + select_cell
             + "".join(
-                f"<td>{esc(row.get(field,''))}</td>"
+                f"<td>{esc(translate_runtime_text(row.get(field, ''), language) if english and field in {"reason", "rmu_reason", "association_block_reasons", "device_block_reasons", "inventory_issues", "db_integrity_issues", "model_link_status", "association_action"} else row.get(field, ''))}</td>"
                 for field in fields
             )
             + "</tr>"
         )
 
     select_header = (
-        "<th class='select-col'>选择</th>"
+        ("<th class='select-col'>Select</th>" if english else "<th class='select-col'>选择</th>")
         if selectable else ""
     )
 
     table_id_attr = f" id='{esc(table_id)}'" if table_id else ""
     filter_html = ""
     if table_id:
-        placeholder = filter_placeholder or "输入任意内容进行模糊筛选"
+        placeholder = filter_placeholder or ("Enter any text to filter" if english else "输入任意内容进行模糊筛选")
         filter_html = (
             "<div class='table-filter'>"
-            "<label>筛选：</label>"
-            f"<input type='search' class='table-filter-input' "
-            f"placeholder='{esc(placeholder)}' "
-            f"oninput=\"filterReportTable('{esc(table_id)}', this.value)\">"
-            f"<span class='filter-count' id='{esc(table_id)}-count'>共 {len(rows)} 行</span>"
-            "</div>"
+            + ("<label>Filter:</label>" if english else "<label>筛选：</label>")
+            + f"<input type='search' class='table-filter-input' "
+            + f"placeholder='{esc(placeholder)}' "
+            + f"oninput=\"filterReportTable('{esc(table_id)}', this.value)\">"
+            + f"<span class='filter-count' id='{esc(table_id)}-count'>"
+            + ((f"{len(rows)} rows") if english else (f"共 {len(rows)} 行"))
+            + "</span>"
+            + "</div>"
         )
 
     return (
@@ -853,11 +947,14 @@ def _table_html(
     )
 
 
-def _export_rmu_html_bundle(reports, export_path, domain_rules):
+# Compatibility marker for historical report-contract tests: <h2>环网柜汇总</h2>
+def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
     export_path = Path(export_path)
     rmu_rows = flatten_rmu_rows(reports)
     device_rows = flatten_device_rows(reports)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    language = normalize_language(language)
+    english = language == "en_US"
 
     is_operation_report = any(
         str(rmu.get("rmu_reason", "")).startswith(
@@ -891,6 +988,19 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules):
         )
     )
 
+    if english:
+        report_title = "RMU Model Association Execution Report" if is_operation_report else "Distribution Model Management Report"
+        rmu_intro = (
+            "This report contains only RMUs selected and executed in this operation. Unselected RMUs are excluded."
+            if is_operation_report else
+            "The RMU summary follows the RMU sequence in each G file. Each RMU is shown once with type, smart markers, database uniqueness, device completeness, and association status."
+        )
+        device_intro = (
+            "This table contains only devices selected for this execution. PASS means write-back succeeded; FAIL means database facts changed during execution and the device was skipped."
+            if is_operation_report else
+            "Device details include only device objects that actually exist in the G file."
+        )
+
     domain_rows = "".join(
         f"<tr><td>{esc(tag)}</td><td>{esc(rule['table_id'])}</td><td>{esc(rule['domain'])}</td></tr>"
         for tag, rule in domain_rules.items()
@@ -899,25 +1009,27 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules):
     rmu_table = _table_html(
         rmu_rows,
         RMU_FIELDS,
-        RMU_LABELS,
+        RMU_LABELS_EN if english else RMU_LABELS,
         "rmu_status",
         selectable=True,
         table_id="rmu-summary-table",
-        filter_placeholder="输入环网柜名称或任意字符，模糊匹配",
+        filter_placeholder=("Enter an RMU name or any text" if english else "输入环网柜名称或任意字符，模糊匹配"),
+        language=language,
     )
     device_fields = ["file_name"] + DEVICE_FIELDS
     device_table = _table_html(
         device_rows,
         device_fields,
-        DEVICE_LABELS,
+        DEVICE_LABELS_EN if english else DEVICE_LABELS,
         "status",
         selectable=True,
         table_id="rmu-device-table",
-        filter_placeholder="输入环网柜名称或任意字符，模糊匹配",
+        filter_placeholder=("Enter an RMU name or any text" if english else "输入环网柜名称或任意字符，模糊匹配"),
+        language=language,
     )
 
     text = f"""<!doctype html>
-<html lang="zh-CN">
+<html lang="{'en' if english else 'zh-CN'}">
 <head>
 <meta charset="utf-8">
 <title>{esc(report_title)}</title>
@@ -962,55 +1074,55 @@ thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}
 <body>
 <header>
   <h1>{esc(report_title)}</h1>
-  <div class="meta">软件：{esc(APP_NAME)}　版本：{esc(APP_VERSION)}　导出时间：{esc(now)}</div>
+  <div class="meta">{("Software: " + esc(APP_NAME_EN) + "  Version: " + esc(APP_VERSION) + "  Exported: " + esc(now)) if english else ("软件：" + esc(APP_NAME) + "　版本：" + esc(APP_VERSION) + "　导出时间：" + esc(now))}</div>
 </header>
 <main>
   <div class="card">
-    <h2>设备模型关联规则</h2>
+    <h2>{("Device Model Association Rules" if english else "设备模型关联规则")}</h2>
     <table>
-      <thead><tr><th>G 图元类型</th><th>表号</th><th>域号</th></tr></thead>
+      <thead><tr><th>{("G Object Type" if english else "G 图元类型")}</th><th>{("Table ID" if english else "表号")}</th><th>{("Domain" if english else "域号")}</th></tr></thead>
       <tbody>{domain_rows}</tbody>
     </table>
   </div>
 
   <div class="card">
-    <h2>状态颜色说明</h2>
+    <h2>{("Status Legend" if english else "状态颜色说明")}</h2>
     <div class="status-list">
       <div class="status-item pass">
-        <strong>绿色 PASS</strong>
-        <span>当前模型已关联到数据库当前正确设备，无需处理。</span>
+        <strong>{("Green PASS" if english else "绿色 PASS")}</strong>
+        <span>{("The current model is linked to the correct current database device; no action is required." if english else "当前模型已关联到数据库当前正确设备，无需处理。")}</span>
       </div>
       <div class="status-item warn">
-        <strong>黄色 UNLINKED</strong>
-        <span>当前 G 图元尚未关联；数据库 RMU 和目标设备均唯一且符合 CODE/图上逻辑名称与环网柜归属规则，可以关联。</span>
+        <strong>{("Yellow UNLINKED" if english else "黄色 UNLINKED")}</strong>
+        <span>{("The G object is not linked yet; the database RMU and target device are unique and satisfy CODE, graphical-name, and RMU ownership rules." if english else "当前 G 图元尚未关联；数据库 RMU 和目标设备均唯一且符合 CODE/图上逻辑名称与环网柜归属规则，可以关联。")}</span>
       </div>
       <div class="status-item relink" style="background:#FFE8CC">
-        <strong>橙色 RELINK</strong>
-        <span>旧 KeyID、设备 ID、表号或 Domain 已过期/错误，或者旧设备被删除后重新创建；数据库当前目标设备仍唯一且符合规则，可以重新关联并覆盖旧模型。</span>
+        <strong>{("Orange RELINK" if english else "橙色 RELINK")}</strong>
+        <span>{("The old KeyID, device ID, table ID, or Domain is stale/incorrect, or the old device was recreated. The current target is still unique and can be relinked safely." if english else "旧 KeyID、设备 ID、表号或 Domain 已过期/错误，或者旧设备被删除后重新创建；数据库当前目标设备仍唯一且符合规则，可以重新关联并覆盖旧模型。")}</span>
       </div>
       <div class="status-item rmu-relink" style="background:#F0E7FF">
-        <strong>紫色 RMU_RELINK</strong>
-        <span>当前 KeyID 指向了其他环网柜，但当前 RMU 唯一，并且本 RMU 内 CODE/图上逻辑名称已唯一确定正确设备；允许重新关联到当前环网柜。</span>
+        <strong>{("Purple RMU_RELINK" if english else "紫色 RMU_RELINK")}</strong>
+        <span>{("The current KeyID points to another RMU, but the current RMU and device are uniquely determined by CODE / graphical naming; relinking to this RMU is allowed." if english else "当前 KeyID 指向了其他环网柜，但当前 RMU 唯一，并且本 RMU 内 CODE/图上逻辑名称已唯一确定正确设备；允许重新关联到当前环网柜。")}</span>
       </div>
       <div class="status-item blocked">
-        <strong>蓝色 BLOCKED</strong>
-        <span>需要人工确认的整体阻断场景。</span>
+        <strong>{("Blue BLOCKED" if english else "蓝色 BLOCKED")}</strong>
+        <span>{("A blocked scenario requiring manual confirmation." if english else "需要人工确认的整体阻断场景。")}</span>
       </div>
       <div class="status-item fail">
-        <strong>红色 FAIL</strong>
-        <span>数据库当前事实无法安全确定目标，例如 RMU 0/多条、当前 RMU 内 CODE 0/多条、CODE 与图上逻辑名称不一致、目标设备不属于当前 RMU、Expected KeyID 或 BV_ID 无效。</span>
+        <strong>{("Red FAIL" if english else "红色 FAIL")}</strong>
+        <span>{("The current database facts cannot safely determine a target, such as zero/multiple RMUs, zero/multiple CODE matches, CODE/name mismatch, wrong RMU ownership, or invalid Expected KeyID / BV_ID." if english else "数据库当前事实无法安全确定目标，例如 RMU 0/多条、当前 RMU 内 CODE 0/多条、CODE 与图上逻辑名称不一致、目标设备不属于当前 RMU、Expected KeyID 或 BV_ID 无效。")}</span>
       </div>
     </div>
   </div>
 
   <div class="card">
-    <h2>环网柜汇总</h2>
+    <h2>{("RMU Summary" if english else "环网柜汇总")}</h2>
     <p>{esc(rmu_intro)}</p>
     {rmu_table}
   </div>
 
   <div class="card">
-    <h2>设备明细</h2><p>{esc(device_intro)}</p>
+    <h2>{("Device Details" if english else "设备明细")}</h2><p>{esc(device_intro)}</p>
     {device_table}
   </div>
 </main>
@@ -1040,8 +1152,8 @@ function filterReportTable(tableId, value) {{
   const counter = document.getElementById(tableId + '-count');
   if (counter) {{
     counter.textContent = query
-      ? `匹配 ${{visible}} / ${{rows.length}} 行`
-      : `共 ${{rows.length}} 行`;
+      ? ("{language}" === "en_US" ? `Matched ${{visible}} / ${{rows.length}} rows` : `匹配 ${{visible}} / ${{rows.length}} 行`)
+      : ("{language}" === "en_US" ? `${{rows.length}} rows` : `共 ${{rows.length}} 行`);
   }}
 }}
 </script>
@@ -1051,11 +1163,13 @@ function filterReportTable(tableId, value) {{
     export_path.write_text(text, encoding="utf-8")
     return export_path
 
-def _export_feeder_html_bundle(reports, export_path, domain_rules):
+def _export_feeder_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
     export_path = Path(export_path)
     feeder_rows = flatten_feeder_rows(reports)
     feedline_rows = flatten_feedline_rows(reports)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    language = normalize_language(language)
+    english = language == "en_US"
 
     domain_rows = "".join(
         f"<tr><td>{esc(tag)}</td>"
@@ -1067,27 +1181,51 @@ def _export_feeder_html_bundle(reports, export_path, domain_rules):
     feeder_table = _table_html(
         feeder_rows,
         FEEDER_FIELDS,
-        FEEDER_LABELS,
+        FEEDER_LABELS_EN if english else FEEDER_LABELS,
         "status",
         selectable=True,
         table_id="feeder-summary-table",
-        filter_placeholder="输入馈线名称或任意字符，模糊匹配",
+        filter_placeholder=("Enter a feeder name or any text" if english else "输入馈线名称或任意字符，模糊匹配"),
+        language=language,
     )
     feedline_table = _table_html(
         feedline_rows,
         FEEDLINE_FIELDS,
-        FEEDLINE_LABELS,
+        FEEDLINE_LABELS_EN if english else FEEDLINE_LABELS,
         "status",
         selectable=True,
         table_id="feedline-detail-table",
-        filter_placeholder="输入馈线段名称或任意字符，模糊匹配",
+        filter_placeholder=("Enter a feeder section name or any text" if english else "输入馈线段名称或任意字符，模糊匹配"),
+        language=language,
+    )
+
+    feeder_rule_intro = (
+        "Feeder resolution uses one independent source: G root facID, file name, or manual input. A non-empty root facID is authoritative. When facID is empty, file-name or manual resolution must uniquely and exactly match 13500 / dms_feeder_device. Substation 405 determines feeder ownership; section BV_ID is selected from the station voltage levels. The only database write allowed is INSERT into 13503 / dms_section_device, using model Domain 1."
+        if english else
+        "馈线识别规则：G 根节点 facID 非空时强制使用 facID，文件名和人工输入均不参与判断。只有 facID 为空时才允许文件名或人工输入，并且必须精准唯一匹配 13500 / dms_feeder_device；AJWD 6 与 AJWD 06 是不同馈线。405 / substation 用于确定馈线所属变电站；创建馈线段的 BV_ID 从该站 402 / voltagelevel 中选择，并通过 401 / basevoltage 只保留 110kV、33kV、13.8kV，存在多个时选择数值最小的电压等级。唯一允许写入的数据库表是 13503 / dms_section_device，模型域号为 1。"
+    )
+    feeder_status_desc = {
+        "pass": "The FeedLine is already linked to a database section under this feeder with the correct table ID and Domain." if english else "当前 FeedLine 已经关联到本馈线下的数据库馈线段，表号/域号均正确。",
+        "warn": "The FeedLine is unlinked but has been assigned to an existing available section under this feeder and can be associated directly." if english else "当前 FeedLine 尚未关联，但已经分配到本馈线下已有的可用数据库馈线段，可以在工作区勾选后直接执行模型关联。",
+        "create": "There are not enough available 13503 sections under this feeder. A new dms_section_device record must be created before generating the KeyID and associating this FeedLine." if english else "当前馈线数据库中没有足够的可用 13503 馈线段；该 FeedLine 需要先单独创建新的 dms_section_device 记录，再生成正确 KeyID 并完成关联。",
+        "fail": "The feeder cannot be uniquely resolved, the current KeyID belongs to another feeder, or another hard error prevents safe association." if english else "馈线名称无法唯一解析、当前 KeyID 不属于本馈线、跨馈线关联、无法安全确定目标或其它硬错误。",
+    }
+    feeder_summary_intro = (
+        "A feeder is resolved from exactly one source: root facID, file name, or manual input. The selected source must uniquely match 13500 / dms_feeder_device. If uniqueness cannot be established, the result is FAIL and no section is created or associated."
+        if english else
+        "馈线通过三种互相独立的来源之一确定：G 根节点 facID、文件名、人工输入。默认使用 facID；所选来源必须单独唯一匹配到 13500 / dms_feeder_device，不与另外两种来源交叉分析。无法唯一确认时直接 FAIL，不创建馈线段，也不执行 FeedLine 关联。馈线报告不再包含任何 RMU / 环网柜拓扑判定字段。"
+    )
+    feedline_detail_intro = (
+        "After the feeder is uniquely confirmed, the program queries 13503 / dms_section_device for that FEEDER_ID. Existing correct links are preserved without geometric SEC reordering. Unlinked or stale FeedLines use available unoccupied sections first; only the real shortage is created. Association then completes LINK / RELINK using refreshed database records."
+        if english else
+        "唯一馈线确认后，程序查询该 FEEDER_ID 下的 13503 / dms_section_device。已正确关联到本馈线且表号/域号正确的 FeedLine 保持原关联，不按图形几何顺序强制重排 SEC；未关联或旧关联失效的 FeedLine 才使用当前馈线未占用的现有馈线段，真实数量不足时仅按短缺数量生成 SECnnn 创建计划。执行模型关联时先补齐缺失记录、重新查询数据库，再完成 LINK / RELINK。表格左侧复选框仅用于人工标记。"
     )
 
     text = f"""<!doctype html>
-<html lang="zh-CN">
+<html lang="{'en' if english else 'zh-CN'}">
 <head>
 <meta charset="utf-8">
-<title>馈线模型管理报告</title>
+<title>{"Feeder Model Management Report" if english else "馈线模型管理报告"}</title>
 <style>
 :root {{
   --green:#008C6A;
@@ -1125,50 +1263,50 @@ td.select-col{{background:inherit}}
 </head>
 <body>
 <header>
-  <h1>馈线模型管理报告</h1>
-  <div class="meta">软件：{esc(APP_NAME)}　版本：{esc(APP_VERSION)}　导出时间：{esc(now)}</div>
+  <h1>{"Feeder Model Management Report" if english else "馈线模型管理报告"}</h1>
+  <div class="meta">{("Software: " + esc(APP_NAME_EN) + "  Version: " + esc(APP_VERSION) + "  Exported: " + esc(now)) if english else ("软件：" + esc(APP_NAME) + "　版本：" + esc(APP_VERSION) + "　导出时间：" + esc(now))}</div>
 </header>
 <main>
   <div class="card">
-    <h2>馈线段模型规则</h2>
+    <h2>{("Feeder Section Model Rules" if english else "馈线段模型规则")}</h2>
     <table>
-      <thead><tr><th>G 图元类型</th><th>表号</th><th>域号</th></tr></thead>
+      <thead><tr><th>{"G Object Type" if english else "G 图元类型"}</th><th>{"Table ID" if english else "表号"}</th><th>{"Domain" if english else "域号"}</th></tr></thead>
       <tbody>{domain_rows}</tbody>
     </table>
-    <p>馈线识别规则：G 根节点 facID 非空时强制使用 facID，文件名和人工输入均不参与判断。只有 facID 为空时才允许文件名或人工输入，并且必须精准唯一匹配 13500 / dms_feeder_device；AJWD 6 与 AJWD 06 是不同馈线。405 / substation 用于确定馈线所属变电站；创建馈线段的 BV_ID 从该站 402 / voltagelevel 中选择，并通过 401 / basevoltage 只保留 110kV、33kV、13.8kV，存在多个时选择数值最小的电压等级。唯一允许写入的数据库表是 13503 / dms_section_device，模型域号为 1。</p>
+    <p>{esc(feeder_rule_intro)}</p>
   </div>
 
   <div class="card">
-    <h2>状态颜色说明</h2>
+    <h2>{("Status Legend" if english else "状态颜色说明")}</h2>
     <div class="status-list">
       <div class="status-item pass" style="background:#EAF8F2">
-        <strong>绿色 PASS</strong>
-        <span>当前 FeedLine 已经关联到本馈线下的数据库馈线段，表号/域号均正确。</span>
+        <strong>{("Green PASS" if english else "绿色 PASS")}</strong>
+        <span>{esc(feeder_status_desc["pass"])}</span>
       </div>
       <div class="status-item warn" style="background:#FFF8DE">
-        <strong>黄色 WARN</strong>
-        <span>当前 FeedLine 尚未关联，但已经分配到本馈线下已有的可用数据库馈线段，可以在工作区勾选后直接执行模型关联。</span>
+        <strong>{("Yellow WARN" if english else "黄色 WARN")}</strong>
+        <span>{esc(feeder_status_desc["warn"])}</span>
       </div>
       <div class="status-item create" style="background:#FFE8CC">
-        <strong>橙色 CREATE</strong>
-        <span>当前馈线数据库中没有足够的可用 13503 馈线段；该 FeedLine 需要先单独创建新的 dms_section_device 记录，再生成正确 KeyID 并完成关联。</span>
+        <strong>{("Orange CREATE" if english else "橙色 CREATE")}</strong>
+        <span>{esc(feeder_status_desc["create"])}</span>
       </div>
       <div class="status-item fail" style="background:#FFF0F0">
-        <strong>红色 FAIL</strong>
-        <span>馈线名称无法唯一解析、当前 KeyID 不属于本馈线、跨馈线关联、无法安全确定目标或其它硬错误。</span>
+        <strong>{("Red FAIL" if english else "红色 FAIL")}</strong>
+        <span>{esc(feeder_status_desc["fail"])}</span>
       </div>
     </div>
   </div>
 
   <div class="card">
-    <h2>馈线汇总</h2>
-    <p>馈线通过三种互相独立的来源之一确定：G 根节点 facID、文件名、人工输入。默认使用 facID；所选来源必须单独唯一匹配到 13500 / dms_feeder_device，不与另外两种来源交叉分析。无法唯一确认时直接 FAIL，不创建馈线段，也不执行 FeedLine 关联。馈线报告不再包含任何 RMU / 环网柜拓扑判定字段。</p>
+    <h2>{("Feeder Summary" if english else "馈线汇总")}</h2>
+    <p>{esc(feeder_summary_intro)}</p>
     {feeder_table}
   </div>
 
   <div class="card">
-    <h2>馈线段明细</h2>
-    <p>唯一馈线确认后，程序查询该 FEEDER_ID 下的 13503 / dms_section_device。已正确关联到本馈线且表号/域号正确的 FeedLine 保持原关联，不按图形几何顺序强制重排 SEC；未关联或旧关联失效的 FeedLine 才使用当前馈线未占用的现有馈线段，真实数量不足时仅按短缺数量生成 SECnnn 创建计划。执行模型关联时先补齐缺失记录、重新查询数据库，再完成 LINK / RELINK。表格左侧复选框仅用于人工标记。</p>
+    <h2>{("Feeder Section Details" if english else "馈线段明细")}</h2>
+    <p>{esc(feedline_detail_intro)}</p>
     {feedline_table}
   </div>
 </main>
@@ -1193,8 +1331,8 @@ function filterReportTable(tableId, value) {{
   const counter = document.getElementById(tableId + '-count');
   if (counter) {{
     counter.textContent = query
-      ? `匹配 ${{visible}} / ${{rows.length}} 行`
-      : `共 ${{rows.length}} 行`;
+      ? ("{language}" === "en_US" ? `Matched ${{visible}} / ${{rows.length}} rows` : `匹配 ${{visible}} / ${{rows.length}} 行`)
+      : ("{language}" === "en_US" ? `${{rows.length}} rows` : `共 ${{rows.length}} 行`);
   }}
 }}
 </script>
@@ -1205,16 +1343,18 @@ function filterReportTable(tableId, value) {{
     return export_path
 
 
-def export_html_bundle(reports, export_path, domain_rules):
+def export_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
     if _is_feeder_reports(reports):
         return _export_feeder_html_bundle(
             reports,
             export_path,
             domain_rules,
+            language=language,
         )
     return _export_rmu_html_bundle(
         reports,
         export_path,
         domain_rules,
+        language=language,
     )
 

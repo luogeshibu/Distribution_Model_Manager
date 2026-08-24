@@ -9,6 +9,7 @@ from PySide6.QtCore import QThread, Signal
 from dmm.infrastructure.database.oracle import OracleClient
 from dmm.infrastructure.reporting.writer import export_csv_bundle, export_html_bundle
 from dmm.config.settings import save_settings
+from dmm.domain.gfile.xml_diagnostics import GFileXmlParseError
 
 class JobWorker(QThread):
     log = Signal(str)
@@ -95,8 +96,8 @@ class JobWorker(QThread):
 
             html_path = report_dir / "report.html"
             csv_base = report_dir / "report.csv"
-            export_html_bundle(reports, html_path, rules)
-            csv_paths = export_csv_bundle(reports, csv_base)
+            export_html_bundle(reports, html_path, rules, language=self.settings.get("language", self.cfg.get("language", "zh_CN")))
+            csv_paths = export_csv_bundle(reports, csv_base, language=self.settings.get("language", self.cfg.get("language", "zh_CN")))
 
             artifacts = {
                 "task_type": report_context[0],
@@ -116,6 +117,10 @@ class JobWorker(QThread):
             self.progress.emit(100, "任务处理完成")
             self.completed.emit(str(self.run_dir), summary, rules, preview_data, artifacts)
 
+        except GFileXmlParseError as exc:
+            # Known source-file problem: show a concise engineering diagnostic
+            # instead of an implementation traceback.
+            self.failed.emit(str(exc))
         except Exception:
             self.failed.emit(traceback.format_exc())
         finally:

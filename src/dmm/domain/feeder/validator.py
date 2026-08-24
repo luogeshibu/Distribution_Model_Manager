@@ -13,7 +13,7 @@ from dmm.config.constants import (
     RMU_LABEL_EDGE_TOLERANCE,
     RMU_LABEL_PATTERN,
 )
-from dmm.config.defaults import DEFAULT_DEVICE_RULES, DEFAULT_NAME_POSITIONS
+from dmm.config.defaults import DEFAULT_DEVICE_RULES, DEFAULT_NAME_POSITIONS, DEFAULT_RMU_NAME_EXCLUSIONS
 from dmm.domain.rmu.validator import RmuValidator
 
 
@@ -114,6 +114,7 @@ class FeederValidator:
         feeder_table_id: int = DEFAULT_FEEDER_TABLE_ID,
         rmu_device_rules: Optional[Dict[str, Dict[str, Any]]] = None,
         rmu_name_positions: Optional[Dict[str, bool]] = None,
+        rmu_name_exclusions: Optional[Iterable[str]] = None,
         log=None,
     ):
         self.db = db
@@ -123,6 +124,7 @@ class FeederValidator:
         self.feeder_table_id = int(feeder_table_id)
         self.rmu_device_rules = dict(rmu_device_rules or DEFAULT_DEVICE_RULES)
         self.rmu_name_positions = dict(rmu_name_positions or DEFAULT_NAME_POSITIONS)
+        self.rmu_name_exclusions = list(rmu_name_exclusions or DEFAULT_RMU_NAME_EXCLUSIONS)
         self.log = log or (lambda msg: None)
 
     @staticmethod
@@ -1643,6 +1645,7 @@ class FeederValidator:
             label_regex=RMU_LABEL_PATTERN,
             max_distance=RMU_LABEL_SEARCH_MAX_DISTANCE,
             overlap_tolerance=RMU_LABEL_EDGE_TOLERANCE,
+            excluded_rmu_name_strings=self.rmu_name_exclusions,
         )
         validator = RmuValidator(
             self.db,
@@ -2346,6 +2349,7 @@ class FeederValidator:
             label_regex=RMU_LABEL_PATTERN,
             max_distance=RMU_LABEL_SEARCH_MAX_DISTANCE,
             overlap_tolerance=RMU_LABEL_EDGE_TOLERANCE,
+            excluded_rmu_name_strings=self.rmu_name_exclusions,
         )
         rmu_parsed = rmu_parser.parse(g_path)
         frames = rmu_parser.find_rmu_frames(rmu_parsed)
