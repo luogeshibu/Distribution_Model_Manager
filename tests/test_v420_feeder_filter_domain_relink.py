@@ -113,6 +113,11 @@ def test_feeder_html_has_independent_fuzzy_filters(tmp_path):
     assert "filterReportTable('feedline-detail-table'" in text
     assert "输入馈线名称或任意字符，模糊匹配" in text
     assert "输入馈线段名称或任意字符，模糊匹配" in text
+    assert "id='feeder-summary-table-color-filter'" in text
+    assert "id='feedline-detail-table-color-filter'" in text
+    assert "全部颜色" in text
+    assert "getReportRowColor" in text
+    assert "colorMatched" in text
     assert "function filterReportTable" in text
 
 def test_single_feeder_domain_only_error_is_relinkable_without_changing_device(tmp_path):

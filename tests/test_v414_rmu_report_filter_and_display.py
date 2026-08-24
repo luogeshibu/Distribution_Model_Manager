@@ -111,6 +111,11 @@ def test_rmu_html_has_independent_fuzzy_filters_for_both_tables(tmp_path):
     assert "filterReportTable('rmu-device-table'" in text
     assert "输入环网柜名称或任意字符，模糊匹配" in text
     assert "haystack.includes(query)" in text
+    assert "id='rmu-summary-table-color-filter'" in text
+    assert "id='rmu-device-table-color-filter'" in text
+    assert "全部颜色" in text
+    assert "getReportRowColor" in text
+    assert "colorMatched" in text
     assert ">SMART</td>" in text
     assert ">NORMAL</td>" in text
 

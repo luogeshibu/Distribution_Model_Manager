@@ -1,3 +1,10 @@
+# v4.1.28
+
+- Added an independent status-color filter to every searchable HTML report table.
+- Existing fuzzy text filtering is unchanged; text and color filters can now be combined.
+- Color choices are localized in Simplified Chinese and English.
+- No RMU, feeder, Oracle, SSH, XML parsing, validation, association, or write-back business logic was changed.
+
 # v4.1.27
 
 - Added configurable RMU name exclusion strings in RMU Recognition. Default exclusions: `N.O.P`, `NOP`, `N-O-P`, `N_O_P`, `SFI`, `DAS/OK`. Matching is exact (case-insensitive after whitespace normalization), not substring-based.

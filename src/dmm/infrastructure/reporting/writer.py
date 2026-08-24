@@ -880,6 +880,17 @@ def _table_html(
 ):
     english = normalize_language(language) == "en_US"
     body = []
+    present_colors = set()
+    class_to_color = {
+        "pass": "green",
+        "warn": "yellow",
+        "relink": "orange",
+        "create": "orange",
+        "rmu-relink": "purple",
+        "blocked": "blue",
+        "info": "blue",
+        "fail": "red",
+    }
     for row in rows:
         if status_field:
             # Some feeder rows keep status=WARN for operational readiness while
@@ -894,6 +905,9 @@ def _table_html(
             )
         else:
             cls = ""
+        row_color = class_to_color.get(cls, "")
+        if row_color:
+            present_colors.add(row_color)
         select_cell = (
             "<td class='select-col'>"
             "<input type='checkbox' class='row-check' "
@@ -921,12 +935,35 @@ def _table_html(
     filter_html = ""
     if table_id:
         placeholder = filter_placeholder or ("Enter any text to filter" if english else "输入任意内容进行模糊筛选")
+        color_labels = {
+            "green": "Green" if english else "绿色",
+            "yellow": "Yellow" if english else "黄色",
+            "orange": "Orange" if english else "橙色",
+            "purple": "Purple" if english else "紫色",
+            "blue": "Blue" if english else "蓝色",
+            "red": "Red" if english else "红色",
+        }
+        color_order = ["green", "yellow", "orange", "purple", "blue", "red"]
+        color_options = [
+            f"<option value='{color}'>{esc(color_labels[color])}</option>"
+            for color in color_order
+            if color in present_colors
+        ]
+        color_select = (
+            f"<select class='table-color-filter' id='{esc(table_id)}-color-filter' "
+            f"onchange=\"filterReportTable('{esc(table_id)}')\">"
+            + ("<option value='all'>All Colors</option>" if english else "<option value='all'>全部颜色</option>")
+            + "".join(color_options)
+            + "</select>"
+        )
         filter_html = (
             "<div class='table-filter'>"
             + ("<label>Filter:</label>" if english else "<label>筛选：</label>")
-            + f"<input type='search' class='table-filter-input' "
+            + f"<input type='search' class='table-filter-input' id='{esc(table_id)}-text-filter' "
             + f"placeholder='{esc(placeholder)}' "
-            + f"oninput=\"filterReportTable('{esc(table_id)}', this.value)\">"
+            + f"oninput=\"filterReportTable('{esc(table_id)}')\">"
+            + ("<label>Color:</label>" if english else "<label>颜色：</label>")
+            + color_select
             + f"<span class='filter-count' id='{esc(table_id)}-count'>"
             + ((f"{len(rows)} rows") if english else (f"共 {len(rows)} 行"))
             + "</span>"
@@ -1063,6 +1100,8 @@ thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}
 .table-filter label{{font-weight:600;color:var(--green-dark)}}
 .table-filter-input{{width:min(520px,70vw);padding:8px 11px;border:1px solid var(--border);border-radius:6px;font-size:13px;outline:none;background:#fff;color:var(--text)}}
 .table-filter-input:focus{{border-color:var(--green);box-shadow:0 0 0 2px rgba(0,140,106,.12)}}
+.table-color-filter{{padding:8px 30px 8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:#fff;color:var(--text);outline:none;cursor:pointer}}
+.table-color-filter:focus{{border-color:var(--green);box-shadow:0 0 0 2px rgba(0,140,106,.12)}}
 .filter-count{{font-size:12px;color:#607D74}}
 .status-list{{display:flex;flex-direction:column;gap:8px;max-width:1100px}}
 .status-item{{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:14px;padding:9px 12px;border-radius:6px;border:1px solid var(--border)}}
@@ -1137,21 +1176,37 @@ function toggleSelectedRow(cb) {{
   }}
 }}
 
-function filterReportTable(tableId, value) {{
+function getReportRowColor(row) {{
+  if (row.classList.contains('pass')) return 'green';
+  if (row.classList.contains('warn')) return 'yellow';
+  if (row.classList.contains('relink') || row.classList.contains('create')) return 'orange';
+  if (row.classList.contains('rmu-relink')) return 'purple';
+  if (row.classList.contains('blocked') || row.classList.contains('info')) return 'blue';
+  if (row.classList.contains('fail')) return 'red';
+  return '';
+}}
+function filterReportTable(tableId) {{
   const table = document.getElementById(tableId);
   if (!table || !table.tBodies || !table.tBodies.length) return;
-  const query = String(value || '').trim().toLocaleUpperCase();
+  const textInput = document.getElementById(tableId + '-text-filter');
+  const colorSelect = document.getElementById(tableId + '-color-filter');
+  const query = String(textInput ? textInput.value : '').trim().toLocaleUpperCase();
+  const color = String(colorSelect ? colorSelect.value : 'all');
   const rows = Array.from(table.tBodies[0].rows);
   let visible = 0;
   for (const row of rows) {{
     const haystack = String(row.textContent || '').toLocaleUpperCase();
-    const matched = !query || haystack.includes(query);
+    const textMatched = !query || haystack.includes(query);
+    const rowColor = getReportRowColor(row);
+    const colorMatched = color === 'all' || rowColor === color;
+    const matched = textMatched && colorMatched;
     row.style.display = matched ? '' : 'none';
     if (matched) visible += 1;
   }}
   const counter = document.getElementById(tableId + '-count');
   if (counter) {{
-    counter.textContent = query
+    const filtered = Boolean(query) || color !== 'all';
+    counter.textContent = filtered
       ? ("{language}" === "en_US" ? `Matched ${{visible}} / ${{rows.length}} rows` : `匹配 ${{visible}} / ${{rows.length}} 行`)
       : ("{language}" === "en_US" ? `${{rows.length}} rows` : `共 ${{rows.length}} 行`);
   }}
@@ -1255,6 +1310,8 @@ td.select-col{{background:inherit}}
 .table-filter label{{font-weight:600;color:var(--green-dark)}}
 .table-filter-input{{width:min(520px,70vw);padding:8px 11px;border:1px solid var(--border);border-radius:6px;font-size:13px;outline:none;background:#fff;color:var(--text)}}
 .table-filter-input:focus{{border-color:var(--green);box-shadow:0 0 0 2px rgba(0,140,106,.12)}}
+.table-color-filter{{padding:8px 30px 8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:#fff;color:var(--text);outline:none;cursor:pointer}}
+.table-color-filter:focus{{border-color:var(--green);box-shadow:0 0 0 2px rgba(0,140,106,.12)}}
 .filter-count{{font-size:12px;color:#607D74}}
 .status-list{{display:flex;flex-direction:column;gap:8px;max-width:1100px}}
 .status-item{{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:14px;padding:9px 12px;border-radius:6px;border:1px solid var(--border)}}
@@ -1316,21 +1373,37 @@ function toggleSelectedRow(cb) {{
   if (!row) return;
   row.classList.toggle('row-selected', cb.checked);
 }}
-function filterReportTable(tableId, value) {{
+function getReportRowColor(row) {{
+  if (row.classList.contains('pass')) return 'green';
+  if (row.classList.contains('warn')) return 'yellow';
+  if (row.classList.contains('relink') || row.classList.contains('create')) return 'orange';
+  if (row.classList.contains('rmu-relink')) return 'purple';
+  if (row.classList.contains('blocked') || row.classList.contains('info')) return 'blue';
+  if (row.classList.contains('fail')) return 'red';
+  return '';
+}}
+function filterReportTable(tableId) {{
   const table = document.getElementById(tableId);
   if (!table || !table.tBodies || !table.tBodies.length) return;
-  const query = String(value || '').trim().toLocaleUpperCase();
+  const textInput = document.getElementById(tableId + '-text-filter');
+  const colorSelect = document.getElementById(tableId + '-color-filter');
+  const query = String(textInput ? textInput.value : '').trim().toLocaleUpperCase();
+  const color = String(colorSelect ? colorSelect.value : 'all');
   const rows = Array.from(table.tBodies[0].rows);
   let visible = 0;
   for (const row of rows) {{
     const haystack = String(row.textContent || '').toLocaleUpperCase();
-    const matched = !query || haystack.includes(query);
+    const textMatched = !query || haystack.includes(query);
+    const rowColor = getReportRowColor(row);
+    const colorMatched = color === 'all' || rowColor === color;
+    const matched = textMatched && colorMatched;
     row.style.display = matched ? '' : 'none';
     if (matched) visible += 1;
   }}
   const counter = document.getElementById(tableId + '-count');
   if (counter) {{
-    counter.textContent = query
+    const filtered = Boolean(query) || color !== 'all';
+    counter.textContent = filtered
       ? ("{language}" === "en_US" ? `Matched ${{visible}} / ${{rows.length}} rows` : `匹配 ${{visible}} / ${{rows.length}} 行`)
       : ("{language}" === "en_US" ? `${{rows.length}} rows` : `共 ${{rows.length}} 行`);
   }}

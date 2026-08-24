@@ -2176,3 +2176,7 @@ SSH 模式的硬规则：
 
 如果服务器上的同名 G 文件之后更新，需要重新执行【模型校验】。
 新一次校验会重新下载服务器当时的最新版本。
+### HTML report filtering
+
+Searchable RMU and feeder HTML tables support both fuzzy text filtering and a single status-color filter. The two filters are combined, and the UI is localized for Simplified Chinese and English.
+
