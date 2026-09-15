@@ -1,4 +1,22 @@
-# 配网模型管理工具 / Distribution Model Manager v4.1.27
+# 配网模型管理工具 / Distribution Model Manager v4.1.39
+
+
+## v4.1.39：馈线来源按模式显示 / Mode-specific Feeder Source UI
+
+- FACID、文件名、人工输入三种模式只显示当前模式真正需要的输入控件。
+- Manual 模式下人工目标馈线可直接编辑、删除和清空。
+- This release changes feeder-source UI only; feeder resolution business rules remain unchanged from v4.1.38.
+
+## v4.1.38：人工目标优先 + ABH 批量站内解析 / Manual Target Priority + ABH Batch Resolution
+
+- FACID、文件名、人工输入三种馈线来源保持完全独立；已有根 facID 只表示当前状态。
+- **人工模式是绝对目标**：例如输入 `ABH AH303`，只按该变电站+馈线查询 13500；不存在直接 FAIL，不回退 facID/文件名；不唯一也禁止自动选择。
+- 如果人工/文件名目标与当前 G.facID 不同，目标仍以本次选择为准；未勾选“允许覆盖”时阻断回写并提示，勾选后 SINGLE_FEEDER 安全副本允许覆盖根 facID 并重新分配跨馈线 FeedLine。
+- **批量文件名模式**：可只输入变电站名 `ABH`；程序逐文件读取末尾馈线号，如 `JED-NTH-ABH-03...` 的 `03`，只在 ABH 站馈线集合内唯一解析为 `AH303`。
+- 批量站名也可留空自动识别；`JED-NTH-ABH` 会先尝试完整站点标识，再安全回退实际 405/substation 名称 `ABH`。
+- 文件已带完整馈线号时（如 `JED-NTH-ABH-AH303...`）直接使用 `AH303`，不会重复添加前缀。
+- 单文件和批量目录严格共用同一解析器；组合大图安全边界、馈线段缺失创建、Domain 校验、Oracle INSERT 边界及 g_output 安全副本规则不变。
+- 中文/English UI、日志和帮助同步更新。
 
 ## v4.1.27: RMU Name Exclusions and Large-label Recognition
 

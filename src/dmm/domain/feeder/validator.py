@@ -115,6 +115,7 @@ class FeederValidator:
         rmu_device_rules: Optional[Dict[str, Dict[str, Any]]] = None,
         rmu_name_positions: Optional[Dict[str, bool]] = None,
         rmu_name_exclusions: Optional[Iterable[str]] = None,
+        allow_feeder_override: bool = False,
         log=None,
     ):
         self.db = db
@@ -125,6 +126,7 @@ class FeederValidator:
         self.rmu_device_rules = dict(rmu_device_rules or DEFAULT_DEVICE_RULES)
         self.rmu_name_positions = dict(rmu_name_positions or DEFAULT_NAME_POSITIONS)
         self.rmu_name_exclusions = list(rmu_name_exclusions or DEFAULT_RMU_NAME_EXCLUSIONS)
+        self.allow_feeder_override = bool(allow_feeder_override)
         self.log = log or (lambda msg: None)
 
     @staticmethod
@@ -297,7 +299,7 @@ class FeederValidator:
         buses = [obj for obj in parsed.objects if obj.tag == "Bus"]
         texts = [
             obj for obj in parsed.objects
-            if obj.tag.lower() in {"text", "dtext"}
+            if obj.tag.lower() == "text"
             and self._is_reasonable_feeder_label(self._text_value(obj))
         ]
 
@@ -780,16 +782,52 @@ class FeederValidator:
             or source
             or ""
         ).upper()
+        root_target_differs = bool(root_facid) and root_facid != str(feeder_id)
         root_writeback = (
             report.get("drawing_type", "SINGLE_FEEDER") == "SINGLE_FEEDER"
-            and not root_facid
             and source_upper in {"FILENAME", "MANUAL"}
+            and (
+                not root_facid
+                or (root_target_differs and self.allow_feeder_override)
+            )
         )
         report["feeder_root_writeback_needed"] = (
             "YES" if root_writeback else "NO"
         )
         report["feeder_root_current_facid"] = root_facid
         report["feeder_root_expected_facid"] = str(feeder_id)
+        report["feeder_override_enabled"] = (
+            "YES" if self.allow_feeder_override else "NO"
+        )
+        report["feeder_root_conflict"] = (
+            "YES" if root_target_differs else "NO"
+        )
+
+        if (
+            root_target_differs
+            and source_upper in {"FILENAME", "MANUAL"}
+            and not self.allow_feeder_override
+        ):
+            report["association_eligible"] = False
+            report["status"] = "FAIL"
+            report["severity"] = "FEEDER_MISMATCH"
+            report["reason"] = (
+                "FEEDER_ROOT_FACID_CONFLICT: "
+                f"当前 G.facID={root_facid}；本次{source_upper}解析目标 FEEDER_ID={feeder_id}；"
+                "未启用“允许覆盖现有 facID 和馈线段关联”，禁止生成跨馈线回写候选。"
+            )
+            for idx, obj in enumerate(feedlines, start=1):
+                row = self._new_row(obj, idx)
+                row.update({
+                    "status": "FAIL",
+                    "severity": "FEEDER_MISMATCH",
+                    "association_ready": "NO",
+                    "writeback_needed": "NO",
+                    "reason": report["reason"],
+                })
+                report["feedline_rows"].append(row)
+            report["summary"] = self._summary(report)
+            return report
 
         # v4.1.7: feeder-only drawings are valid.  When a feeder has already
         # been uniquely resolved but this G file contains zero FeedLine
@@ -975,13 +1013,31 @@ class FeederValidator:
             row["assigned_section_name"] = norm(current_record.get("name"))
             row["assigned_bv_id"] = current_record.get("bv_id", "")
 
-            # Cross-feeder links remain a hard error. Never turn a domain
-            # correction into an automatic feeder reassignment.
+            # Cross-feeder links are normally a hard error.  v4.1.38 keeps an
+            # explicit operator override: only when enabled may this existing
+            # FeedLine be returned to the target feeder's allocation pool.
             if current_feeder_id != feeder_id:
+                if self.allow_feeder_override:
+                    row.update({
+                        "model_link_correct": "NO",
+                        "override_cross_feeder": "YES",
+                        "status": "WARN",
+                        "severity": "RELINK",
+                        "association_ready": "NO",
+                        "writeback_needed": "NO",
+                        "reason": (
+                            "CURRENT_MODEL_FEEDER_OVERRIDE_REQUESTED: "
+                            f"当前FeedLine实际feeder_id={current_feeder_id or '-'}；"
+                            f"目标feeder_id={feeder_id}；已启用人工覆盖，"
+                            "将在目标馈线现有/新建馈线段中重新分配。"
+                        ),
+                    })
+                    rows.append(row)
+                    continue
                 row["reason"] = (
                     "CURRENT_MODEL_FEEDER_MISMATCH: "
                     f"当前FeedLine实际feeder_id={current_feeder_id or '-'}；"
-                    f"期望feeder_id={feeder_id}"
+                    f"期望feeder_id={feeder_id}；未启用人工覆盖。"
                 )
                 rows.append(row)
                 continue
@@ -1072,6 +1128,7 @@ class FeederValidator:
             if (
                 row.get("model_linked") == "NO"
                 or row.get("relink_missing_section") == "YES"
+                or row.get("override_cross_feeder") == "YES"
             )
         ]
 
@@ -1123,7 +1180,13 @@ class FeederValidator:
             row["association_ready"] = "YES"
             row["writeback_needed"] = "YES"
             row["status"] = "WARN"
-            if row.get("relink_missing_section") == "YES":
+            if row.get("override_cross_feeder") == "YES":
+                row["severity"] = "RELINK"
+                row["reason"] = (
+                    "CROSS_FEEDER_OVERRIDE_READY: 已明确启用人工覆盖；"
+                    "该 FeedLine 将改关联到本次选择的目标馈线，并使用目标馈线未占用数据库记录。"
+                )
+            elif row.get("relink_missing_section") == "YES":
                 row["severity"] = "RELINK"
                 row["reason"] = (
                     "STALE_SECTION_RELINK_READY: 旧13503设备已不存在；"
@@ -1216,7 +1279,7 @@ class FeederValidator:
         buses = [obj for obj in parsed.objects if obj.tag == "Bus"]
         texts = [
             obj for obj in parsed.objects
-            if obj.tag.lower() in {"text", "dtext"}
+            if obj.tag.lower() == "text"
             and self._is_reasonable_feeder_label(self._text_value(obj))
         ]
 

@@ -246,7 +246,7 @@ class GParser:
         """Identify RMU cabinet type such as 2L1T.
 
         Field workflow rule (v4.1.21):
-        1. Text/DText inside the RMU rectangle remains one independent source:
+        1. Text inside the RMU rectangle remains one independent source:
            visible Y* labels count as L ways and Q* labels count as T ways.
         2. The devref source ONLY inspects ``CBreakerDis`` objects.  Ground
            disconnectors (``ZhaiWaiJieDiDaoZha``), BusDis and every other
@@ -282,7 +282,7 @@ class GParser:
 
         text_labels = []
         for obj in inside:
-            if obj.tag.lower() not in {"text", "dtext"}:
+            if obj.tag.lower() != "text":
                 continue
             value = self._text_value(obj).strip().upper()
             if re.fullmatch(r"Y\d+", value) or re.fullmatch(r"Q\d+", value):
@@ -571,7 +571,7 @@ class GParser:
 
         markers = []
         for obj in parsed.objects:
-            if obj.tag.lower() not in {"text", "dtext"}:
+            if obj.tag.lower() != "text":
                 continue
             value = self._text_value(obj).strip().upper()
             if value not in {"SMART", "SMR"}:
@@ -685,13 +685,13 @@ class GParser:
         frames: Sequence[RmuFrame],
         positions: Sequence[str],
     ) -> Dict[tuple[int, str], List[LabelCandidate]]:
-        """Globally assign RMU name Text/DText objects to RMU frames.
+        """Globally assign RMU name Text objects to RMU frames.
 
         Business rules:
         1. ONLY user-selected directions participate.
         2. Search the entire G drawing in those directions. There is NO
            cabinet-name maximum-distance cut-off.
-        3. Every Text/DText has at most one RMU owner. Ownership goes to the
+        3. Every Text has at most one RMU owner. Ownership goes to the
            nearest geometrically compatible RMU across the whole drawing.
         4. A text near a corner may match multiple selected directions for one
            RMU; only that RMU's best direction is retained.
@@ -784,7 +784,7 @@ class GParser:
         }
 
         for obj in parsed.objects:
-            if obj.tag.lower() not in ("text", "dtext"):
+            if obj.tag.lower() != "text":
                 continue
 
             text = self._text_value(obj)
@@ -909,7 +909,7 @@ class GParser:
         result = []
         r = frame.frame.box
         for obj in parsed.objects:
-            if obj.tag.lower() not in ("text", "dtext"):
+            if obj.tag.lower() != "text":
                 continue
             text = self._text_value(obj)
             if not text:
@@ -1045,4 +1045,3 @@ class GParser:
             used_right.add(right.xml_id)
             result[left.xml_id] = right.xml_id
         return result
-

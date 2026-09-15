@@ -68,7 +68,7 @@ class RmuValidator:
                 "status": "FAIL",
                 "reason": (
                     "RMU_NAME_NOT_PARSED: "
-                    "在当前配置的环网柜名称方向内未解析到有效名称文字"
+                    "在自动识别或当前指定的环网柜名称方向内未解析到有效名称文字"
                 ),
                 "candidate_rows": [],
                 "selected": None,

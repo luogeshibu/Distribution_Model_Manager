@@ -24,14 +24,15 @@ def test_local_facid_regex_fixed():
     assert r'<G\b[^>]*\bfacID="([^"]*)"' in source
     assert r'<G\\b[^>]*\\bfacID="([^"]*)"' not in source
 
-def test_ui_has_hard_lock_warning():
+def test_ui_keeps_sources_independent_and_exposes_explicit_override():
     source = (
         Path(__file__).parents[1]
         / "src/dmm/ui/widgets/feeder_settings.py"
     ).read_text(encoding="utf-8")
-    assert "_facid_locked_value" in source
-    assert "QMessageBox.information" in source
-    assert "禁止使用文件名或人工输入重新查询馈线" in source
+    assert "允许覆盖现有 facID 和馈线段关联" in source
+    assert "feeder_station_hint" in source
+    assert "QMessageBox.information" not in source
+    assert "禁止使用文件名或人工输入重新查询馈线" not in source
 
 def test_execution_writes_root_facid_only_for_name_modes():
     source = (

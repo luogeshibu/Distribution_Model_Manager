@@ -10,7 +10,12 @@ from dmm.domain.feeder.validator import FeederValidator, natural_section_key, in
 from dmm.domain.gfile.parser import GParser
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 from dmm.domain.feeder.topology import FeederDrawingTopologyClassifier
-from dmm.config.defaults import DEFAULT_RMU_NAME_EXCLUSIONS, DEFAULT_NAME_POSITIONS
+from dmm.config.defaults import (
+    DEFAULT_RMU_NAME_DETECTION_MODE,
+    DEFAULT_RMU_NAME_EXCLUSIONS,
+    DEFAULT_NAME_POSITIONS,
+    resolve_rmu_name_positions,
+)
 
 
 class FeederModelModule(ModelModule):
@@ -18,7 +23,7 @@ class FeederModelModule(ModelModule):
     display_name = "馈线模型"
     description = (
         "馈线模型校验、数据库缺失馈线段补齐及安全回写。"
-        "单馈线图以 G 根节点 facID 为最高优先级；目录模式下单馈线只允许 facID。"
+        "FACID、文件名、人工输入三种馈线来源相互独立；单文件与批量目录使用同一解析规则。"
         "组合大图忽略根 facID，按单馈线 XML 指纹和连接拓扑审计 FeedLine 的 FEEDER_ID 一致性。"
     )
     SUPPORTED_OPERATIONS = (
@@ -29,6 +34,13 @@ class FeederModelModule(ModelModule):
 
     @staticmethod
     def _validator(db, settings, log_callback):
+        effective_positions = resolve_rmu_name_positions(
+            settings.get(
+                "rmu_name_detection_mode",
+                DEFAULT_RMU_NAME_DETECTION_MODE,
+            ),
+            settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS),
+        )
         return FeederValidator(
             db=db,
             parser=GParser(),
@@ -41,8 +53,9 @@ class FeederModelModule(ModelModule):
             feeder_table_id=int(
                 settings.get("feeder_table_id", 13500)
             ),
-            rmu_name_positions=settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS),
+            rmu_name_positions={position: True for position in effective_positions},
             rmu_name_exclusions=settings.get("rmu_name_exclusions", DEFAULT_RMU_NAME_EXCLUSIONS),
+            allow_feeder_override=bool(settings.get("allow_feeder_override", False)),
             log=log_callback,
         )
 
@@ -165,28 +178,25 @@ class FeederModelModule(ModelModule):
         return str(parsed.root.attrib.get("facID", "") or "").strip()
 
     def _build_single_file_fingerprint(self, db, g_file, profile, settings, log_callback):
-        """Create a trusted fingerprint from a SINGLE_FEEDER drawing.
+        """Create a trusted fingerprint from a resolved SINGLE_FEEDER drawing.
 
-        Directory mode intentionally accepts ONLY a populated root facID.
-        Filename/manual modes are not used to establish a fingerprint.
+        v4.1.38 uses the same selected feeder source for single-file and batch
+        processing.  FACID, FILENAME, and MANUAL therefore all work in a
+        directory; each file is resolved independently before its FeedLine XML
+        fingerprint is accepted.
         """
-        parsed = profile["parsed"]
-        facid = self._root_facid(parsed)
-        if not facid:
-            return None
-        try:
-            feeder_id = int(facid)
-        except Exception:
-            return None
-        feeder = db.get_feeder_info(
-            feeder_id,
-            table_id=int(settings.get("feeder_table_id", 13500)),
+        feeder, error = self._resolve_file_feeder_result(
+            db, g_file, settings, log_callback
         )
         if not feeder:
             log_callback(
-                f"[{Path(g_file).name}] 单馈线指纹跳过：facID={facid} 在 13500 中不存在。"
+                f"[{Path(g_file).name}] 单馈线指纹跳过：{error or 'FEEDER_NOT_RESOLVED'}"
             )
             return None
+        feeder_id = int_or_none(feeder.get("id"))
+        if feeder_id is None:
+            return None
+        parsed = profile["parsed"]
         ids = {
             str(obj.xml_id)
             for obj in parsed.objects
@@ -201,6 +211,7 @@ class FeederModelModule(ModelModule):
             "feeder_name": str(feeder.get("display_name") or feeder.get("name") or feeder_id),
             "feedline_ids": ids,
             "feedline_count": len(ids),
+            "resolution_source": str(feeder.get("_resolution_source") or ""),
         }
 
     def _audit_current_feedline_owner(self, db, obj, settings, owner_cache):
@@ -462,6 +473,245 @@ class FeederModelModule(ModelModule):
         )
         return regions
 
+    @staticmethod
+    def _filename_feeder_parts(g_file, station_hint=""):
+        """Return (station_hint, feeder_token, base_name) for one G filename.
+
+        Supported examples:
+            JED-NTH-ABH-03.sln.pic.g       -> JED-NTH-ABH / 03
+            JED-NTH-ABH-AH303.sln.pic.g    -> JED-NTH-ABH / AH303
+            ...sln.pic(20260831-143200).g   -> same logical base
+
+        An operator-provided station_hint (ABH or JED-NTH-ABH) overrides only
+        the station lookup text; the feeder token is always extracted from
+        each file independently, which keeps single-file and batch processing
+        on the exact same resolver path.
+        """
+        name = Path(g_file).name
+        base = re.sub(
+            r"\.sln\.pic(?:\([^)]*\))?\.g$",
+            "",
+            name,
+            flags=re.I,
+        )
+        if base == name:
+            base = re.sub(r"\.g$", "", name, flags=re.I)
+
+        parts = [x for x in re.split(r"[-_\s]+", base) if x]
+        if len(parts) < 2:
+            return str(station_hint or "").strip(), "", base
+
+        token = str(parts[-1]).strip()
+        # A feeder token must carry a number. This rejects suffixes such as
+        # MERGED/TEST while accepting both 03 and AH303.
+        if not re.fullmatch(r"(?=.*\d)[A-Za-z0-9]+", token):
+            return str(station_hint or "").strip(), "", base
+
+        auto_station = "-".join(parts[:-1]).strip("-_")
+        station = str(station_hint or "").strip() or auto_station
+        return station, token, base
+
+    @classmethod
+    def _station_record_matches(cls, record, station_hint):
+        target = cls._normalize_lookup_text(station_hint)
+        station = cls._normalize_lookup_text(record.get("station_name", ""))
+        if not target or not station:
+            return False
+        # A short substation name such as ABH may identify a database display
+        # station such as JED NTH ABH.  Conversely, a filename/site identifier
+        # such as JED-NTH-ABH may need to resolve to the actual 405/substation
+        # name ABH.  Candidate generation below tries both forms explicitly;
+        # this predicate only decides whether one candidate fits one row.
+        return station == target or station.endswith(target) or target.endswith(station)
+
+    @classmethod
+    def _station_hint_candidates(cls, station_hint):
+        """Return ordered station lookup candidates without guessing feeder data.
+
+        Examples:
+            ABH         -> [ABH]
+            JED-NTH-ABH -> [JED-NTH-ABH, ABH]
+
+        The full operator/file identifier is always tried first.  The final
+        segment is a controlled fallback for deployments where region prefixes
+        (JED/NTH/...) are not part of 405/substation.NAME.
+        """
+        raw = str(station_hint or "").strip().strip("-_")
+        if not raw:
+            return []
+        out = []
+        for value in (raw, re.split(r"[-_\s]+", raw)[-1]):
+            value = str(value or "").strip()
+            norm = cls._normalize_lookup_text(value)
+            if value and norm and all(cls._normalize_lookup_text(x) != norm for x in out):
+                out.append(value)
+        return out
+
+    def _station_feeder_rows(self, db, station_hint, feeder_table_id, feeder_token=""):
+        """Resolve feeder rows owned by exactly one station candidate.
+
+        Compatibility/precision order:
+          1. Try station+token through the existing Oracle helper.  This keeps
+             older deployments where station and feeder text are searchable
+             only as one display string (for example JED-CTL-ADF + 16).
+          2. Try station-only and resolve numeric/full feeder tokens inside the
+             returned station set.  This supports production ABH where the
+             filename site is JED-NTH-ABH but 405/substation.NAME is ABH and
+             feeder NAME/CODE is AH303.
+
+        The full site identifier is tried before the short final segment.
+        """
+        attempts = []
+        candidates = self._station_hint_candidates(station_hint)
+        token_norm = self._normalize_lookup_text(feeder_token)
+
+        def accept_rows(rows, candidate):
+            station_rows = [
+                dict(row) for row in rows
+                if self._station_record_matches(row, candidate)
+            ]
+            if not station_rows:
+                return []
+            station_ids = {
+                int_or_none(row.get("st_id"))
+                for row in station_rows
+                if int_or_none(row.get("st_id")) is not None
+            }
+            if len(station_ids) > 1:
+                return []
+            return station_rows
+
+        if token_norm:
+            for candidate in candidates:
+                candidate_norm = self._normalize_lookup_text(candidate)
+                attempts.append(f"{candidate}+{feeder_token}")
+                rows = db.find_feeders_by_name_hint(
+                    f"{candidate_norm}{token_norm}",
+                    table_id=feeder_table_id,
+                )
+                station_rows = accept_rows(rows, candidate)
+                if station_rows:
+                    return station_rows, candidate, attempts
+
+        for candidate in candidates:
+            candidate_norm = self._normalize_lookup_text(candidate)
+            attempts.append(candidate)
+            rows = db.find_feeders_by_name_hint(
+                candidate_norm,
+                table_id=feeder_table_id,
+            )
+            station_rows = accept_rows(rows, candidate)
+            if station_rows:
+                return station_rows, candidate, attempts
+        return [], "", attempts
+
+    @classmethod
+    def _feeder_record_tokens(cls, record):
+        out = []
+        for key in ("name", "code", "graph_name"):
+            value = cls._normalize_lookup_text(record.get(key, ""))
+            if value and value not in out:
+                out.append(value)
+        return out
+
+    def _resolve_filename_feeder(
+        self,
+        db,
+        g_file,
+        station_hint,
+        feeder_table_id,
+        log_callback,
+    ):
+        station, token, base = self._filename_feeder_parts(
+            g_file, station_hint
+        )
+        if not token:
+            return None, (
+                "FILENAME_FEEDER_TOKEN_NOT_FOUND: "
+                f"文件名={Path(g_file).name}；无法提取末尾馈线编号/完整馈线号。"
+            )
+        if not station:
+            return None, (
+                "FILENAME_STATION_NOT_FOUND: "
+                f"文件名={Path(g_file).name}；无法确定变电站标识。"
+            )
+
+        token_norm = self._normalize_lookup_text(token)
+        station_rows, matched_station, station_attempts = self._station_feeder_rows(
+            db, station, feeder_table_id, token
+        )
+
+        if not station_rows:
+            log_callback(
+                f"[{Path(g_file).name}] 文件名馈线识别失败："
+                f"变电站输入/解析值={station!r}；"
+                f"已尝试={','.join(station_attempts) or '-'}；"
+                "数据库未找到唯一站点下的馈线记录。"
+            )
+            return None, (
+                "FILENAME_STATION_NOT_UNIQUE_OR_NOT_FOUND: "
+                f"station={station}; attempts={station_attempts}; station_feeders=0"
+            )
+
+        has_letters = bool(re.search(r"[A-Za-z]", token))
+        matched = {}
+        for row in station_rows:
+            business_tokens = self._feeder_record_tokens(row)
+            if has_letters:
+                ok = token_norm in business_tokens
+            else:
+                # Numeric short form such as 03 is resolved only inside the
+                # already-confirmed station.  Leading zeroes are significant.
+                # Example: AH303 endswith 03 -> candidate; AH3 does not.
+                ok = any(
+                    candidate.endswith(token_norm)
+                    and len(candidate) > len(token_norm)
+                    for candidate in business_tokens
+                ) or token_norm in business_tokens
+            if ok:
+                rid = int_or_none(row.get("id"))
+                if rid is not None:
+                    matched[rid] = row
+
+        values = list(matched.values())
+        if len(values) != 1:
+            candidate_names = ", ".join(
+                str(x.get("display_name") or x.get("name") or x.get("id"))
+                for x in values[:8]
+            )
+            log_callback(
+                f"[{Path(g_file).name}] 文件名馈线识别失败："
+                f"变电站={(matched_station or station)!r}；馈线token={token!r}；"
+                f"匹配数={len(values)}；候选={candidate_names or '-'}。"
+            )
+            return None, (
+                "FILENAME_FEEDER_NOT_EXACTLY_ONE: "
+                f"station={station}; token={token}; matched={len(values)}"
+            )
+
+        record = dict(values[0])
+        resolved_name = str(
+            record.get("name")
+            or record.get("code")
+            or record.get("display_name")
+            or record.get("id")
+        )
+        evidence = (
+            f"station_input={station}; station_db={matched_station or station}; "
+            f"token={token}; resolved={resolved_name}; file={base}"
+        )
+        record["_resolution_source"] = "FILENAME"
+        record["_resolution_evidence"] = evidence
+        record["_filename_station"] = matched_station or station
+        record["_filename_token"] = token
+        log_callback(
+            f"[{Path(g_file).name}] 文件名馈线识别通过："
+            f"变电站={matched_station or station}；文件馈线号={token} -> "
+            f"{record.get('display_name') or record.get('name')} "
+            "(13500 站内唯一匹配)"
+        )
+        return record, ""
+
     def _resolve_file_feeder_result(
         self,
         db,
@@ -469,11 +719,13 @@ class FeederModelModule(ModelModule):
         settings,
         log_callback,
     ):
-        """Resolve feeder with facID as the highest-priority authority.
+        """Resolve one file's target feeder from exactly the selected source.
 
-        - Non-empty G.facID: force facID; ignore filename/manual completely.
-        - Empty G.facID: allow only the user-selected FILENAME or MANUAL mode.
-        - Name fallback is precise; leading zeros remain significant.
+        v4.1.38 keeps decoupled FACID / FILENAME / MANUAL.  A populated
+        root facID is current-state evidence only unless FACID is selected.
+        File-name mode works identically for one file and a whole directory;
+        every file independently extracts its own feeder token and is checked
+        for one unique database feeder under the resolved station.
         """
         parsed = GParser().parse(g_file)
         requested_mode = str(
@@ -481,6 +733,9 @@ class FeederModelModule(ModelModule):
         ).upper()
         manual = str(
             settings.get("manual_feeder_name", "") or ""
+        ).strip()
+        station_hint = str(
+            settings.get("feeder_station_hint", "") or ""
         ).strip()
         feeder_table_id = int(
             settings.get("feeder_table_id", 13500)
@@ -500,16 +755,6 @@ class FeederModelModule(ModelModule):
                     f"{record.get('name', '')}"
                 )
             )
-
-        def filename_hint():
-            name = Path(g_file).name
-            suffix = ".sln.pic.g"
-            base = (
-                name[:-len(suffix)]
-                if name.lower().endswith(suffix)
-                else Path(name).stem
-            )
-            return re.sub(r"[-_]+", " ", base).strip()
 
         def exact_by_text(value, source):
             value = str(value or "").strip()
@@ -537,6 +782,24 @@ class FeederModelModule(ModelModule):
 
             values = list(matched.values())
             if len(values) != 1:
+                if source == "MANUAL" and len(values) == 0:
+                    log_callback(
+                        f"[{Path(g_file).name}] 人工输入馈线不存在：{value!r}；"
+                        "本次人工输入是绝对目标，不会回退使用当前 facID 或文件名。"
+                    )
+                    return None, (
+                        "MANUAL_FEEDER_NOT_FOUND: "
+                        f"输入馈线不存在={value}"
+                    )
+                if source == "MANUAL":
+                    log_callback(
+                        f"[{Path(g_file).name}] 人工输入馈线不唯一：{value!r}；"
+                        f"数据库精确匹配数={len(values)}；禁止自动选择。"
+                    )
+                    return None, (
+                        "MANUAL_FEEDER_NOT_UNIQUE: "
+                        f"输入={value}; matched={len(values)}"
+                    )
                 log_callback(
                     f"[{Path(g_file).name}] 馈线精准匹配失败："
                     f"{source}={value!r}；精确匹配数={len(values)}。"
@@ -560,66 +823,65 @@ class FeederModelModule(ModelModule):
             parsed.root.attrib.get("facID", "") or ""
         ).strip()
 
-        # A populated facID is authoritative, regardless of the UI selection.
-        if raw_facid:
+        if requested_mode == "FACID":
+            if not raw_facid:
+                return None, (
+                    "FACID_EMPTY: 当前选择仅使用 G 根节点 facID，"
+                    "但该文件 facID 为空。"
+                )
             try:
                 fac_id = int(raw_facid)
             except Exception:
-                return None, (
-                    f"FACID_INVALID: facID={raw_facid!r}；"
-                    "facID 非空时禁止文件名/人工输入兜底。"
-                )
-
+                return None, f"FACID_INVALID: facID={raw_facid!r}"
             if fac_id <= 0:
-                return None, (
-                    f"FACID_INVALID: facID={raw_facid!r}；"
-                    "facID 非空时禁止文件名/人工输入兜底。"
-                )
-
-            if requested_mode != "FACID":
-                log_callback(
-                    f"[{Path(g_file).name}] 检测到 G.facID={fac_id}；"
-                    f"忽略当前 {requested_mode} 选择，强制使用 facID。"
-                )
-
+                return None, f"FACID_INVALID: facID={raw_facid!r}"
             record = db.get_feeder_info(
                 fac_id,
                 table_id=feeder_table_id,
             )
             if not record:
                 return None, (
-                    f"FACID_NOT_FOUND_IN_DMS_FEEDER_DEVICE: {fac_id}；"
-                    "facID 非空，不允许退回文件名或人工输入。"
+                    f"FACID_NOT_FOUND_IN_DMS_FEEDER_DEVICE: {fac_id}"
                 )
-
             log_callback(
-                f"[{Path(g_file).name}] G.facID={fac_id} -> "
+                f"[{Path(g_file).name}] 使用 G.facID={fac_id} -> "
                 f"{record.get('display_name') or record.get('name')} "
-                "(FACID_FORCED / 13500 精确ID匹配)"
+                "(FACID / 13500 精确ID匹配)"
             )
-            return enrich(
-                record,
-                "FACID_FORCED",
-                str(fac_id),
-            ), ""
+            return enrich(record, "FACID_FORCED", str(fac_id)), ""
 
-        # Only an empty facID enables name-based fallback.
         if requested_mode == "FILENAME":
-            return exact_by_text(
-                filename_hint(),
-                "FILENAME",
+            record, error = self._resolve_filename_feeder(
+                db,
+                g_file,
+                station_hint,
+                feeder_table_id,
+                log_callback,
             )
+        elif requested_mode == "MANUAL":
+            record, error = exact_by_text(manual, "MANUAL")
+        else:
+            return None, f"UNKNOWN_FEEDER_RESOLUTION_MODE: {requested_mode}"
 
-        if requested_mode == "MANUAL":
-            return exact_by_text(
-                manual,
-                "MANUAL",
-            )
+        if not record:
+            return None, error
 
-        return None, (
-            "FACID_EMPTY: 当前 G 文件 facID 为空；"
-            "请选择【仅使用文件名】或【仅使用人工输入】。"
-        )
+        target_id = int_or_none(record.get("id"))
+        allow_override = bool(settings.get("allow_feeder_override", False))
+        if raw_facid and target_id is not None and raw_facid != str(target_id):
+            if allow_override:
+                log_callback(
+                    f"[{Path(g_file).name}] 当前 G.facID={raw_facid} 与本次"
+                    f"{requested_mode}目标 FEEDER_ID={target_id} 不同；"
+                    "已启用人工覆盖，将在模型关联时允许覆盖根 facID 和错误馈线段关联。"
+                )
+            else:
+                log_callback(
+                    f"[{Path(g_file).name}] 当前 G.facID={raw_facid} 与本次"
+                    f"{requested_mode}目标 FEEDER_ID={target_id} 不同；"
+                    "未启用人工覆盖，现有跨馈线关系将保持阻断。"
+                )
+        return record, ""
 
     def _resolve_file_feeder(
         self,
@@ -905,6 +1167,7 @@ class FeederModelModule(ModelModule):
                 row.get("model_linked") == "YES"
                 and current_owner is not None
                 and current_owner != feeder_id
+                and not bool(settings.get("allow_feeder_override", False))
             ):
                 row.update(
                     status="FAIL",
@@ -917,7 +1180,7 @@ class FeederModelModule(ModelModule):
                         "CURRENT_MODEL_FEEDER_MISMATCH: "
                         f"FeedLine XML={row.get('xml_id') or '-'} 当前关联"
                         f"feeder_id={current_owner}，但本图期望feeder_id={feeder_id}；"
-                        "禁止自动跨馈线重关联。"
+                        "未启用人工覆盖，禁止自动跨馈线重关联。"
                     ),
                 )
                 continue
@@ -1116,7 +1379,8 @@ class FeederModelModule(ModelModule):
                 if fp:
                     fingerprints.append(fp)
             log_callback(
-                f"目录馈线模式：单馈线图只允许 facID；已建立可信单馈线指纹={len(fingerprints)}。"
+                f"目录馈线模式：使用当前所选馈线识别来源逐文件独立解析；"
+                f"已建立可信单馈线指纹={len(fingerprints)}。"
             )
 
         for idx, g_file in enumerate(files, start=1):
@@ -1165,21 +1429,13 @@ class FeederModelModule(ModelModule):
                 file_report["drawing_type"] = "AMBIGUOUS"
                 region_reports = file_report.get("feeder_regions") or [file_report]
             else:
-                if directory_mode:
-                    facid = self._root_facid(profile["parsed"])
-                    if not facid:
-                        feeder_record, feeder_error = None, (
-                            "DIRECTORY_MODE_FACID_REQUIRED: 目录模式下单馈线图只允许使用非空 G.facID。"
-                        )
-                    else:
-                        # facID is already authoritative in resolver.
-                        feeder_record, feeder_error = self._resolve_file_feeder_result(
-                            db, g_file, {**settings, "feeder_resolution_mode": "FACID"}, log_callback
-                        )
-                else:
-                    feeder_record, feeder_error = self._resolve_file_feeder_result(
-                        db, g_file, settings, log_callback
-                    )
+                # Single-file and batch/directory processing intentionally share
+                # exactly the same resolver.  In FILENAME mode every file parses
+                # its own station/token; FACID and MANUAL likewise respect the
+                # operator's explicit source selection.
+                feeder_record, feeder_error = self._resolve_file_feeder_result(
+                    db, g_file, settings, log_callback
+                )
                 if feeder_record:
                     resolution_source = str(
                         feeder_record.get("_resolution_source")
@@ -1339,23 +1595,36 @@ class FeederModelModule(ModelModule):
             # object whether or not FeedLine objects exist. Breaker/Busbar and
             # section-link state do not gate this feeder-master writeback.
             if report.get("feeder_root_writeback_needed") == "YES":
+                current_root_facid = str(
+                    report.get("feeder_root_current_facid", "") or ""
+                ).strip()
+                root_override = bool(current_root_facid)
                 root_row = {
                     "object_type": "G",
                     "xml_id": "root",
                     "order_index": "-",
-                    "model_linked": "NO",
-                    "model_link_correct": "",
+                    "model_linked": "YES" if root_override else "NO",
+                    "model_link_correct": "NO" if root_override else "",
                     "status": "WARN",
-                    "severity": "UNLINKED",
+                    "severity": "RELINK" if root_override else "UNLINKED",
                     "association_ready": "YES",
                     "writeback_needed": "YES",
                     "assigned_section_name": "G根节点 facID",
                     "assigned_device_id": report.get("feeder_id", ""),
                     "expected_keyid": "",
                     "reason": (
-                        "FEEDER_ROOT_FACID_WRITEBACK_READY: "
-                        f"facID -> {report.get('feeder_id', '')}; "
-                        "仅关联馈线本体，不创建馈线段。"
+                        (
+                            "FEEDER_ROOT_FACID_OVERRIDE_READY: "
+                            f"current facID={current_root_facid} -> "
+                            f"target={report.get('feeder_id', '')}; "
+                            "已启用人工覆盖，仅修改安全输出副本。"
+                        )
+                        if root_override
+                        else (
+                            "FEEDER_ROOT_FACID_WRITEBACK_READY: "
+                            f"facID -> {report.get('feeder_id', '')}; "
+                            "仅关联馈线本体，不创建馈线段。"
+                        )
                     ),
                 }
                 report["feeder_root_candidate_row"] = dict(root_row)
@@ -1490,6 +1759,16 @@ class FeederModelModule(ModelModule):
             "skipped_rmus": skipped_rmus,
             "file_fingerprints": fingerprints,
             "settings_snapshot": {
+                "rmu_name_detection_mode": str(
+                    settings.get(
+                        "rmu_name_detection_mode",
+                        DEFAULT_RMU_NAME_DETECTION_MODE,
+                    )
+                    or DEFAULT_RMU_NAME_DETECTION_MODE
+                ).upper(),
+                "rmu_name_positions": dict(
+                    settings.get("rmu_name_positions", {})
+                ),
                 "feeder_table_id": int(
                     settings.get("feeder_table_id", 13500)
                 ),
@@ -1505,6 +1784,12 @@ class FeederModelModule(ModelModule):
                 "manual_feeder_name": str(
                     settings.get("manual_feeder_name", "") or ""
                 ).strip(),
+                "feeder_station_hint": str(
+                    settings.get("feeder_station_hint", "") or ""
+                ).strip(),
+                "allow_feeder_override": bool(
+                    settings.get("allow_feeder_override", False)
+                ),
                 "feeder_drawing_mode": str(
                     settings.get("feeder_drawing_mode", "AUTO") or "AUTO"
                 ).upper(),
@@ -1537,6 +1822,16 @@ class FeederModelModule(ModelModule):
             raise RuntimeError("没有可执行的馈线模型校验候选结果。")
 
         current_snapshot = {
+            "rmu_name_detection_mode": str(
+                settings.get(
+                    "rmu_name_detection_mode",
+                    DEFAULT_RMU_NAME_DETECTION_MODE,
+                )
+                or DEFAULT_RMU_NAME_DETECTION_MODE
+            ).upper(),
+            "rmu_name_positions": dict(
+                settings.get("rmu_name_positions", {})
+            ),
             "feeder_table_id": int(settings.get("feeder_table_id", 13500)),
             "section_table_id": int(settings.get("section_table_id", 13503)),
             "section_domain": int(settings.get("section_domain", 1)),
@@ -1546,6 +1841,12 @@ class FeederModelModule(ModelModule):
             "manual_feeder_name": str(
                 settings.get("manual_feeder_name", "") or ""
             ).strip(),
+            "feeder_station_hint": str(
+                settings.get("feeder_station_hint", "") or ""
+            ).strip(),
+            "allow_feeder_override": bool(
+                settings.get("allow_feeder_override", False)
+            ),
             "feeder_drawing_mode": str(
                 settings.get("feeder_drawing_mode", "AUTO") or "AUTO"
             ).upper(),
@@ -1559,19 +1860,10 @@ class FeederModelModule(ModelModule):
         # Backward compatible with older in-memory/test previews that do not
         # contain newly introduced feeder settings: only keys present in the
         # validation snapshot participate in the consistency check.
-        preview_reports = list(preview_data.get("reports", []) or [])
-        all_facid_forced = bool(preview_reports) and all(
-            str(
-                report.get("feeder_resolution_source")
-                or report.get("feeder_hint_source")
-                or ""
-            ).upper() == "FACID_FORCED"
-            for report in preview_reports
-        )
-        ignored_snapshot_keys = (
-            {"feeder_resolution_mode", "manual_feeder_name"}
-            if all_facid_forced else set()
-        )
+        # v4.1.38: the selected feeder source is always explicit.  Every
+        # source-specific setting therefore participates in the validation ->
+        # execution consistency check; no populated facID silently overrides it.
+        ignored_snapshot_keys = set()
         if any(
             current_snapshot.get(key) != value
             for key, value in validated_snapshot.items()
@@ -1719,12 +2011,17 @@ class FeederModelModule(ModelModule):
                     current_root_facid = str(
                         parsed_exec.root.attrib.get("facID", "") or ""
                     ).strip()
-                    if current_root_facid:
+                    if (
+                        current_root_facid
+                        and current_root_facid != str(feeder_id)
+                        and not bool(settings.get("allow_feeder_override", False))
+                    ):
                         raise RuntimeError(
-                            "执行阶段发现 G.facID 已非空，禁止使用文件名/人工输入"
-                            f"结果覆盖：{source_file} | facID={current_root_facid}"
+                            "执行阶段发现当前 G.facID 与目标馈线不同，且未启用人工覆盖："
+                            f"{source_file} | current={current_root_facid} | target={feeder_id}"
                         )
-                    facid_writeback_by_file[str(source_file)] = feeder_id
+                    if current_root_facid != str(feeder_id):
+                        facid_writeback_by_file[str(source_file)] = feeder_id
 
                 if not root_changes and not feedline_changes:
                     continue

@@ -34,6 +34,35 @@ DEFAULT_NAME_POSITIONS = {
     "bottom": False,
 }
 
+# RMU name labels are searched in all four directions by default.  The
+# checkbox map above remains as a legacy/advanced override for drawings that
+# use a known fixed layout.
+RMU_NAME_DIRECTIONS = ("top", "right", "left", "bottom")
+DEFAULT_RMU_NAME_DETECTION_MODE = "AUTO"
+
+
+def resolve_rmu_name_positions(mode="AUTO", configured_positions=None):
+    """Return the effective RMU-name directions for a validation run.
+
+    ``AUTO`` deliberately does not require a direction from the user.  The
+    parser still uses direction as one spatial feature, but searches all four
+    directions and lets the global ownership/scoring rules decide.
+
+    ``FIXED`` preserves the previous checkbox behavior.  If an old caller
+    supplies an empty map, fall back to the historical top direction instead
+    of making the entire validation pipeline fail unexpectedly.
+    """
+    if str(mode or DEFAULT_RMU_NAME_DETECTION_MODE).strip().upper() == "AUTO":
+        return list(RMU_NAME_DIRECTIONS)
+
+    configured_positions = configured_positions or {}
+    selected = [
+        position
+        for position in RMU_NAME_DIRECTIONS
+        if bool(configured_positions.get(position, False))
+    ]
+    return selected or ["top"]
+
 DEFAULT_RMU_NAME_EXCLUSIONS = [
     "N.O.P",
     "NOP",
@@ -61,6 +90,7 @@ DEFAULT_SETTINGS = {
     "last_run_dir": "",
     "db": DEFAULT_DB_CONFIG,
     "rmu_name_positions": DEFAULT_NAME_POSITIONS,
+    "rmu_name_detection_mode": DEFAULT_RMU_NAME_DETECTION_MODE,
     "rmu_name_exclusions": DEFAULT_RMU_NAME_EXCLUSIONS,
     "device_rules": {},
     "breaker_name_source": "GRAPHICAL_TEXT",
@@ -69,6 +99,8 @@ DEFAULT_SETTINGS = {
     "section_domain": 1,
     "feeder_resolution_mode": "FACID",
     "manual_feeder_name": "",
+    "feeder_station_hint": "",
+    "allow_feeder_override": False,
     "feeder_drawing_mode": "AUTO",
     "auto_create_missing_sections": True,
 }

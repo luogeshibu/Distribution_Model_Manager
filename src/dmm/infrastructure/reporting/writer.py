@@ -173,6 +173,76 @@ DEVICE_FIELDS = [
     "association_ready", "status", "severity", "reason",
 ]
 
+POLE_FIELDS = [
+    "file_name", "object_type", "xml_id", "device_model", "device_family",
+    "devref", "graphical_name", "name_source", "name_distance",
+    "name_direction", "name_xml_id", "inside_rmu",
+    "key_name", "current_keyid", "current_device_id", "current_table_id",
+    "current_domain", "current_db_name", "current_db_code",
+    "current_combined_id", "combined_name", "combined_db_code", "combined_db_name",
+    "combined_match_field", "combined_db_match_count", "db_combined_id",
+    "cb_parent_match_count", "cb_db_match_count", "db_device_id", "db_code",
+    "db_name", "db_cb_combined_id", "db_bv_id", "table_id", "table_name",
+    "configured_domain", "expected_keyid", "expected_keyid_verified",
+    "model_linked", "model_link_correct", "model_link_status",
+    "association_action", "association_ready", "writeback_needed",
+    "status", "severity", "reason",
+]
+
+POLE_LABELS = {
+    "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID",
+    "device_model": "柱上开关型号", "device_family": "设备族",
+    "devref": "devref", "graphical_name": "图上名称", "name_source": "名称来源",
+    "name_distance": "名称距离", "name_direction": "名称方向", "name_xml_id": "名称XML ID",
+    "inside_rmu": "是否在环网柜内", "key_name": "XML key_name",
+    "current_keyid": "当前KeyID", "current_device_id": "当前设备ID",
+    "current_table_id": "当前表号", "current_domain": "当前域号",
+    "current_db_name": "当前模型设备NAME", "current_db_code": "当前模型设备CODE",
+    "current_combined_id": "当前模型combined_id", "combined_name": "图上名称/查询值",
+    "combined_db_code": "13501 CODE", "combined_db_name": "13501 NAME",
+    "combined_match_field": "13501匹配字段",
+    "combined_db_match_count": "13501匹配数", "db_combined_id": "13501 ID",
+    "cb_parent_match_count": "13502父设备记录数",
+    "cb_db_match_count": "13502目标匹配数", "db_device_id": "目标设备ID",
+    "db_code": "目标设备CODE", "db_name": "目标设备NAME",
+    "db_cb_combined_id": "目标combined_id", "db_bv_id": "目标BV_ID",
+    "table_id": "目标表号", "table_name": "目标数据库表",
+    "configured_domain": "目标域号", "expected_keyid": "期望KeyID",
+    "expected_keyid_verified": "期望KeyID校验", "model_linked": "是否已关联",
+    "model_link_correct": "当前模型是否正确", "model_link_status": "当前模型状态",
+    "association_action": "处理建议", "association_ready": "可进入关联流程",
+    "writeback_needed": "是否需要回写", "status": "状态", "severity": "状态类型",
+    "reason": "说明",
+}
+
+POLE_LABELS_EN = {
+    key: value for key, value in {
+        "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID",
+        "device_model": "Pole Switch Model", "device_family": "Device Family",
+        "devref": "devref", "graphical_name": "Graphical Name", "name_source": "Name Source",
+        "name_distance": "Name Distance", "name_direction": "Name Direction", "name_xml_id": "Name XML ID",
+        "inside_rmu": "Inside RMU", "key_name": "XML key_name",
+        "current_keyid": "Current KeyID", "current_device_id": "Current Device ID",
+        "current_table_id": "Current Table ID", "current_domain": "Current Domain",
+        "current_db_name": "Current Model NAME", "current_db_code": "Current Model CODE",
+        "current_combined_id": "Current Model combined_id", "combined_name": "Graphical Name / Lookup",
+        "combined_db_code": "13501 CODE", "combined_db_name": "13501 NAME",
+        "combined_match_field": "13501 Match Field",
+        "combined_db_match_count": "13501 Match Count", "db_combined_id": "13501 ID",
+        "cb_parent_match_count": "13502 Parent Record Count",
+        "cb_db_match_count": "13502 Target Match Count", "db_device_id": "Target Device ID",
+        "db_code": "Target Device CODE", "db_name": "Target Device NAME",
+        "db_cb_combined_id": "Target combined_id", "db_bv_id": "Target BV_ID",
+        "table_id": "Target Table ID", "table_name": "Target Database Table",
+        "configured_domain": "Target Domain", "expected_keyid": "Expected KeyID",
+        "expected_keyid_verified": "Expected KeyID Check", "model_linked": "Model Linked",
+        "model_link_correct": "Current Model Correct", "model_link_status": "Current Model Status",
+        "association_action": "Recommended Action", "association_ready": "Ready for Association",
+        "writeback_needed": "Write-back Needed", "status": "Status", "severity": "Status Type",
+        "reason": "Details",
+    }.items()
+}
+
 RMU_FIELDS = [
     "file_name", "frame_index", "frame_xml_id", "rmu_name",
     "rmu_type", "rmu_type_source", "rmu_type_text", "rmu_type_devref",
@@ -350,6 +420,7 @@ def status_cls(status):
     return {
         "PASS": "pass",
         "WARN": "warn",
+        "UNLINKED": "warn",
         "RELINK": "relink",
         "CREATE_PENDING": "create",
         "RMU_RELINK": "rmu-relink",
@@ -633,6 +704,57 @@ def flatten_device_rows(reports):
 
 
 
+def flatten_pole_rows(reports):
+    rows = []
+    for report in reports:
+        file_name = report.get("file_name", "")
+        for item in report.get("pole_switch_rows", []) or []:
+            row = dict(item)
+            for coordinate in ("x", "y", "w", "h"):
+                row.pop(coordinate, None)
+            row["file_name"] = file_name
+            rows.append(row)
+    return rows
+
+
+_POLE_INTERNAL_ONLY_FIELDS = frozenset(
+    {
+        "topology_component",
+        "topology_member_count",
+        "topology_member_ids",
+        "topology_member_tags",
+        "topology_neighbor_count",
+        "topology_neighbor_ids",
+    }
+)
+
+
+def _pole_report_for_output(report):
+    """Remove topology evidence from the persisted public pole report.
+
+    The pole-switch validator still keeps these fields in memory for topology
+    analysis and association decisions. They are intentionally not exposed in
+    HTML, CSV, or report.json output.
+    """
+    payload = dict(report)
+    payload["pole_switch_rows"] = [
+        {
+            key: value
+            for key, value in row.items()
+            if key not in _POLE_INTERNAL_ONLY_FIELDS
+        }
+        for row in report.get("pole_switch_rows", []) or []
+    ]
+    return payload
+
+
+def _is_pole_reports(reports):
+    return bool(
+        reports
+        and str(reports[0].get("report_type", "")).upper() == "POLE_SWITCH"
+    )
+
+
 def _is_feeder_reports(reports):
     return bool(
         reports
@@ -789,6 +911,26 @@ def write_report(report, output_dir, domain_rules):
     output_dir.mkdir(parents=True, exist_ok=True)
     reports = [report]
 
+    if _is_pole_reports(reports):
+        _write_csv(
+            output_dir / "pole_switch_details.csv",
+            flatten_pole_rows(reports),
+            POLE_FIELDS,
+            POLE_LABELS,
+        )
+        (output_dir / "report.json").write_text(
+            json.dumps(
+                _pole_report_for_output(report),
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+        html_path = output_dir / "index.html"
+        export_html_bundle(reports, html_path, domain_rules)
+        return html_path
+
     _write_csv(
         output_dir/"rmu_summary.csv",
         flatten_rmu_rows(reports),
@@ -824,6 +966,20 @@ def export_csv_bundle(reports, export_path, language="zh_CN"):
 
     language = normalize_language(language)
     english = language == "en_US"
+
+    if _is_pole_reports(reports):
+        pole_path = base.with_name(
+            base.name
+            + ("_pole_switch_details.csv" if english else "_柱上开关明细.csv")
+        )
+        _write_csv(
+            pole_path,
+            flatten_pole_rows(reports),
+            POLE_FIELDS,
+            POLE_LABELS_EN if english else POLE_LABELS,
+            language=language,
+        )
+        return [pole_path]
 
     if _is_feeder_reports(reports):
         feeder_path = base.with_name(
@@ -1255,15 +1411,15 @@ def _export_feeder_html_bundle(reports, export_path, domain_rules, language="zh_
     )
 
     feeder_rule_intro = (
-        "Feeder resolution uses one independent source: G root facID, file name, or manual input. A non-empty root facID is authoritative. When facID is empty, file-name or manual resolution must uniquely and exactly match 13500 / dms_feeder_device. Substation 405 determines feeder ownership; section BV_ID is selected from the station voltage levels. The only database write allowed is INSERT into 13503 / dms_section_device, using model Domain 1."
+        "Feeder resolution uses exactly the operator-selected independent source: G-root facID, file name, or manual input. An existing facID is current-state evidence only and does not override the selected source. File-name mode supports both single files and batch folders; each file independently resolves its substation and feeder token (for example ABH + 03 -> AH303, while AH303 is used directly) and must produce one unique 13500 / dms_feeder_device match. Replacing a different existing facID/cross-feeder section association requires the explicit override option. Substation 405 determines feeder ownership; section BV_ID is selected from the station voltage levels. The only database write allowed is INSERT into 13503 / dms_section_device, using model Domain 1."
         if english else
-        "馈线识别规则：G 根节点 facID 非空时强制使用 facID，文件名和人工输入均不参与判断。只有 facID 为空时才允许文件名或人工输入，并且必须精准唯一匹配 13500 / dms_feeder_device；AJWD 6 与 AJWD 06 是不同馈线。405 / substation 用于确定馈线所属变电站；创建馈线段的 BV_ID 从该站 402 / voltagelevel 中选择，并通过 401 / basevoltage 只保留 110kV、33kV、13.8kV，存在多个时选择数值最小的电压等级。唯一允许写入的数据库表是 13503 / dms_section_device，模型域号为 1。"
+        "馈线识别规则：FACID、文件名、人工输入三种来源相互独立，本次只使用用户明确选择的来源。已有 G.facID 仅作为当前关联状态，不再强制覆盖用户选择。文件名模式同时支持单文件和批量目录，每个文件独立解析变电站与馈线号，例如 ABH + 03 可在站内唯一解析为 AH303，文件名已带 AH303 时则直接使用完整馈线号；最终必须唯一匹配 13500 / dms_feeder_device。若目标与当前 facID/馈线段归属不同，只有显式启用覆盖选项后才允许重关联。405 / substation 用于确定馈线所属变电站；创建馈线段的 BV_ID 从该站 402 / voltagelevel 中选择。唯一允许写入的数据库表是 13503 / dms_section_device，模型域号为 1。"
     )
     feeder_status_desc = {
         "pass": "The FeedLine is already linked to a database section under this feeder with the correct table ID and Domain." if english else "当前 FeedLine 已经关联到本馈线下的数据库馈线段，表号/域号均正确。",
         "warn": "The FeedLine is unlinked but has been assigned to an existing available section under this feeder and can be associated directly." if english else "当前 FeedLine 尚未关联，但已经分配到本馈线下已有的可用数据库馈线段，可以在工作区勾选后直接执行模型关联。",
         "create": "There are not enough available 13503 sections under this feeder. A new dms_section_device record must be created before generating the KeyID and associating this FeedLine." if english else "当前馈线数据库中没有足够的可用 13503 馈线段；该 FeedLine 需要先单独创建新的 dms_section_device 记录，再生成正确 KeyID 并完成关联。",
-        "fail": "The feeder cannot be uniquely resolved, the current KeyID belongs to another feeder, or another hard error prevents safe association." if english else "馈线名称无法唯一解析、当前 KeyID 不属于本馈线、跨馈线关联、无法安全确定目标或其它硬错误。",
+        "fail": "The feeder cannot be uniquely resolved, an existing feeder conflict has not been explicitly authorized for override, or another hard error prevents safe association." if english else "馈线无法唯一解析、现有馈线冲突未明确启用人工覆盖、无法安全确定目标或其它硬错误。",
     }
     feeder_summary_intro = (
         "A feeder is resolved from exactly one source: root facID, file name, or manual input. The selected source must uniquely match 13500 / dms_feeder_device. If uniqueness cannot be established, the result is FAIL and no section is created or associated."
@@ -1416,7 +1572,87 @@ function filterReportTable(tableId) {{
     return export_path
 
 
+def _export_pole_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
+    export_path = Path(export_path)
+    language = normalize_language(language)
+    english = language == "en_US"
+    rows = flatten_pole_rows(reports)
+    labels = POLE_LABELS_EN if english else POLE_LABELS
+    title = "Pole Switch Model Report" if english else "柱上开关模型报告"
+    intro = (
+        "Only CBreakerDis objects outside recognized RMU frames are included. "
+        "The devref must match one of the four configured pole-switch templates; "
+        "the graphical name is resolved from the nearest Text object."
+        if english
+        else
+        "本报告只展示识别为环网柜外柱上开关的 CBreakerDis。devref 必须精确匹配四类目标模板，"
+        "设备名称只取邻近 Text，并输出数据库链路和 KeyID 校验结果。"
+    )
+    domain_rows = "<tr><td>CBreakerDis</td><td>13502</td><td>40</td></tr>"
+    table = _table_html(
+        rows,
+        POLE_FIELDS,
+        labels,
+        "status",
+        selectable=True,
+        table_id="pole-switch-table",
+        filter_placeholder=(
+            "Enter a pole-switch name, model, devref, or XML ID"
+            if english
+            else "输入柱上开关名称、型号、devref 或 XML ID"
+        ),
+        language=language,
+    )
+    text = f"""<!doctype html>
+<html lang="{'en' if english else 'zh-CN'}">
+<head>
+<meta charset="utf-8">
+<title>{esc(title)}</title>
+<style>
+body{{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;margin:0;background:#F3F7F5;color:#17372E}}
+header{{background:#006B52;color:white;padding:24px 32px;border-bottom:5px solid #00B578}}
+main{{padding:24px 30px}} .card{{background:white;border:1px solid #D3E3DC;border-radius:10px;padding:16px;margin-bottom:18px}}
+table{{border-collapse:collapse;width:100%;font-size:12px}} th{{background:#006B52;color:white;position:sticky;top:0}}
+th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowrap}}
+.scroll{{overflow:auto;max-height:700px}} .pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}}
+.relink{{background:#FFE8CC}} .rmu-relink{{background:#F0E7FF}} .blocked{{background:#EAF3FF}}
+.fail{{background:#FFF0F0}} .info{{background:#EAF3FF}}
+.table-filter{{display:flex;align-items:center;gap:10px;margin:10px 0 12px;flex-wrap:wrap}}
+.table-filter-input{{width:min(560px,70vw);padding:8px 11px;border:1px solid #D3E3DC;border-radius:6px}}
+.status-list{{display:flex;flex-direction:column;gap:8px;max-width:1100px}}
+.status-item{{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:14px;padding:9px 12px;border-radius:6px;border:1px solid #D3E3DC}}
+.status-item strong{{white-space:nowrap}} .status-item span{{line-height:1.55}}
+</style>
+</head>
+<body>
+<header><h1>{esc(title)}</h1><div>{esc(APP_NAME if not english else APP_NAME_EN)}　v{esc(APP_VERSION)}</div></header>
+<main>
+<div class="card"><h2>{'Association Rules' if english else '关联规则'}</h2>
+<p>{esc(intro)}</p><table><thead><tr><th>{'G Object Type' if english else 'G图元类型'}</th><th>{'Table ID' if english else '表号'}</th><th>{'Domain' if english else '域号'}</th></tr></thead><tbody>{domain_rows}</tbody></table></div>
+<div class="card"><h2>{'Status Legend' if english else '状态颜色说明'}</h2>
+<div class="status-list">
+  <div class="status-item pass"><strong>{'Green PASS' if english else '绿色 PASS'}</strong><span>{'The current model is linked to the correct current database device; no action is required.' if english else '当前模型已关联到数据库当前正确设备，无需处理。'}</span></div>
+  <div class="status-item warn"><strong>{'Yellow UNLINKED' if english else '黄色 UNLINKED'}</strong><span>{'The G object is not linked yet; the current 13501 and 13502 database targets are unique and valid for association.' if english else '当前 G 图元尚未关联；13501 和 13502 数据库目标均唯一且有效，可以关联。'}</span></div>
+  <div class="status-item relink"><strong>{'Orange RELINK' if english else '橙色 RELINK'}</strong><span>{'The old KeyID, device ID, table ID, or Domain is stale or incorrect; the current target is unique and can be relinked safely.' if english else '旧 KeyID、设备 ID、表号或域号已过期或错误；当前数据库目标唯一，可以安全重新关联。'}</span></div>
+  <div class="status-item rmu-relink"><strong>{'Purple RMU_RELINK' if english else '紫色 RMU_RELINK'}</strong><span>{'Reserved for the common device-link status palette when an existing KeyID points to another container and a safe relink is determined.' if english else '沿用统一设备关联颜色体系，表示已有 KeyID 指向其他归属对象，但当前目标已安全确定并允许重新关联。'}</span></div>
+  <div class="status-item blocked"><strong>{'Blue BLOCKED' if english else '蓝色 BLOCKED'}</strong><span>{'A blocked scenario requiring manual confirmation.' if english else '需要人工确认的整体阻断场景。'}</span></div>
+  <div class="status-item fail"><strong>{'Red FAIL' if english else '红色 FAIL'}</strong><span>{'The current database facts cannot safely determine a unique target or the KeyID/BV_ID is invalid.' if english else '数据库当前事实无法安全确定唯一目标，或者 Expected KeyID / BV_ID 无效。'}</span></div>
+</div></div>
+<div class="card"><h2>{'Pole Switch Details' if english else '柱上开关明细'}</h2>{table}</div>
+</main>
+</body></html>"""
+    export_path.write_text(text, encoding="utf-8")
+    return export_path
+
+
 def export_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
+    if _is_pole_reports(reports):
+        return _export_pole_html_bundle(
+            reports,
+            export_path,
+            domain_rules,
+            language=language,
+        )
     if _is_feeder_reports(reports):
         return _export_feeder_html_bundle(
             reports,
@@ -1430,4 +1666,3 @@ def export_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
         domain_rules,
         language=language,
     )
-

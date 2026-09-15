@@ -1,3 +1,21 @@
+# v4.1.39
+
+- 馈线识别来源 UI 改为按当前模式显示：FACID 仅显示 FACID 相关状态；文件名模式仅显示批量变电站输入；人工模式仅显示人工目标馈线输入。
+- 人工目标馈线在 MANUAL 模式下始终可编辑、可删除、可清空；未选中的输入框不再以 disabled 状态占据界面。
+- “允许覆盖现有 facID 和馈线段关联”仅在文件名/人工模式显示；FACID 模式隐藏。
+- 仅调整 UI/i18n 表现，FACID / FILENAME / MANUAL 三种业务解析与 v4.1.38 保持一致。
+
+# v4.1.38
+
+- Manual feeder input is now an absolute target. `ABH AH303` resolves only that station+feeder; zero matches return `MANUAL_FEEDER_NOT_FOUND` and never fall back to current facID or file-name resolution. Multiple exact matches are blocked.
+- File-name batch mode may use one operator-supplied substation name such as `ABH` for every selected file. Each file independently extracts its final feeder token.
+- Automatic station resolution now supports region-prefixed file identifiers: `JED-NTH-ABH-03` first tries the full site identifier and then safely falls back to the actual substation segment `ABH` when 405/substation.NAME does not include region prefixes.
+- Numeric file token `03` is matched only inside the resolved station feeder set and resolves uniquely to a business feeder such as `AH303`; a full token such as `AH303` is used directly.
+- Existing facID remains current-state evidence only. A different manual/file-name target remains the selected target; write-back is blocked until the explicit override option is enabled.
+- Single-file and batch-folder processing continue to share the same resolver. Composite drawing safety boundaries and all existing section/Domain/create/write-back rules are unchanged.
+- Chinese and English presentation updated together.
+- Regression: 240 passed, 1 skipped.
+
 # v4.1.36
 
 - Optimized **Refresh G File List** only; no RMU/feeder/Oracle/write-back business rules changed.

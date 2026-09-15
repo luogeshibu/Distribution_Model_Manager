@@ -43,10 +43,12 @@ def test_composite_code_is_audit_only_and_ignores_root_facid():
     assert "组合大图忽略根 facID" in source
 
 
-def test_directory_mode_requires_facid_for_single_drawings():
+def test_directory_mode_uses_same_selected_source_as_single_file():
     source = (
         Path(__file__).parents[1]
         / "src/dmm/application/modules/feeder.py"
     ).read_text(encoding="utf-8")
-    assert "DIRECTORY_MODE_FACID_REQUIRED" in source
-    assert "单馈线图只允许 facID" in source
+    assert "DIRECTORY_MODE_FACID_REQUIRED" not in source
+    assert "使用当前所选馈线识别来源逐文件独立解析" in source
+    assert "Single-file and batch/directory processing intentionally share" in source
+

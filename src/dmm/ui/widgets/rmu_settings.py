@@ -10,7 +10,12 @@ from PySide6.QtWidgets import (
     QComboBox, QHBoxLayout, QSizePolicy, QLineEdit,
 )
 
-from dmm.config.defaults import DEFAULT_DEVICE_RULES, DEFAULT_NAME_POSITIONS, DEFAULT_RMU_NAME_EXCLUSIONS
+from dmm.config.defaults import (
+    DEFAULT_DEVICE_RULES,
+    DEFAULT_NAME_POSITIONS,
+    DEFAULT_RMU_NAME_DETECTION_MODE,
+    DEFAULT_RMU_NAME_EXCLUSIONS,
+)
 from dmm.i18n import tr
 
 def _resource_dir():
@@ -105,7 +110,24 @@ class RmuSettingsWidget(QWidget):
         rg.setContentsMargins(14, 18, 14, 14)
         rg.setHorizontalSpacing(18)
         rg.setVerticalSpacing(10)
-        rg.addWidget(QLabel("环网柜名称位置"), 0, 0, 1, 2)
+        rg.addWidget(QLabel("环网柜名称位置"), 0, 0)
+
+        self.name_detection_mode = NoWheelComboBox()
+        self.name_detection_mode.addItem("自动识别（推荐）", "AUTO")
+        self.name_detection_mode.addItem("按指定方向", "FIXED")
+        saved_mode = str(
+            config.get(
+                "rmu_name_detection_mode",
+                DEFAULT_RMU_NAME_DETECTION_MODE,
+            )
+            or DEFAULT_RMU_NAME_DETECTION_MODE
+        ).strip().upper()
+        mode_index = self.name_detection_mode.findData(saved_mode)
+        self.name_detection_mode.setCurrentIndex(mode_index if mode_index >= 0 else 0)
+        self.name_detection_mode.currentIndexChanged.connect(
+            self._update_name_direction_controls
+        )
+        rg.addWidget(self.name_detection_mode, 0, 1)
 
         labels = {"top": "上方", "right": "右侧", "left": "左侧", "bottom": "下方"}
         self.pos_checks = {}
@@ -115,6 +137,8 @@ class RmuSettingsWidget(QWidget):
             cb.setChecked(bool(saved_pos.get(pos, False)))
             rg.addWidget(cb, 1 + idx // 2, idx % 2)
             self.pos_checks[pos] = cb
+
+        self._update_name_direction_controls()
 
         rg.addWidget(QLabel("环网柜名称排除字符串"), 3, 0, 1, 2)
         self.name_exclusions_edit = QLineEdit()
@@ -137,6 +161,8 @@ class RmuSettingsWidget(QWidget):
         rg.addWidget(fixed_source, 5, 1)
 
         note = QLabel(
+            "自动识别模式会综合搜索名称附近的上、下、左、右方向；"
+            "指定方向模式仅搜索用户勾选的方向。"
             "开关名称不再读取 XML p_NameString。CBreakerDis 仅使用环网柜内"
             "图上文字；接地刀闸逻辑名称=配对开关名+D；BusDis 固定为 BUS。"
             "图上名称无法唯一识别，或与数据库 CODE 校验失败时，会明确告警对应环网柜。"
@@ -198,14 +224,25 @@ class RmuSettingsWidget(QWidget):
             self.domain_spins[tag].setValue(int(rule["domain"]))
         for pos, value in DEFAULT_NAME_POSITIONS.items():
             self.pos_checks[pos].setChecked(bool(value))
+        default_index = self.name_detection_mode.findData(
+            DEFAULT_RMU_NAME_DETECTION_MODE
+        )
+        self.name_detection_mode.setCurrentIndex(max(default_index, 0))
         self.name_exclusions_edit.setText(", ".join(DEFAULT_RMU_NAME_EXCLUSIONS))
+
+    def _update_name_direction_controls(self, *_args):
+        """Disable legacy direction filters while automatic mode is active."""
+        fixed_mode = self.name_detection_mode.currentData() == "FIXED"
+        for checkbox in self.pos_checks.values():
+            checkbox.setEnabled(fixed_mode)
 
     def collect_settings(self):
         positions = {
             key: checkbox.isChecked()
             for key, checkbox in self.pos_checks.items()
         }
-        if not any(positions.values()):
+        detection_mode = self.name_detection_mode.currentData() or "AUTO"
+        if detection_mode == "FIXED" and not any(positions.values()):
             raise ValueError(tr("请至少选择一个环网柜名称位置。", self.config.get("language", "zh_CN")))
 
         saved_rules = {}
@@ -236,9 +273,9 @@ class RmuSettingsWidget(QWidget):
 
         return {
             "rmu_name_positions": positions,
+            "rmu_name_detection_mode": detection_mode,
             "rmu_name_exclusions": exclusion_values,
             "breaker_name_source": "GRAPHICAL_TEXT",
             "device_rules": saved_rules,
             "_runtime_rules": runtime_rules,
         }
-

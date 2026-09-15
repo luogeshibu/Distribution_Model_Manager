@@ -94,6 +94,13 @@ ZH_TO_EN = {
     "仅使用文件名": "Use File Name Only",
     "仅使用人工输入": "Use Manual Input Only",
     "人工馈线名称": "Manual Feeder Name",
+    "人工目标馈线（变电站 + 馈线）": "Manual Target Feeder (Substation + Feeder)",
+    "变电站标识（文件名模式，可选）": "Substation Identifier (File-name Mode, Optional)",
+    "批量变电站名称（文件名模式，可选）": "Batch Substation Name (File-name Mode, Optional)",
+    "例如：ABH；也支持 JED-NTH-ABH；留空则从每个文件名自动识别": "Example: ABH; JED-NTH-ABH is also supported; leave blank to auto-detect from each file name",
+    "例如：ABH AH303 或 AJWD 43": "Example: ABH AH303 or AJWD 43",
+    "例如：ABH 或 JED-NTH-ABH；留空则从每个文件名自动识别": "Example: ABH or JED-NTH-ABH; leave blank to auto-detect from each file name",
+    "允许覆盖现有 facID 和馈线段关联": "Allow overriding existing facID and feeder-section associations",
     "馈线段数据库表与域配置": "Feeder Section Table / Domain Settings",
     "用途": "Purpose",
     "语言": "Language",
@@ -118,7 +125,7 @@ ZH_TO_EN.update({
     "团队内部版的公共安全策略和报告保留策略。": "Common safety policies and report retention settings for the internal team edition.",
     "团队内部使用说明：RMU 与馈线模型校验、校验候选、报告和安全回写。": "Internal user guide for RMU and feeder validation, validated candidates, reports, and safe write-back.",
     "RMU 环网柜通过 G 文件结构自动识别。开关设备名称可选择使用 环网柜内部、紧邻 CBreakerDis 的图上文字。设备命名规则固定使用图上文字，不再读取三类设备 XML 的 p_NameString：CBreakerDis 使用图上名称，接地刀闸使用开关名+D，BusDis 固定使用 BUS。": "RMUs are recognized automatically from the G-file structure. Device naming uses graphical text inside the RMU: CBreakerDis uses the graphical name, grounding switches use breaker name + D, and BusDis always uses BUS. XML p_NameString is not used for these three device types.",
-    "馈线归属规则：G 根节点 facID 只要非空，就强制作为唯一权威来源，文件名和人工输入均不参与判断。只有 facID 为空时，才允许选择文件名或人工输入；名称必须精准匹配 13500 / dms_feeder_device，AJWD 6 与 AJWD 06 视为不同馈线。": "Feeder ownership rule: a non-empty G root facID is the sole authoritative source. File name and manual input are ignored. Only when facID is empty may file-name or manual resolution be used, and the name must exactly match 13500 / dms_feeder_device. AJWD 6 and AJWD 06 are different feeders.",
+    "馈线识别来源相互独立：可按 G 根节点 facID、文件名或人工输入确定本次目标馈线。已有 facID 只作为当前关联状态，不再强制覆盖用户选择。文件名模式同时支持单文件和批量目录；例如 JED-NTH-ABH-03 可在 ABH 站内唯一解析到 AH303，JED-NTH-ABH-AH303 则直接使用完整馈线号。目标必须在 13500 / dms_feeder_device 中唯一。": "Feeder identification sources are independent: use the G-root facID, file name, or manual input to determine the target feeder for this run. An existing facID is current-association state only and no longer overrides the selected source. File-name mode supports both a single file and batch folders; for example, JED-NTH-ABH-03 can uniquely resolve to AH303 within substation ABH, while JED-NTH-ABH-AH303 uses the complete feeder code directly. The target must be unique in 13500 / dms_feeder_device.",
 })
 
 # Additional field-work UI strings.
@@ -132,6 +139,9 @@ ZH_TO_EN.update({
     "强制组合图（本次文件/目录）": "Force Composite Drawing (Current File/Folder)",
     "执行模型关联时自动创建数据库中缺失的馈线段": "Automatically create missing feeder sections during model association",
     "恢复馈线默认配置": "Restore Feeder Defaults",
+    "仅在用户明确勾选后允许：当文件名/人工输入解析出的目标馈线与当前 G.facID 或 FeedLine 所属馈线不一致时，把安全输出副本的根 facID 和所选 FeedLine 重新关联到目标馈线。组合图仍禁止整图覆盖到单一馈线。": "Only when explicitly enabled by the operator: if the target feeder resolved from file name/manual input differs from the current G.facID or FeedLine feeder ownership, relink the root facID and selected FeedLines in the safe output copy to the target feeder. Composite drawings still cannot be overwritten to one feeder.",
+    "G.facID 仅表示当前关联。FACID / 文件名 / 人工输入三种来源互不强制；如所选目标与当前 facID 不同，只有启用“允许覆盖”后才会生成覆盖候选。": "G.facID represents only the current association. FACID, file-name, and manual sources are independent; if the selected target differs from the current facID, overwrite candidates are generated only when override is enabled.",
+    "当前 G.facID 为空。FACID / 文件名 / 人工输入三种来源独立；文件名模式支持单文件和批量目录，并对每个文件独立解析、独立数据库唯一校验。": "The current G.facID is empty. FACID, file-name, and manual sources are independent. File-name mode supports both single-file and batch-folder processing, resolving and uniquely validating each file independently.",
     "馈线段 dms_section_device": "Feeder Section dms_section_device",
     "可关联设备选择（模型校验结果）": "Eligible Device Selection (Validation Result)",
     "可关联馈线 / 馈线段选择（模型校验结果）": "Eligible Feeder / Section Selection (Validation Result)",
@@ -260,7 +270,7 @@ ZH_TO_EN.update({
         "Database write boundary: only when this option is enabled and Model Association is executed may missing DMS_SECTION_DEVICE rows be INSERTed. Validation never writes the database, and existing feeder sections are never duplicated.",
     "1. 在【数据库】页面确认 Oracle 配置，可先点击‘测试数据库连接’。\n2. 进入【模型工作区】，选择 RMU 环网柜模型或馈线模型，并选择 G 文件/目录。\n3. RMU 模块配置名称来源与设备表/域；馈线模块配置 13503 馈线段表及域号。\n4. 点击底部【模型校验】执行校验，并生成 HTML / CSV 以及可关联清单。\n5. 在可关联清单中勾选需要处理的设备或 FeedLine，然后点击【执行模型关联】。\n6. 执行前会显示最终确认摘要；模型关联只修改 Workspace 中的安全副本，原始 G 文件不变。\n7. 关联完成后生成本次执行 HTML / CSV、model_change_log.csv，并写入【运行历史】。":
         "1. Confirm Oracle settings on the Database page; optionally click Test Database Connection.\n2. Open Model Workspace, select RMU Model or Feeder Model, and choose a G file/folder.\n3. Configure RMU name/device table-domain settings, or the feeder 13503 section table/domain.\n4. Click Model Validation to run validation and generate HTML / CSV reports plus the eligible-object list.\n5. Select devices or FeedLines to process, then click Apply Model Association.\n6. Review the final confirmation summary. Association modifies only safe Workspace copies; original G files remain unchanged.\n7. After association, execution HTML / CSV and model_change_log.csv are generated and recorded in Run History.",
-    "• 环网柜只有在矩形框内同时存在 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元时才识别为 RMU。\n• RMU 柜型：柜内 Y*/Q* 文字与 CBreakerDis.devref 模板结构独立计算并交叉验证；devref 不解析任何现场图元关键字，只检查 Y 类同模板、Q 类同模板且 Y/Q 模板可区分。有效 devref 与文字冲突时仍以 devref 为准，同时 WARN。\n• 环网柜名称严格只按照用户勾选的方向读取：上方 / 下方 / 左侧 / 右侧；未勾选方向绝不参与。\n• 对所选方向执行整张 G 图全局搜索，柜名不再受旧的 120 坐标单位距离上限限制。\n• 每个 Text / DText 全局只分配给距离最近的一个环网柜，避免同一个名字被两个柜重复使用。\n• 一个环网柜只有一个名称候选时直接使用；多个候选时才优先最近绿色名称，否则取最近候选。\n• 绿色依据 G 文件属性判断：lc=0,255,0 或 lcc=#00ff00；实际名称读取 Text / DText 的 ts 属性。\n• 环网柜名称始终按字符串处理，支持 42646、RMU-42646、ABC_123、JED-RMU-01、ABC.01 等常见工程名称，不会强制转换成数字。":
+    "• 环网柜只有在矩形框内同时存在 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元时才识别为 RMU。\n• RMU 柜型：柜内 Y*/Q* 文字与 CBreakerDis.devref 模板结构独立计算并交叉验证；devref 不解析任何现场图元关键字，只检查 Y 类同模板、Q 类同模板且 Y/Q 模板可区分。有效 devref 与文字冲突时仍以 devref 为准，同时 WARN。\n• 环网柜名称默认自动搜索上方 / 下方 / 左侧 / 右侧；只有选择“按指定方向”时才严格使用用户勾选的方向。\n• 对有效方向执行整张 G 图全局搜索，柜名不再受旧的 120 坐标单位距离上限限制。\n• 每个 Text / DText 全局只分配给距离最近的一个环网柜，避免同一个名字被两个柜重复使用。\n• 一个环网柜只有一个名称候选时直接使用；多个候选时才优先最近绿色名称，否则取最近候选。\n• 绿色依据 G 文件属性判断：lc=0,255,0 或 lcc=#00ff00；实际名称读取 Text / DText 的 ts 属性。\n• 环网柜名称始终按字符串处理，支持 42646、RMU-42646、ABC_123、JED-RMU-01、ABC.01 等常见工程名称，不会强制转换成数字。":
         "• An RMU is recognized only when its rectangle contains CBreakerDis, ZhaiWaiJieDiDaoZha, and BusDis.\n• RMU type: Y*/Q* text and CBreakerDis.devref template structure are calculated independently and cross-checked. devref names are not interpreted; Y devices must share one template, Q devices one template, and Y/Q templates must be distinguishable. If valid devref conflicts with text, devref wins and WARN is reported.\n• RMU names are read only from user-enabled directions: top / bottom / left / right. Disabled directions never participate.\n• The selected directions are searched globally across the G file; the old 120-coordinate distance limit is not used.\n• Each Text / DText is globally assigned only to its nearest RMU to prevent one name from being reused by two cabinets.\n• A single candidate is used directly. With multiple candidates, the nearest green label is preferred; otherwise the nearest candidate is used.\n• Green text is identified by lc=0,255,0 or lcc=#00ff00; the actual name comes from Text / DText ts.\n• RMU names are always treated as strings, supporting compact values such as 42646, RMU-42646, ABC_123, JED-RMU-01, and ABC.01, plus the field form number + space + suffix such as 66 B.",
     "• 13502 / CBreakerDis：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称；NAME 不参与判断。\n• 13514 / ZhaiWaiJieDiDaoZha：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称（开关名称+D）；NAME 不参与判断。\n• 13506 / BusDis：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称；图上文字模式固定为 BUS；NAME 不参与判断。\n• 设备校验以 G 文件实际存在的图元为准，只查询这些图元最终需要的 CODE。\n• 数据库中与 G 图元 CODE 无关的其它设备记录忽略，不参与数量比较。\n• G 图元需要的 CODE 不存在，或同一 CODE 匹配到多条记录时，才作为设备模型错误并阻止关联。":
         "• 13502 / CBreakerDis: CODE must be non-empty and equal the current graphical logical device name; NAME is ignored.\n• 13514 / ZhaiWaiJieDiDaoZha: CODE must be non-empty and equal the current graphical logical name (breaker name + D); NAME is ignored.\n• 13506 / BusDis: CODE must be non-empty and equal the current graphical logical name; graphical mode is fixed to BUS; NAME is ignored.\n• Device validation is authoritative to objects actually present in the G file and queries only the CODE values required by those objects.\n• Other database rows unrelated to G-file object CODE values are ignored.\n• Association is blocked only when a required CODE is missing or matches multiple rows.",
@@ -358,15 +368,19 @@ def normalize_language(value: str | None) -> str:
 def tr(text: object, language: str | None) -> str:
     source = "" if text is None else str(text)
     if normalize_language(language) == LANG_EN:
-        return ZH_TO_EN.get(source, source)
-    return EN_TO_ZH.get(source, source)
+        value = ZH_TO_EN.get(source, source)
+    else:
+        value = EN_TO_ZH.get(source, source)
+    # Device names are always read from Text objects. Keep older help strings
+    # from exposing the retired alternate-text fallback in either language.
+    return value.replace("Text / DText", "Text").replace("Text/DText", "Text")
 
 
 _RUNTIME_REPLACEMENTS = [
     # v4.1.26: presentation-only runtime/console translations.
     ("语言已切换为简体中文。", "Language switched to Simplified Chinese."),
     ("RMU 环网柜模型校验、候选选择及安全回写。", "RMU model validation, candidate selection, and safe write-back."),
-    ("馈线模型校验、数据库缺失馈线段补齐及安全回写。单馈线图以 G 根节点 facID 为最高优先级；目录模式下单馈线只允许 facID。组合大图忽略根 facID，按单馈线 XML 指纹和连接拓扑审计 FeedLine 的 FEEDER_ID 一致性。", "Feeder model validation, completion of missing database feeder sections, and safe write-back. For single-feeder drawings the G-root facID has highest priority; directory-mode single-feeder drawings require facID. Composite drawings ignore root facID and audit FeedLine FEEDER_ID consistency using single-feeder XML fingerprints and connection topology."),
+    ("馈线模型校验、数据库缺失馈线段补齐及安全回写。FACID、文件名、人工输入三种馈线来源相互独立；单文件与批量目录使用同一解析规则。组合大图忽略根 facID，按单馈线 XML 指纹和连接拓扑审计 FeedLine 的 FEEDER_ID 一致性。", "Feeder model validation, completion of missing database feeder sections, and safe write-back. FACID, file-name, and manual feeder sources are independent; single files and batch folders use the same resolver. Composite drawings ignore root facID and audit FeedLine FEEDER_ID consistency using single-feeder XML fingerprints and connection topology."),
     ("馈线段 / dms_section_device", "Feeder Section / dms_section_device"),
     ("FACID_EMPTY: 当前 G 文件 facID 为空；请选择【仅使用文件名】或【仅使用人工输入】。", "FACID_EMPTY: current G-file facID is empty; select Use File Name Only or Use Manual Input Only."),
     ("无法确定馈线段命名前缀，或无法从 feeder.ST_ID -> 402/voltagelevel -> 401/basevoltage 找到允许的 110/33/13.8kV 电压等级，禁止自动创建馈线段。", "Unable to determine the feeder-section naming prefix, or no allowed 110/33/13.8 kV voltage level can be resolved through feeder.ST_ID -> 402/voltagelevel -> 401/basevoltage; automatic feeder-section creation is blocked."),
@@ -563,6 +577,34 @@ _RUNTIME_REPLACEMENTS = [
     ("单馈线指纹跳过：", "Single-feeder fingerprint skipped: "),
     ("馈线精准匹配通过：", "Exact feeder match passed: "),
     ("馈线精准匹配失败：", "Exact feeder match failed: "),
+    ("人工输入馈线不存在：", "Manual feeder does not exist: "),
+    ("人工输入馈线不唯一：", "Manual feeder is not unique: "),
+    ("本次人工输入是绝对目标，不会回退使用当前 facID 或文件名。", "The manual input is the absolute target for this run; the current facID and file name will not be used as fallbacks."),
+    ("数据库精确匹配数=", "database exact matches="),
+    ("禁止自动选择", "automatic selection is blocked"),
+    ("输入馈线不存在=", "input feeder does not exist="),
+    ("文件名馈线识别通过：", "File-name feeder resolution passed: "),
+    ("文件名馈线识别失败：", "File-name feeder resolution failed: "),
+    ("变电站输入/解析值=", "substation input/resolved value="),
+    ("已尝试=", "attempted="),
+    ("数据库未找到唯一站点下的馈线记录", "the database did not return feeder records for one unique substation"),
+    ("；数据库未找到该站馈线记录。", "; no feeder records were found for this substation in the database."),
+    ("；匹配数=", "; matches="),
+    ("；候选=", "; candidates="),
+    ("] 使用 G.facID=", "] Using G.facID="),
+    ("(FACID / 13500 精确ID匹配)", "(FACID / exact ID match in 13500)"),
+    ("目录馈线模式：使用当前所选馈线识别来源逐文件独立解析；已建立可信单馈线指纹=", "Directory feeder mode: resolve each file independently using the selected feeder source; trusted single-feeder fingerprints="),
+    (" 与本次", " versus current "),
+    ("目标 FEEDER_ID=", "target FEEDER_ID="),
+    (" 不同；已启用人工覆盖，将在模型关联时允许覆盖根 facID 和错误馈线段关联。", " differs; explicit override is enabled, so model association may replace the root facID and incorrect cross-feeder section links."),
+    (" 不同；未启用人工覆盖，现有跨馈线关系将保持阻断。", " differs; explicit override is not enabled, so existing cross-feeder relationships remain blocked."),
+    ("变电站=", "substation="),
+    ("文件馈线号=", "file feeder token="),
+    ("13500 站内唯一匹配", "unique match within the substation in 13500"),
+    ("当前 G.facID=", "current G.facID="),
+    ("已启用人工覆盖", "explicit override enabled"),
+    ("未启用人工覆盖", "explicit override not enabled"),
+    ("目录馈线模式：使用当前所选馈线识别来源逐文件独立解析；", "Directory feeder mode: resolve each file independently using the selected feeder source; "),
     ("(13500 唯一精准匹配)", "(unique exact match in 13500)"),
     ("(FACID_FORCED / 13500 精确ID匹配)", "(FACID_FORCED / exact ID match in 13500)"),
     ("目录馈线模式：单馈线图只允许 facID；已建立可信单馈线指纹=", "Directory feeder mode: single-feeder drawings require facID; trusted single-feeder fingerprints="),

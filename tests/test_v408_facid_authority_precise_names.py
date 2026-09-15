@@ -48,7 +48,7 @@ def make_g(tmp_path, filename, facid):
     return p
 
 
-def test_facid_nonempty_forces_facid_and_ignores_manual(tmp_path):
+def test_manual_mode_is_independent_even_when_facid_is_nonempty(tmp_path):
     g = make_g(tmp_path, "JED-CTL-AJWD-06.sln.pic.g", "1006")
     row = FeederModelModule()._resolve_file_feeder(
         DB(), g,
@@ -59,8 +59,8 @@ def test_facid_nonempty_forces_facid_and_ignores_manual(tmp_path):
         },
         lambda _m: None,
     )
-    assert row["id"] == 1006
-    assert row["_resolution_source"] == "FACID_FORCED"
+    assert row["id"] == 10006
+    assert row["_resolution_source"] == "MANUAL"
 
 
 def test_empty_facid_manual_keeps_leading_zero_significant(tmp_path):

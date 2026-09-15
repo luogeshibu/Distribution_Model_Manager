@@ -11,7 +11,13 @@ from dmm.config.constants import (
     RMU_LABEL_EDGE_TOLERANCE,
     RMU_LABEL_PATTERN,
 )
-from dmm.config.defaults import DEFAULT_DEVICE_RULES, DEFAULT_NAME_POSITIONS, DEFAULT_RMU_NAME_EXCLUSIONS
+from dmm.config.defaults import (
+    DEFAULT_DEVICE_RULES,
+    DEFAULT_NAME_POSITIONS,
+    DEFAULT_RMU_NAME_DETECTION_MODE,
+    DEFAULT_RMU_NAME_EXCLUSIONS,
+    resolve_rmu_name_positions,
+)
 from dmm.domain.gfile.parser import GParser
 from dmm.domain.rmu.validator import RmuValidator, KEYID_STEP, norm, int_or_none
 from dmm.infrastructure.gfile.writeback import GWriteBackService
@@ -46,7 +52,13 @@ class RmuModelModule(ModelModule):
         )
 
     def validate(self, db, files, settings, log_callback, progress_callback=None):
-        positions = [k for k,v in settings["rmu_name_positions"].items() if v]
+        positions = resolve_rmu_name_positions(
+            settings.get(
+                "rmu_name_detection_mode",
+                DEFAULT_RMU_NAME_DETECTION_MODE,
+            ),
+            settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS),
+        )
         validator = self._new_validator(db, settings, log_callback)
         reports = []
         aggregate = {
@@ -183,6 +195,13 @@ class RmuModelModule(ModelModule):
             "skipped_rmus": skipped_rmus,
             "file_fingerprints": fingerprints,
             "settings_snapshot": {
+                "rmu_name_detection_mode": str(
+                    settings.get(
+                        "rmu_name_detection_mode",
+                        DEFAULT_RMU_NAME_DETECTION_MODE,
+                    )
+                    or DEFAULT_RMU_NAME_DETECTION_MODE
+                ).upper(),
                 "rmu_name_positions": dict(settings.get("rmu_name_positions", {})),
                 "breaker_name_source": "GRAPHICAL_TEXT",
                 "device_rules": dict(settings.get("device_rules", {})),
@@ -219,6 +238,13 @@ class RmuModelModule(ModelModule):
         expected_snapshot["breaker_name_source"] = "GRAPHICAL_TEXT"
 
         current_snapshot = {
+            "rmu_name_detection_mode": str(
+                settings.get(
+                    "rmu_name_detection_mode",
+                    DEFAULT_RMU_NAME_DETECTION_MODE,
+                )
+                or DEFAULT_RMU_NAME_DETECTION_MODE
+            ).upper(),
             "rmu_name_positions": dict(
                 settings.get("rmu_name_positions", {})
             ),

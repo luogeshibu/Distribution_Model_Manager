@@ -52,10 +52,7 @@ class JobWorker(QThread):
                 # preview_association() is retained only as an internal
                 # candidate-builder so RMU/FEEDER validation does not need to
                 # duplicate the same database/topology analysis.
-                if (
-                    self.module.module_id in {"RMU", "FEEDER"}
-                    and self.module.supports("PREVIEW_ASSOCIATION")
-                ):
+                if self.module.supports("PREVIEW_ASSOCIATION"):
                     preview_data = self.module.preview_association(
                         db,
                         self.files,
@@ -126,5 +123,4 @@ class JobWorker(QThread):
         finally:
             if db:
                 db.close()
-
 

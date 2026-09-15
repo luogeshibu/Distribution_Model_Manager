@@ -164,6 +164,106 @@ class OracleClient:
             {"rmu_name": lookup_name},
         )
 
+    def get_combined_device_records(self, device_name: str) -> List[Dict[str, Any]]:
+        """Resolve a standalone device name in dms_combined_device (13501).
+
+        Pole-switch drawings use the visible device name as the business
+        identity. The normal lookup is an exact trimmed NAME lookup. Some
+        DMS exports (including the supplied screenshot) expose the same
+        display value in CODE instead, so CODE is checked only as a fallback
+        when the NAME lookup returns no rows. The two lookups are deliberately
+        performed one device at a time, never as a bulk IN query.
+        """
+        lookup_name = str(device_name or "").strip()
+        if not lookup_name:
+            return []
+        table_name = self.get_table_name(13501)
+        rows = self._query(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE TRIM(name) = :device_name
+            """,
+            {"device_name": lookup_name},
+        )
+        matched_field = "NAME"
+        if not rows:
+            rows = self._query(
+                f"""
+                SELECT *
+                FROM {table_name}
+                WHERE TRIM(code) = :device_name
+                """,
+                {"device_name": lookup_name},
+            )
+            matched_field = "CODE"
+        for row in rows:
+            row["_table_id"] = 13501
+            row["_table_name"] = table_name
+            row["_matched_field"] = matched_field
+        return rows
+
+    def get_cb_devices_by_combined_name(
+        self,
+        combined_name: str,
+        table_id: int = 13502,
+    ) -> List[Dict[str, Any]]:
+        """Resolve dms_cb_device rows whose combined_id is a device NAME.
+
+        In the pole-switch model, ``dms_cb_device.combined_id`` is a string
+        such as ``SEC-2046`` rather than the numeric 13501 row ID used by RMU
+        device associations.  The exact trimmed comparison prevents a nearby
+        device with a similar display name from being selected.
+        """
+        lookup_name = str(combined_name or "").strip()
+        if not lookup_name:
+            return []
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE TRIM(combined_id) = :combined_name
+            """,
+            {"combined_name": lookup_name},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
+
+    def get_cb_devices_by_combined_device_id(
+        self,
+        combined_device_id: Any,
+        table_id: int = 13502,
+    ) -> List[Dict[str, Any]]:
+        """Resolve child switch rows by the parent 13501 device ID.
+
+        In the live DMS data, ``dms_cb_device.COMBINED_ID`` is the numeric
+        ``dms_combined_device.ID``. For example, the 13501 row whose CODE is
+        ``SEC-2046`` has ID ``3800193660570626905`` and the corresponding
+        13502 row stores that number in COMBINED_ID.
+        """
+        if combined_device_id in (None, ""):
+            return []
+        try:
+            lookup_id = int(combined_device_id)
+        except (TypeError, ValueError):
+            return []
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE combined_id = :combined_device_id
+            """,
+            {"combined_device_id": lookup_id},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
+
     def get_devices_by_combined_id(self, table_id: int, combined_id: int) -> Tuple[str, List[Dict[str, Any]]]:
         table_name = self.get_table_name(table_id)
         # Table name comes only from sys_table_info, never from user input.

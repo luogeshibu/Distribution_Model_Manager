@@ -70,7 +70,7 @@ class FeederTopologyResolver:
 
         ext=[]
         for obj in parsed.objects:
-            if obj.tag.lower() in {"text","dtext"}:
+            if obj.tag.lower() == "text":
                 m=re.fullmatch(r"\((\d+)\)",str(obj.attrs.get("ts") or "").strip())
                 if m: ext.append((m.group(1),obj.box.cx,obj.box.cy,obj.xml_id))
 
@@ -163,7 +163,7 @@ class FeederDrawingTopologyClassifier:
         tokens = set()
         occurrences = []
         for obj in parsed.objects:
-            if obj.tag.lower() not in {"text", "dtext"}:
+            if obj.tag.lower() != "text":
                 continue
             text = str(obj.attrs.get("ts") or "").strip().upper().replace("\n", " ")
             match = cls._FEEDER_TITLE_RE.search(text)
@@ -325,4 +325,3 @@ class FeederDrawingTopologyClassifier:
             "feeder_source_branch_count": len(feeder_source_branches),
             "bus_tie_branch_count": tie_branch_count,
         }
-
