@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
+import stat
 from typing import Iterable
 
 
@@ -31,6 +32,8 @@ class ReadOnlySshClient:
     Deliberately exposes only:
       - test_connection
       - list_g_files
+      - list_element_files
+      - read_file
       - stat_file
       - download_file
       - close
@@ -119,6 +122,43 @@ class ReadOnlySshClient:
         rows.sort(key=lambda item: item.name.lower())
         return rows
 
+    def list_element_files(self, remote_directory: str) -> list[RemoteGFile]:
+        """Recursively list read-only element definition G files.
+
+        The element repository is grouped by device family, unlike the flat
+        display/sln directory.  The relative path is kept in ``name`` so a
+        user-maintained mapping remains unambiguous when two folders contain
+        equal file names.
+        """
+        self.connect()
+        root = str(remote_directory).strip()
+        if not root:
+            raise ValueError("远程图元目录不能为空。")
+
+        rows: list[RemoteGFile] = []
+        pending = [PurePosixPath(root)]
+        while pending:
+            current = pending.pop()
+            for attr in self._sftp.listdir_attr(str(current)):
+                name = str(attr.filename)
+                path = current / name
+                if stat.S_ISDIR(int(attr.st_mode or 0)):
+                    pending.append(path)
+                    continue
+                if not name.lower().endswith(".g"):
+                    continue
+                relative = str(path.relative_to(PurePosixPath(root)))
+                rows.append(
+                    RemoteGFile(
+                        name=relative,
+                        remote_path=str(path),
+                        size=int(attr.st_size),
+                        mtime_epoch=int(attr.st_mtime),
+                    )
+                )
+        rows.sort(key=lambda item: item.name.casefold())
+        return rows
+
     def stat_file(self, remote_path: str) -> RemoteGFile:
         self.connect()
         attr = self._sftp.stat(remote_path)
@@ -134,6 +174,12 @@ class ReadOnlySshClient:
         self.connect()
         # SFTP.get is a read from server to local filesystem only.
         self._sftp.get(str(remote_path), str(local_path))
+
+    def read_file(self, remote_path: str) -> bytes:
+        """Read one remote file without creating or changing server files."""
+        self.connect()
+        with self._sftp.open(str(remote_path), "rb") as handle:
+            return handle.read()
 
     def close(self):
         sftp, ssh = self._sftp, self._ssh

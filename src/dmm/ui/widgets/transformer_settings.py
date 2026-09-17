@@ -9,10 +9,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from dmm.application.modules.pole_switch import (
-    POLE_SWITCH_DEVREF_KEYWORDS,
-    POLE_SWITCH_DOMAIN,
-    POLE_SWITCH_TABLE_ID,
+from dmm.application.modules.transformer import (
+    TRANSFORMER_DOMAIN,
+    TRANSFORMER_TABLE_ID,
 )
 
 
@@ -23,11 +22,11 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
-class PoleSwitchSettingsWidget(QGroupBox):
-    """Business rules and hard name filters for pole switches."""
+class TransformerSettingsWidget(QGroupBox):
+    """Rules and hard name filters for the pole-transformer model."""
 
     def __init__(self, config):
-        super().__init__("柱上开关识别与关联")
+        super().__init__("柱上变压器识别与关联")
         self.config = config
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
@@ -36,10 +35,11 @@ class PoleSwitchSettingsWidget(QGroupBox):
         layout.setSpacing(9)
 
         intro = QLabel(
-            "柱上开关只识别 CBreakerDis。设备型号只根据图元管理中对对应图元文件的 LBS、SEC、AR 分类标记判断，"
-            "不再从 devref 或文件名猜测类型；设备名称在当前模块识别出的设备范围内，直接取整张 G 图中距离最近的 Text；"
-            "不会使用 key_name 或 p_NameString 作为设备名称，也不会用它们代替 devref 判断型号。"
-            "下方名称格式、颜色和背景选项是 Text 的强制筛选条件，颜色分为白色和其他颜色两类，默认白色。"
+            "柱上变压器只识别图元管理中标记为 Transformer_OH 的图元；被标记的图元直接视为变压器，"
+            "不依赖现场图元文件名或 TransformerDis 名称。名称在柱上变压器范围内，直接取整张 G 图中距离最近的 Text。"
+            "每个设备独立解析最近名称。支持纯数字名称，例如 97803；"
+            "不读取 DText、key_name 或 XML p_NameString。下面的名称格式、颜色和背景选项"
+            "是 Text 的强制筛选条件，颜色分为白色和其他颜色两类，默认白色。"
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -51,12 +51,12 @@ class PoleSwitchSettingsWidget(QGroupBox):
         self.format_combo.addItem("纯数字", "NUMERIC")
         self.format_combo.addItem("数字和字母混合", "ALPHANUMERIC_SPACE")
         saved_format = str(
-            config.get("pole_switch_name_format") or ""
+            config.get("transformer_name_format") or ""
         ).strip().upper()
         if not saved_format:
             saved_format = (
                 "NUMERIC"
-                if bool(config.get("pole_switch_name_numeric", False))
+                if bool(config.get("transformer_name_numeric", True))
                 else "ALPHANUMERIC_SPACE"
             )
         self.format_combo.setCurrentIndex(
@@ -68,7 +68,7 @@ class PoleSwitchSettingsWidget(QGroupBox):
         self.color_combo = NoWheelComboBox()
         self.color_combo.addItem("白色", "WHITE")
         self.color_combo.addItem("其他颜色", "OTHER")
-        saved_colors = config.get("pole_switch_name_colors", ["WHITE"]) or []
+        saved_colors = config.get("transformer_name_colors", ["WHITE"]) or []
         saved_color = str(saved_colors[0] if isinstance(saved_colors, (list, tuple)) else saved_colors).strip().upper()
         if saved_color not in {"WHITE", "OTHER"}:
             saved_color = "OTHER"
@@ -82,7 +82,7 @@ class PoleSwitchSettingsWidget(QGroupBox):
         self.background_combo.addItem("无背景", False)
         self.background_combo.addItem("有背景", True)
         self.background_combo.setCurrentIndex(
-            1 if bool(config.get("pole_switch_name_has_background", False)) else 0
+            1 if bool(config.get("transformer_name_has_background", False)) else 0
         )
         preference_layout.addWidget(self.background_combo, 2, 1, 1, 2)
         preference_note = QLabel(
@@ -94,51 +94,48 @@ class PoleSwitchSettingsWidget(QGroupBox):
         preference_layout.addWidget(preference_note, 3, 0, 1, 7)
         layout.addWidget(preference_box)
 
-        devrefs = QLabel(
-            "图元管理分类标记（对应图元文件，包含任一标记即可）：\n"
-            + "、".join(POLE_SWITCH_DEVREF_KEYWORDS)
+        topology = QLabel(
+            "模型关联不分析 RMU、ConnectLine、node_area 或其他拓扑关系。"
+            "每个已标记变压器独立取距离最近的合规 Text，多个设备可以解析到同一个 Text。"
+            "馈线固定优先使用 G 根节点 facID 精确查询 13500 / dms_feeder_device；"
+            "facID 查不到时仅使用唯一 facName 兜底。"
         )
-        devrefs.setWordWrap(True)
-        devrefs.setStyleSheet(
+        topology.setWordWrap(True)
+        topology.setStyleSheet(
             "background:#EAF8F2;border:1px solid #B9DACD;"
             "border-radius:6px;padding:8px;color:#006B52;"
         )
-        layout.addWidget(devrefs)
+        layout.addWidget(topology)
 
         db_rule = QLabel(
-            f"数据库链路：图上名称 → dms_combined_device（表 13501，先按 NAME 精确匹配，"
-            f"未命中再按 CODE 精确匹配）→ 取 13501.ID → dms_cb_device（表 {POLE_SWITCH_TABLE_ID}，"
-            f"WHERE combined_id=13501.ID）→ 使用 13502.ID 按 Domain={POLE_SWITCH_DOMAIN} 计算 KeyID。"
+            f"数据库链路：Text 名称 + 馈线 ID → dms_tr_device（表 {TRANSFORMER_TABLE_ID}，"
+            f"NAME 和 FEEDER_ID 精确匹配）→ 取 13505.ID，按 Domain={TRANSFORMER_DOMAIN} 计算 KeyID。"
         )
         db_rule.setWordWrap(True)
         layout.addWidget(db_rule)
 
-        topology = QLabel(
-            "名称识别先扫描整张 G 图的有效 Text，当前模块的每个设备独立取最近名称，"
-            "Text 中的换行名称（例如 AUTO RECLOSER 101601）会作为一个完整名称保留，"
-            "kV、A、V 等单位文字会排除；"
-            "当前模块不分析 RMU、ConnectLine、node_area 或其他拓扑关系；"
-            "每个已标记设备独立取距离最近的合规 Text，多个设备可以解析到同一个 Text。"
-            "拓扑明细不输出到报告。"
+        writeback = QLabel(
+            "TransformerDis 回写两组并行字段：app1/app2、voltype1/voltype2、"
+            "p_ReportType1/p_ReportType2、state1/state2、keyid1/keyid2。"
+            "原始 G 文件不修改，只写入 Workspace 安全副本。"
         )
-        topology.setWordWrap(True)
-        topology.setStyleSheet("color:#60756d;")
-        layout.addWidget(topology)
+        writeback.setWordWrap(True)
+        writeback.setStyleSheet("color:#60756d;")
+        layout.addWidget(writeback)
 
     def collect_settings(self):
-        name_format = str(self.format_combo.currentData() or "ALPHANUMERIC_SPACE")
+        name_format = str(self.format_combo.currentData() or "NUMERIC")
         numeric = name_format == "NUMERIC"
         has_background = bool(self.background_combo.currentData())
         return {
-            "pole_switch_table_id": POLE_SWITCH_TABLE_ID,
-            "pole_switch_domain": POLE_SWITCH_DOMAIN,
-            "pole_switch_devref_keywords": list(POLE_SWITCH_DEVREF_KEYWORDS),
+            "transformer_table_id": TRANSFORMER_TABLE_ID,
+            "transformer_domain": TRANSFORMER_DOMAIN,
             "name_format": name_format,
             "name_numeric": numeric,
             "name_colors": [str(self.color_combo.currentData() or "WHITE")],
             "name_has_background": has_background,
-            "pole_switch_name_numeric": numeric,
-            "pole_switch_name_format": name_format,
-            "pole_switch_name_colors": [str(self.color_combo.currentData() or "WHITE")],
-            "pole_switch_name_has_background": has_background,
+            "transformer_name_numeric": numeric,
+            "transformer_name_format": name_format,
+            "transformer_name_colors": [str(self.color_combo.currentData() or "WHITE")],
+            "transformer_name_has_background": has_background,
         }

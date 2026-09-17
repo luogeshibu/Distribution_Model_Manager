@@ -1719,7 +1719,11 @@ class FeederValidator:
         )
         positions = [
             key for key, enabled in self.rmu_name_positions.items() if enabled
-        ] or ["top"]
+        ]
+        if not positions:
+            raise ValueError(
+                "必须先指定环网柜名称方向（上方、下方、左侧或右侧）。"
+            )
         resolved = validator._resolve_rmu_name(
             rmu_parsed,
             frame,
@@ -2420,7 +2424,11 @@ class FeederValidator:
             key
             for key, enabled in self.rmu_name_positions.items()
             if enabled
-        ] or ["top"]
+        ]
+        if not rmu_positions:
+            raise ValueError(
+                "必须先指定环网柜名称方向（上方、下方、左侧或右侧）。"
+            )
         preassigned_name_candidates = (
             rmu_parser.assign_rmu_label_candidates_globally(
                 rmu_parsed,

@@ -28,40 +28,27 @@ DEFAULT_DEVICE_RULES = {
 }
 
 DEFAULT_NAME_POSITIONS = {
-    "top": True,
+    "top": False,
     "right": False,
     "left": False,
     "bottom": False,
 }
 
-# RMU name labels are searched in all four directions by default.  The
-# checkbox map above remains as a legacy/advanced override for drawings that
-# use a known fixed layout.
+# RMU name labels must use the direction explicitly selected by the user.
+# Keeping the direction in settings is intentional: different G-file sites
+# place cabinet names in different visual bands.
 RMU_NAME_DIRECTIONS = ("top", "right", "left", "bottom")
-DEFAULT_RMU_NAME_DETECTION_MODE = "AUTO"
+DEFAULT_RMU_NAME_DETECTION_MODE = "FIXED"
 
 
-def resolve_rmu_name_positions(mode="AUTO", configured_positions=None):
-    """Return the effective RMU-name directions for a validation run.
-
-    ``AUTO`` deliberately does not require a direction from the user.  The
-    parser still uses direction as one spatial feature, but searches all four
-    directions and lets the global ownership/scoring rules decide.
-
-    ``FIXED`` preserves the previous checkbox behavior.  If an old caller
-    supplies an empty map, fall back to the historical top direction instead
-    of making the entire validation pipeline fail unexpectedly.
-    """
-    if str(mode or DEFAULT_RMU_NAME_DETECTION_MODE).strip().upper() == "AUTO":
-        return list(RMU_NAME_DIRECTIONS)
-
+def resolve_rmu_name_positions(mode="FIXED", configured_positions=None):
+    """Return only the directions explicitly selected by the user."""
     configured_positions = configured_positions or {}
-    selected = [
+    return [
         position
         for position in RMU_NAME_DIRECTIONS
         if bool(configured_positions.get(position, False))
     ]
-    return selected or ["top"]
 
 DEFAULT_RMU_NAME_EXCLUSIONS = [
     "N.O.P",
@@ -84,7 +71,21 @@ DEFAULT_SETTINGS = {
         "username": "up8000",
         "password": "up8000",
         "remote_directory": "/home/up8000/data/graph/display/sln",
+        "element_directory": "/home/up8000/data/graph/element",
     },
+    "element_catalog": {
+        "records": [],
+    },
+    # Name format/color/background settings are hard filters for the global
+    # Text-to-device assignment.
+    "pole_switch_name_numeric": False,
+    "pole_switch_name_format": "ALPHANUMERIC_SPACE",
+    "pole_switch_name_colors": ["WHITE"],
+    "pole_switch_name_has_background": False,
+    "transformer_name_numeric": True,
+    "transformer_name_format": "NUMERIC",
+    "transformer_name_colors": ["WHITE"],
+    "transformer_name_has_background": False,
     "last_file_path": "",
     "last_folder_path": "",
     "last_run_dir": "",

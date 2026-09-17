@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from dmm.application.job_worker import JobWorker
 from dmm.application.registry import get_model_modules
 from dmm.ui.registry import create_settings_widget
+from dmm.ui.widgets.element_management_page import ElementManagementWidget
 from dmm.config.constants import (
     APP_NAME, APP_NAME_EN, APP_VERSION, APP_EDITION, APP_BUILD_DATE,
     WORKSPACE_RETENTION_DAYS,
@@ -697,7 +698,7 @@ class MainWindow(QMainWindow):
         self.nav = QListWidget()
         self.nav.setObjectName("navList")
 
-        for label in ("数据库", "模型工作区", "运行历史", "设置", "帮助"):
+        for label in ("数据库", "模型工作区", "图元管理", "运行历史", "设置", "帮助"):
             self.nav.addItem(QListWidgetItem(label))
 
         self.nav.setCurrentRow(1)
@@ -710,12 +711,24 @@ class MainWindow(QMainWindow):
 
         self.pages.addWidget(self._build_database_page())
         self.pages.addWidget(self._build_workspace_page())
+        self.element_management_page = self._build_element_management_page()
+        self.pages.addWidget(self.element_management_page)
         self.pages.addWidget(self._build_history_page())
         self.pages.addWidget(self._build_settings_page())
         self.pages.addWidget(self._build_help_page())
 
         self.pages.setCurrentIndex(1)
         body_layout.addWidget(self.pages, 1)
+
+    # ------------------------------------------------------------
+    # Element management page
+    # ------------------------------------------------------------
+    def _build_element_management_page(self):
+        page = ElementManagementWidget(self.cfg, self)
+        page.catalogChanged.connect(
+            lambda: self._invalidate_validation_snapshot("图元标记配置已修改")
+        )
+        return page
 
     # ------------------------------------------------------------
     # Database page
@@ -864,10 +877,13 @@ class MainWindow(QMainWindow):
         self.module_combo.currentIndexChanged.connect(self.on_module_changed)
         grid.addWidget(self.module_combo, 0, 1, 1, 2)
 
+        top_actions = QHBoxLayout()
         self.module_help_btn = QPushButton("当前模型帮助")
         self.module_help_btn.setMinimumWidth(112)
         self.module_help_btn.clicked.connect(self.show_current_module_help)
-        grid.addWidget(self.module_help_btn, 0, 3)
+        top_actions.addWidget(self.module_help_btn)
+        top_actions.addStretch()
+        grid.addLayout(top_actions, 0, 3)
 
         grid.addWidget(QLabel("文件来源（RMU / 馈线通用）"), 1, 0)
         self.input_source_combo = NoWheelComboBox()
@@ -1472,17 +1488,38 @@ class MainWindow(QMainWindow):
                 </pre>
                 <p><b>Only these five FeedLine attributes are changed.</b> key_name, ls, coordinates, colors, line style, and all other attributes remain unchanged.</p>
                 """
+            if module_id == "TRANSFORMER":
+                return """
+                <h2>Pole Transformer Model Help</h2>
+                <h3>1. Recognition and Feeder</h3>
+                <ul>
+                  <li>Only elements marked <b>Transformer_OH</b> in Element Management are recognized as pole transformers. Each transformer directly takes the nearest <b>Text</b> from the G file; numeric names such as 97803 are supported.</li>
+                  <li>G-root <b>facID</b> is queried exactly in 13500 / dms_feeder_device. RMU, ConnectLine, node_area, and CBreaker topology are not analyzed by this module.</li>
+                  <li>Only a unique facName is used as the fallback when the root facID is unavailable; otherwise the row remains unresolved.</li>
+                </ul>
+                <h3>2. Database Chain</h3>
+                <p>Nearest graphical Text name + feeder_id → 13505 / dms_tr_device.NAME and FEEDER_ID → 13505.ID. Expected KeyID is calculated with Domain 1.</p>
+                <h3>3. Safe Write-back</h3>
+                <pre>
+    app1/app2="6500000"
+    voltype1/voltype2="0"
+    p_ReportType1/p_ReportType2="1"
+    state1/state2="18"
+    keyid1/keyid2="Expected KeyID"
+                </pre>
+                <p>Only selected Transformer_OH-marked transformer elements are written to Workspace safe copies; original G files are not modified.</p>
+                """
             if module_id == "POLE_SWITCH":
                 return """
                 <h2>Pole Switch Model Help</h2>
                 <h3>1. Recognition Rules</h3>
                 <ul>
-                  <li>Only <b>CBreakerDis</b> objects outside recognized RMU frames are included.</li>
-                  <li>The complete <b>devref</b> attribute must exactly match one of the four configured templates: RMU_LBS_NON, RMU_LBS_S, SEC_S_H, or AR_S. key_name and p_NameString are not type-recognition sources.</li>
-                  <li>The device name is resolved from the nearest valid Text. ConnectLine / node_area topology components and neighboring objects are retained as evidence.</li>
+                  <li>Only <b>CBreakerDis</b> objects whose element file is marked <b>LBS</b>, <b>SEC</b>, or <b>AR</b> in Element Management are included.</li>
+                  <li>The element mark is mandatory; devref text, key_name, and p_NameString are not type-recognition sources.</li>
+                  <li>Each eligible CBreakerDis independently takes its nearest valid Text. RMU, ConnectLine, node_area, and other topology are not analyzed by this module.</li>
                 </ul>
                 <h3>2. Database Chain</h3>
-                <p>Graphical name → 13501 / dms_combined_device.NAME or CODE → 13501.ID → 13502 / dms_cb_device.combined_id. The target table is 13502 and Domain is fixed at 40.</p>
+                <p>Graphical name → 13501 / dms_combined_device.NAME (if not found, CODE) → 13501.ID → 13502 / dms_cb_device.combined_id. The target device is 13502.ID and Domain is fixed at 40 for KeyID calculation.</p>
                 <h3>3. Safe Write-back</h3>
                 <pre>
     app="6500000"
@@ -1503,7 +1540,7 @@ class MainWindow(QMainWindow):
               <li><b>devref names are not interpreted:</b> only CBreakerDis participates. Y devices must share one template, Q devices must share one template, and the Y/Q templates must differ. ZhaiWaiJieDiDaoZha (for example RMU_ES), BusDis, and all other objects are excluded.</li>
               <li>If text type and valid devref type disagree, the final RMU type uses the devref result and the report raises WARN.</li>
               <li><b>SMART/NORMAL:</b> SMART and SMR graphical markers are globally assigned to the nearest RMU. Any SMART/SMR marker makes the cabinet SMART; otherwise it is NORMAL.</li>
-          <li>RMU names use automatic four-direction search by default. Fixed top / bottom / left / right filters remain available as an advanced compatibility mode.</li>
+              <li>RMU names require user-selected directions. Automatic direction inference is not used; if no direction is selected, validation is blocked.</li>
               <li>Selected directions are searched globally across the G file; the old 120-coordinate name-distance limit is not used.</li>
               <li>Each Text belongs to only one nearest RMU. A single candidate is used directly; with multiple candidates, the nearest green label is preferred, otherwise the nearest candidate is used.</li>
               <li>Names are strings. Standard compact names are supported, plus the field form <b>number + space + suffix</b> such as <b>66 B</b>. Arbitrary descriptive text containing spaces is still rejected.</li>
@@ -1545,17 +1582,39 @@ class MainWindow(QMainWindow):
             <p>Original G files are never modified. Only safe Workspace copies are changed.</p>
             """
 
+        if module_id == "TRANSFORMER":
+            return """
+            <h2>柱上变压器模型帮助</h2>
+            <h3>1. 识别与馈线</h3>
+            <ul>
+              <li>只识别图元管理中标记为 <b>Transformer_OH</b> 的图元，被标记图元直接视为柱上变压器；每个变压器直接取整张 G 图中距离最近的 <b>Text</b>，支持 97803 这类纯数字名称。</li>
+              <li>优先按 G 根节点 <b>facID</b> 精确查询 13500 / dms_feeder_device；不分析 RMU、ConnectLine、node_area 或 CBreaker 拓扑链路。</li>
+              <li>根 facID 查不到时，仅使用唯一 facName 兜底；仍无法唯一确定时阻断。</li>
+            </ul>
+            <h3>2. 数据库链路</h3>
+            <p>最近 Text 名称直接解析 + feeder_id → 13505 / dms_tr_device 的 NAME、FEEDER_ID 精确匹配 → 取 13505.ID，按 Domain=1 计算 Expected KeyID。</p>
+            <h3>3. 安全回写</h3>
+            <pre>
+    app1/app2="6500000"
+    voltype1/voltype2="0"
+    p_ReportType1/p_ReportType2="1"
+    state1/state2="18"
+    keyid1/keyid2="Expected KeyID"
+            </pre>
+            <p>只将用户勾选的 Transformer_OH 标记图元写入 Workspace 安全副本，原始 G 文件不修改。</p>
+            """
         if module_id == "POLE_SWITCH":
             return """
             <h2>柱上开关模型帮助</h2>
             <h3>1. 识别规则</h3>
             <ul>
-              <li>只识别环网柜外的 <b>CBreakerDis</b> 图元；环网柜内部的同类图元不参与柱上开关模块。</li>
-              <li>设备类型只检查完整的 <b>devref</b> 属性，必须匹配 RMU_LBS_NON、RMU_LBS_S、SEC_S_H、AR_S 四类模板；不使用 key_name 或 p_NameString 代替类型识别。</li>
-              <li>设备名称只取附近最近的有效 Text，同时记录 ConnectLine / node_area 拓扑连通分量和邻接图元。</li>
+              <li>只识别对应图元文件在图元管理中标记为 <b>LBS</b>、<b>SEC</b> 或 <b>AR</b> 的 <b>CBreakerDis</b> 图元。</li>
+              <li>图元标记是强制条件，不从 devref、key_name 或 p_NameString 猜测设备类型。</li>
+              <li>扫描整张 G 图的有效 Text，每个柱上开关独立取最近的合规 Text；不分析 RMU、ConnectLine、node_area 或其他拓扑关系。</li>
+              <li>Text.ts 中的换行名称（例如 <b>AUTO RECLOSER 101601</b>）会规范空白后作为一个完整名称保留；只有 <b>kV</b>、<b>A</b>、<b>V</b> 等单位 Text 不参与设备名称分配，名称不读取 DText。</li>
             </ul>
             <h3>2. 数据库链路</h3>
-            <p>图上名称 → 13501 / dms_combined_device.NAME 或 CODE → 13501.ID → 13502 / dms_cb_device.combined_id；目标表为 13502，Domain 固定为 40。</p>
+            <p>图上名称 → 13501 / dms_combined_device.NAME（未命中再按 CODE）→ 13501.ID → 13502 / dms_cb_device.combined_id；目标设备使用 13502.ID，Domain 固定为 40 计算 KeyID。</p>
             <h3>3. 安全回写</h3>
             <pre>
     app="6500000"
@@ -1622,7 +1681,7 @@ class MainWindow(QMainWindow):
           <li>如果文字类型与 devref 类型不一致，报告中显示“类型交叉校验=NO”，最终“环网柜类型”采用 devref 类型；该差异本身不改变 RMU 数据库关联资格。</li>
           <li><b>智能环网柜识别：</b>在整张 G 图全局寻找 Text 中精确的 SMART 和 SMR，并把每个标识唯一归属给距离最近的 RMU。SMART 通常在柜内、SMR 可以在柜外，因此不设置最大距离限制。</li>
           <li>一个 RMU 只要命中 SMART 或 SMR 任意一种，报告“是否智能”列显示 <b>SMART</b>；未命中则显示 <b>NORMAL</b>。若两种标识都归属于同一个柜，“智能标识”仍记录 <b>SMART, SMR</b>。</li>
-          <li>环网柜名称默认自动搜索上方 / 下方 / 左侧 / 右侧；“按指定方向”模式下才严格使用页面勾选的方向。</li>
+          <li>环网柜名称必须由用户指定上方 / 下方 / 左侧 / 右侧方向；程序只搜索页面勾选的方向，不自动猜测。</li>
           <li>在所选方向对整张 G 图执行全局搜索，不再使用旧的 120 坐标单位柜名距离上限；较远的普通文字和绿色文字都可参与。</li>
           <li>每个 Text 全局只归属距离最近的一个环网柜，避免同一名称被相邻环网柜重复使用。</li>
           <li>一个环网柜只有一个候选名称时直接使用，不判断颜色；拥有多个候选名称时才优先使用最近的绿色文字消歧，否则取最近候选。</li>
@@ -2083,6 +2142,8 @@ class MainWindow(QMainWindow):
             labels = {
                 "RMU": "RMU Model" if self.language == "en_US" else "RMU 环网柜模型",
                 "FEEDER": "Feeder Model" if self.language == "en_US" else "馈线模型",
+                "POLE_SWITCH": "Pole Switch Model" if self.language == "en_US" else "柱上开关模型",
+                "TRANSFORMER": "Pole Transformer Model" if self.language == "en_US" else "柱上变压器模型",
             }
             for i in range(self.module_combo.count()):
                 module_id = str(self.module_combo.itemData(i) or "").upper()
@@ -2217,7 +2278,7 @@ class MainWindow(QMainWindow):
         rmu_naming_text = QLabel(
             "• 环网柜只有在矩形框内同时存在 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元时才识别为 RMU。\n"
             "• RMU 柜型：柜内 Y*/Q* 文字与 CBreakerDis.devref 模板结构独立计算并交叉验证；devref 不解析任何现场图元关键字，只检查 Y 类同模板、Q 类同模板且 Y/Q 模板可区分。有效 devref 与文字冲突时仍以 devref 为准，同时 WARN。\n"
-            "• 环网柜名称默认自动搜索上方 / 下方 / 左侧 / 右侧；选择按指定方向时才严格使用用户勾选的方向。\n"
+            "• 环网柜名称必须由用户指定上方 / 下方 / 左侧 / 右侧方向；程序只搜索页面勾选的方向，不自动猜测。\n"
             "• 对所选方向执行整张 G 图全局搜索，柜名不再受旧的 120 坐标单位距离上限限制。\n"
             "• 每个 Text 全局只分配给距离最近的一个环网柜，避免同一个名字被两个柜重复使用。\n"
             "• 一个环网柜只有一个名称候选时直接使用；多个候选时才优先最近绿色名称，否则取最近候选。\n"
@@ -2538,6 +2599,24 @@ class MainWindow(QMainWindow):
                 "association": (
                     "打开关联结果 HTML",
                     "打开关联结果柱上开关 CSV",
+                    "",
+                ),
+            }
+        elif report_kind == "TRANSFORMER":
+            labels = {
+                "validation": (
+                    "打开校验 HTML",
+                    "打开校验柱上变压器 CSV",
+                    "",
+                ),
+                "preview": (
+                    "打开预览 HTML",
+                    "打开预览柱上变压器 CSV",
+                    "",
+                ),
+                "association": (
+                    "打开关联结果 HTML",
+                    "打开关联结果柱上变压器 CSV",
                     "",
                 ),
             }
@@ -3487,6 +3566,9 @@ class MainWindow(QMainWindow):
             settings = self.module_widgets[
                 module_id
             ].collect_settings()
+            settings["element_catalog"] = dict(
+                self.cfg.get("element_catalog", {}) or {}
+            )
             source_type = self._current_input_source()
             settings["input_is_directory"] = False
 
@@ -3575,6 +3657,14 @@ class MainWindow(QMainWindow):
                 "allow_feeder_override",
                 "feeder_drawing_mode",
                 "auto_create_missing_sections",
+                "pole_switch_name_numeric",
+                "pole_switch_name_format",
+                "pole_switch_name_colors",
+                "pole_switch_name_has_background",
+                "transformer_name_numeric",
+                "transformer_name_format",
+                "transformer_name_colors",
+                "transformer_name_has_background",
             ):
                 if key in settings:
                     self.cfg[key] = settings[key]
@@ -3775,7 +3865,7 @@ class MainWindow(QMainWindow):
             current_module = str(
                 self.module_combo.currentData() or ""
             ).upper()
-            if current_module in {"RMU", "FEEDER", "POLE_SWITCH"}:
+            if current_module in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER"}:
                 self._populate_association_table(self.current_preview)
                 if current_module == "FEEDER":
                     self.log(
@@ -3789,9 +3879,15 @@ class MainWindow(QMainWindow):
                         f"可关联/重新关联设备 {change_count} 个。"
                         "请在工作区表格中勾选需要处理的设备。"
                     )
-                else:
+                elif current_module == "POLE_SWITCH":
                     self.log(
                         f"模型校验已生成可关联柱上开关清单："
+                        f"可关联/重新关联设备 {change_count} 个。"
+                        "请在工作区表格中勾选需要处理的设备。"
+                    )
+                else:
+                    self.log(
+                        f"模型校验已生成可关联柱上变压器清单："
                         f"可关联/重新关联设备 {change_count} 个。"
                         "请在工作区表格中勾选需要处理的设备。"
                     )
@@ -3826,6 +3922,8 @@ class MainWindow(QMainWindow):
             self.log(f"馈线段明细 CSV：{self.current_artifacts.get('device_csv', '')}")
         elif report_kind == "POLE_SWITCH":
             self.log(f"柱上开关 CSV：{self.current_artifacts.get('rmu_csv', '')}")
+        elif report_kind == "TRANSFORMER":
+            self.log(f"柱上变压器 CSV：{self.current_artifacts.get('rmu_csv', '')}")
         else:
             self.log(f"环网柜 CSV：{self.current_artifacts.get('rmu_csv', '')}")
             self.log(f"设备 CSV：{self.current_artifacts.get('device_csv', '')}")
@@ -3986,7 +4084,7 @@ class MainWindow(QMainWindow):
             return
 
         module_id = str(self.module_combo.currentData() or "").upper()
-        if module_id not in {"RMU", "FEEDER", "POLE_SWITCH"}:
+        if module_id not in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER"}:
             return
 
         candidate_lookup = self._candidate_change_lookup(preview_data)
@@ -4067,23 +4165,23 @@ class MainWindow(QMainWindow):
                     item["_feeder_id"] = report.get("feeder_id", "")
                     item["_feeder_name"] = report.get("feeder_name", "")
                     display_rows.append(item)
-        else:
+        elif module_id == "POLE_SWITCH":
             self.association_selection_box.setTitle(
                 self._t("可关联柱上开关选择（模型校验结果）")
             )
             self.association_selection_tip.setText(self._rt(
-                "模型校验完成后，这里展示环网柜外的柱上开关明细。"
+                "模型校验完成后，这里展示已按图元标记识别的柱上开关明细。"
                 "只有 13501 记录、13501.ID 与 13502 combined_id 正确对应，且 Domain 40 KeyID 校验通过，"
                 "且需要关联或重新关联的对象才允许勾选。"
             ))
             self.association_filter_label.setText(self._t("柱上开关快速筛选"))
             self.rmu_filter_edit.setPlaceholderText(
-                self._t("输入设备名称、型号、devref、拓扑分量或 XML ID")
+                self._t("输入设备名称、型号、devref 或 XML ID")
             )
             headers = [
                 self._t(x) for x in [
                     "选择", "G文件", "图元XML ID", "型号", "devref",
-                    "图上名称", "名称距离", "名称方向", "拓扑分量",
+                    "图上名称", "名称距离", "名称方向",
                     "当前KeyID", "目标设备ID", "Expected KeyID", "状态", "处理说明",
                 ]
             ]
@@ -4092,6 +4190,33 @@ class MainWindow(QMainWindow):
                 file_name = str(report.get("file_name", "") or Path(source_file).name)
                 for pole_row in report.get("pole_switch_rows", []) or []:
                     item = dict(pole_row)
+                    item["_source_file"] = source_file
+                    item["_file_name"] = file_name
+                    display_rows.append(item)
+        else:
+            self.association_selection_box.setTitle(
+                self._t("可关联柱上变压器选择（模型校验结果）")
+            )
+            self.association_selection_tip.setText(self._rt(
+                "模型校验完成后，这里展示 TransformerDis 变压器明细。"
+                "只有名称、馈线和 13505 目标唯一，且 Expected KeyID 校验通过的对象才允许勾选。"
+            ))
+            self.association_filter_label.setText(self._t("柱上变压器快速筛选"))
+            self.rmu_filter_edit.setPlaceholderText(
+                self._t("输入变压器名称、馈线ID、devref 或 XML ID")
+            )
+            headers = [
+                self._t(x) for x in [
+                    "选择", "G文件", "图元XML ID", "图上名称", "馈线ID",
+                    "馈线名称", "当前keyid1", "当前keyid2", "目标设备ID",
+                    "Expected KeyID", "状态", "处理说明",
+                ]
+            ]
+            for report in reports:
+                source_file = str(report.get("g_file", "") or "")
+                file_name = str(report.get("file_name", "") or Path(source_file).name)
+                for transformer_row in report.get("transformer_rows", []) or []:
+                    item = dict(transformer_row)
                     item["_source_file"] = source_file
                     item["_file_name"] = file_name
                     display_rows.append(item)
@@ -4164,13 +4289,22 @@ class MainWindow(QMainWindow):
                         row.get("assigned_device_id", ""), row.get("expected_keyid", ""),
                         self._rt(row.get("reason", "")),
                     ]
-                else:
+                elif module_id == "POLE_SWITCH":
                     values = [
                         row["_file_name"], row.get("xml_id", ""),
                         row.get("device_model", ""), row.get("devref", ""),
                         row.get("graphical_name", ""), row.get("name_distance", ""),
-                        row.get("name_direction", ""), row.get("topology_component", ""),
+                        row.get("name_direction", ""),
                         row.get("current_keyid", ""), row.get("db_device_id", ""),
+                        row.get("expected_keyid", ""), self._row_status_text(row),
+                        self._rt(row.get("reason", "")),
+                    ]
+                else:
+                    values = [
+                        row["_file_name"], row.get("xml_id", ""),
+                        row.get("graphical_name", ""), row.get("feeder_id", ""),
+                        row.get("feeder_name", ""), row.get("current_keyid1", ""),
+                        row.get("current_keyid2", ""), row.get("db_device_id", ""),
                         row.get("expected_keyid", ""), self._row_status_text(row),
                         self._rt(row.get("reason", "")),
                     ]
@@ -4291,7 +4425,10 @@ class MainWindow(QMainWindow):
             elif module_id == "POLE_SWITCH":
                 # Model, devref, name, topology component and XML ID are the
                 # useful quick-filter keys for standalone pole switches.
-                columns = (2, 3, 4, 5, 8, 13)
+                columns = (2, 3, 4, 5, 6, 12)
+            elif module_id == "TRANSFORMER":
+                # Transformer name, feeder, keyids, target and XML ID.
+                columns = (2, 3, 4, 5, 6, 7, 9, 11)
             else:
                 columns = (3,)
             haystack = " ".join(
@@ -4506,7 +4643,7 @@ class MainWindow(QMainWindow):
 
         module_id = str(self.module_combo.currentData() or "")
 
-        if module_id.upper() in {"RMU", "FEEDER", "POLE_SWITCH"}:
+        if module_id.upper() in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER"}:
             execution_preview = self._selected_association_preview()
             if not execution_preview or not execution_preview.get(
                 "changes_by_file"
@@ -4520,7 +4657,11 @@ class MainWindow(QMainWindow):
                         else (
                             "请先在“可关联柱上开关选择”表格中勾选至少一个需要关联或重新关联的设备。"
                             if module_id.upper() == "POLE_SWITCH"
-                            else "请先在“可关联设备选择”表格中勾选至少一个需要关联或重新关联的设备。"
+                            else (
+                                "请先在“可关联柱上变压器选择”表格中勾选至少一个需要关联或重新关联的设备。"
+                                if module_id.upper() == "TRANSFORMER"
+                                else "请先在“可关联设备选择”表格中勾选至少一个需要关联或重新关联的设备。"
+                            )
                         )
                     ),
                 )
@@ -4550,6 +4691,8 @@ class MainWindow(QMainWindow):
             if module_id == "FEEDER"
             else "柱上开关"
             if module_id == "POLE_SWITCH"
+            else "柱上变压器"
+            if module_id == "TRANSFORMER"
             else "RMU"
         )
         target_label = "馈线对象" if module_id == "FEEDER" else "设备图元"
@@ -4595,6 +4738,28 @@ class MainWindow(QMainWindow):
                     f"候选状态：{status_summary}\n\n"
                     "执行时会重新查询 13501、13502，并重新校验 Domain=40 的 KeyID，"
                     "然后只按 XML ID 写入 Workspace 安全副本。\n\n"
+                    "原始 G 文件不会被修改。\n\n"
+                    "是否确认执行？"
+                )
+        elif module_id.upper() == "TRANSFORMER":
+            if self.language == "en_US":
+                message = (
+                    f"This run will process only the {change_count} selected pole-transformer objects.\n"
+                    f"G files involved: {selected_file_count}\n"
+                    f"Candidate status: {status_summary}\n\n"
+                    "The program will recheck 13500 / dms_feeder_device and 13505 / dms_tr_device, "
+                    "verify Expected KeyID Domain 1, and write both TransformerDis keyid1/keyid2 fields "
+                    "to Workspace safe copies.\n\n"
+                    "Original G files will not be modified.\n\n"
+                    "Proceed with model association?"
+                )
+            else:
+                message = (
+                    f"本次将只处理已勾选的 {change_count} 个柱上变压器图元。\n"
+                    f"涉及 G 文件：{selected_file_count} 个\n"
+                    f"候选状态：{status_summary}\n\n"
+                    "执行时会重新查询 13500 馈线和 13505 变压器设备，"
+                    "重新校验 Domain=1 的 Expected KeyID，并将 keyid1/keyid2 两组字段写入 Workspace 安全副本。\n\n"
                     "原始 G 文件不会被修改。\n\n"
                     "是否确认执行？"
                 )
@@ -4709,6 +4874,9 @@ class MainWindow(QMainWindow):
             module_id = self.module_combo.currentData()
             module = self.modules[module_id]
             settings = self.module_widgets[module_id].collect_settings()
+            settings["element_catalog"] = dict(
+                self.cfg.get("element_catalog", {}) or {}
+            )
 
             # Association MUST use the exact file set from the corresponding
             # validation.  In SSH mode these are the immutable remote_input
@@ -4728,7 +4896,7 @@ class MainWindow(QMainWindow):
                     "模型校验输入快照不存在，请重新执行模型校验。"
                 )
 
-            if module_id in {"RMU", "FEEDER", "POLE_SWITCH"}:
+            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER"}:
                 selected_source_files = {
                     str(Path(p).resolve())
                     for p in execution_preview.get(
@@ -4819,7 +4987,7 @@ class MainWindow(QMainWindow):
                 if Path(p).exists()
             ]
 
-            if module_id in {"RMU", "FEEDER", "POLE_SWITCH"}:
+            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER"}:
                 # Execution reports are intentionally operation-scoped:
                 # only the rows explicitly selected by the user are included.
                 # The full drawing is NOT scanned/validated again after
@@ -4903,7 +5071,7 @@ class MainWindow(QMainWindow):
                     "正在生成模型关联完成报告……"
                 ))
 
-            if module_id in {"RMU", "FEEDER", "POLE_SWITCH"} and not reports:
+            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER"} and not reports:
                 raise RuntimeError(
                     "模型关联已执行，但没有生成本次选中对象的执行报告。"
                 )
@@ -4984,7 +5152,8 @@ class MainWindow(QMainWindow):
 
             is_feeder = module.module_id == "FEEDER"
             is_pole_switch = module.module_id == "POLE_SWITCH"
-            object_label = "FeedLine 图元" if is_feeder else "设备图元"
+            is_transformer = module.module_id == "TRANSFORMER"
+            object_label = "FeedLine 图元" if is_feeder else "柱上变压器图元" if is_transformer else "设备图元"
             self.log(
                 f"模型关联完成：本次选择={selected_total}，"
                 f"成功写回={total}，执行时跳过={skipped_total}；"
@@ -4999,7 +5168,11 @@ class MainWindow(QMainWindow):
                         else (
                             f"关联完成柱上开关 CSV：{csv_paths[0]}"
                             if is_pole_switch
-                            else f"关联完成环网柜 CSV：{csv_paths[0]}"
+                            else (
+                                f"关联完成柱上变压器 CSV：{csv_paths[0]}"
+                                if is_transformer
+                                else f"关联完成环网柜 CSV：{csv_paths[0]}"
+                            )
                         )
                     )
                 )

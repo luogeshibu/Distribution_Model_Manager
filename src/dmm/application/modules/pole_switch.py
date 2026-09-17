@@ -6,7 +6,13 @@ from collections import defaultdict, deque
 from pathlib import Path
 
 from dmm.application.modules.base import ModelModule
-from dmm.config.constants import RMU_LABEL_EDGE_TOLERANCE
+from dmm.config.constants import RMU_LABEL_EDGE_TOLERANCE, RMU_LABEL_PATTERN
+from dmm.domain.gfile.element_catalog import (
+    classification_is,
+    color_preference_penalty,
+    name_format_penalty,
+    resolve_element_record,
+)
 from dmm.domain.gfile.parser import GParser, GObject, ParsedG
 from dmm.domain.rmu.validator import int_or_none, norm
 from dmm.infrastructure.gfile.writeback import GWriteBackService
@@ -16,18 +22,34 @@ POLE_SWITCH_TABLE_ID = 13502
 POLE_SWITCH_DOMAIN = 40
 POLE_SWITCH_TAG = "CBreakerDis"
 
-# The complete devref is the recognition authority.  The short family name
-# is only a report/display value and must never be searched in arbitrary XML
-# attributes such as key_name or p_NameString.
-POLE_SWITCH_DEVREFS = {
-    "#RMU_LBS_NON.zwk.icn.g:RMU_LBS_NON": "LBS_NON",
-    "#RMU_LBS_S.zwk.icn.g:RMU_LBS_S": "LBS_S",
-    "#SEC_S_H.zwk.icn.g:SEC_S_H": "SEC_S_H",
-    "#AR_S.zwk.icn.g:AR_S": "AR_S",
-}
+# The recognition authority is the CBreakerDis tag plus a keyword contained
+# in its devref attribute. Never search these keywords in key_name, graphical
+# text, p_NameString, or any other attribute.
+POLE_SWITCH_DEVREF_KEYWORDS = ("LBS", "SEC", "AR")
+
+# The fixed-mode resolver scans the G file's Text objects for each marked
+# device. Devices do not compete for a label; the same nearest Text may be
+# returned for multiple independently parsed devices.
+GLOBAL_NAMEABLE_DEVICE_TAGS = frozenset({
+    "CBreaker",
+    "CBreakerDis",
+    "Disconnector",
+    "GroundDisconnector",
+    "PowerTransformer",
+    "Transformer",
+    "TransformerDis",
+    "ZhaiWaiJieDiDaoZha",
+})
 
 POLE_SWITCH_NAME_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.\-/]{0,127}$"
+)
+
+# Device names may contain spaces and may be split into visual lines in
+# Text.ts, for example ``AUTO RECLOSER\n101601``.  Keep the complete label
+# after whitespace normalization instead of treating it as two names.
+GRAPHICAL_DEVICE_NAME_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.\-/]*(?:\s+[A-Za-z0-9][A-Za-z0-9_.\-/]*){0,15}$"
 )
 
 _NON_NAME_LABELS = {
@@ -44,9 +66,44 @@ _NON_NAME_LABELS = {
     "I",
 }
 
+# These are visible Text annotations, not device names.  They must be
+# filtered before nearest-name selection; otherwise a unit such as ``kV`` can
+# become the name of a distant AR/LBS/SEC or TransformerDis.
+_NON_DEVICE_TEXT_EXACT = {
+    "A",
+    "V",
+    "KV",
+    "KA",
+    "MA",
+    "HZ",
+    "KW",
+    "MW",
+    "KVA",
+    "MVA",
+}
 
-def _norm_devref(value: str) -> str:
-    return re.sub(r"\s+", "", str(value or "").strip()).casefold()
+
+def _marked_pole_switch_family(value: str, element_catalog=None) -> str:
+    """Resolve pole-switch type from the user's element mark only.
+
+    The drawing's devref/file name is an instance locator.  It is not a
+    reliable business classification because different sites use different
+    element file names.  A missing or unclassified catalog record therefore
+    cannot become a pole switch through a substring coincidence.
+    """
+    catalog_record = resolve_element_record(value, element_catalog)
+    for keyword in POLE_SWITCH_DEVREF_KEYWORDS:
+        if classification_is(catalog_record, keyword):
+            return keyword
+    return ""
+
+
+def _devref_model_label(value: str, keyword: str) -> str:
+    raw = str(value or "").strip()
+    tail = raw.rsplit(":", 1)[-1].strip()
+    tail = re.sub(r"\.zwk\.icn\.g$", "", tail, flags=re.IGNORECASE)
+    tail = re.sub(r"^RMU_", "", tail, flags=re.IGNORECASE)
+    return tail or keyword
 
 
 def _point_to_box_distance(x: float, y: float, obj: GObject) -> float:
@@ -54,6 +111,25 @@ def _point_to_box_distance(x: float, y: float, obj: GObject) -> float:
     dx = max(float(box.left) - x, 0.0, x - float(box.right))
     dy = max(float(box.top) - y, 0.0, y - float(box.bottom))
     return math.hypot(dx, dy)
+
+
+def _text_has_background(obj: GObject) -> bool:
+    """Read an explicit Text background flag when one is exported."""
+    for key in (
+        "background",
+        "bg",
+        "bk",
+        "bkcolor",
+        "bk_color",
+        "p_BackColor",
+        "backColor",
+    ):
+        if key not in obj.attrs:
+            continue
+        value = str(obj.attrs.get(key) or "").strip().casefold()
+        if value and value not in {"0", "false", "none", "null", "transparent"}:
+            return True
+    return False
 
 
 class PoleSwitchParser:
@@ -66,6 +142,7 @@ class PoleSwitchParser:
                 "ZhaiWaiJieDiDaoZha",
                 "BusDis",
             },
+            label_regex=RMU_LABEL_PATTERN,
             overlap_tolerance=RMU_LABEL_EDGE_TOLERANCE,
         )
 
@@ -82,7 +159,9 @@ class PoleSwitchParser:
 
     @staticmethod
     def _text_value(obj: GObject) -> str:
-        return str(obj.attrs.get("ts") or "").strip()
+        # Text.ts may contain an XML line break plus alignment spaces.  The
+        # visible label is one name, so expose it as one normalized string.
+        return re.sub(r"\s+", " ", str(obj.attrs.get("ts") or "")).strip()
 
     @staticmethod
     def _is_valid_name(text: str) -> bool:
@@ -102,12 +181,14 @@ class PoleSwitchParser:
     @staticmethod
     def _model_family(model: str) -> str:
         model = str(model or "").upper()
-        if model.startswith("RMU_LBS"):
+        if "LBS" in model:
             return "LBS"
-        if model.startswith("SEC"):
+        if "SEC" in model:
             return "SEC"
-        if model.startswith("AR"):
+        if "AR" in model:
             return "AR"
+        if "BREAKER" in model:
+            return "BREAKER"
         return ""
 
     @classmethod
@@ -167,51 +248,285 @@ class PoleSwitchParser:
                 }
         return by_id, graph, components
 
-    def find_nearest_name(self, parsed: ParsedG, target: GObject, model: str, frames=()):
-        candidates = []
-        for obj in parsed.objects:
-            if obj.tag.lower() != "text":
+    @staticmethod
+    def _is_nameable_device(obj: GObject) -> bool:
+        if not str(obj.xml_id or "").strip():
+            return False
+        if obj.tag in GLOBAL_NAMEABLE_DEVICE_TAGS:
+            return True
+        # Keep the global pass extensible for device symbols not yet listed
+        # above: a non-structural G object carrying devref is a named symbol.
+        if obj.tag.lower() in {
+            "text",
+            "dtext",
+            "connectline",
+            "feedline",
+            "bus",
+            "busdis",
+            "line",
+            "rect",
+        }:
+            return False
+        return bool(str(obj.attrs.get("devref") or "").strip())
+
+    @staticmethod
+    def _line_points(obj: GObject):
+        raw = str(
+            obj.attrs.get("d")
+            or obj.attrs.get("points")
+            or obj.attrs.get("path")
+            or ""
+        )
+        pairs = re.findall(
+            r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)",
+            raw,
+        )
+        if pairs:
+            return [(float(x), float(y)) for x, y in pairs]
+        # Some exports store a whitespace-separated polyline without commas.
+        numbers = re.findall(r"-?\d+(?:\.\d+)?", raw)
+        if len(numbers) >= 4 and len(numbers) % 2 == 0:
+            return [
+                (float(numbers[index]), float(numbers[index + 1]))
+                for index in range(0, len(numbers), 2)
+            ]
+        return []
+
+    @classmethod
+    def _device_anchor_points(cls, device: GObject, parsed: ParsedG):
+        """Use ConnectLine endpoints as visual/electrical anchors.
+
+        A GIcon's bounding box is often much larger than the rendered symbol.
+        GFileStudio therefore measures name distance from the endpoint that
+        actually touches the device.  Lines remain topology evidence only and
+        are never treated as nameable objects.
+        """
+        by_id = {
+            str(obj.xml_id): obj
+            for obj in parsed.objects
+            if str(obj.xml_id or "").strip()
+        }
+        attached = defaultdict(list)
+        line_by_id = {}
+        for line in parsed.objects:
+            if line.tag != "ConnectLine":
                 continue
-            # A standalone switch must not borrow a label from an RMU that is
-            # nearby in the drawing.  RMU-internal labels are valid names for
-            # the RMU module, but are not candidates for this module.
-            if frames and self._is_inside_rmu(obj, frames):
+            if line.xml_id:
+                line_by_id[str(line.xml_id)] = line
+            for ref in cls._refs(line):
+                attached[ref].append(line)
+
+        lines = []
+        seen = set()
+        for ref in cls._refs(device):
+            line = line_by_id.get(ref)
+            if line is not None and id(line) not in seen:
+                lines.append(line)
+                seen.add(id(line))
+        for line in attached.get(str(device.xml_id), []):
+            if id(line) not in seen:
+                lines.append(line)
+                seen.add(id(line))
+
+        anchors = []
+        for line in lines:
+            points = cls._line_points(line)
+            if not points:
                 continue
-            text = self._text_value(obj)
-            if not self._is_valid_name(text):
-                continue
-            distance = _point_to_box_distance(
-                target.box.cx,
-                target.box.cy,
-                obj,
+            endpoints = (points[0], points[-1])
+            anchor = min(
+                endpoints,
+                key=lambda point: _point_to_box_distance(point[0], point[1], device),
             )
-            # Distance is the primary rule required by the pole-switch
-            # drawing convention.  Family consistency is only a tie-breaker;
-            # it must never make a farther label beat the nearest label.
-            family_penalty = 0 if self._family_matches_name(model, text) else 1
-            candidates.append((
+            anchors.append(anchor)
+        if not anchors:
+            return [(device.box.cx, device.box.cy)]
+        unique = []
+        seen_points = set()
+        for point in anchors:
+            key = (round(point[0], 6), round(point[1], 6))
+            if key not in seen_points:
+                unique.append(point)
+                seen_points.add(key)
+        return unique
+
+    @staticmethod
+    def _global_text_is_nameable(obj: GObject) -> bool:
+        """Accept visible Text labels without using DText or structural labels."""
+        value = str(obj.attrs.get("ts") or "").strip()
+        if obj.tag.lower() != "text" or not value or not any(char.isalnum() for char in value):
+            return False
+        normalized = re.sub(r"\s+", " ", value).strip()
+        upper = re.sub(r"\s+", "", normalized).upper()
+        if upper in _NON_NAME_LABELS or re.fullmatch(r"[YQ]\d+", upper):
+            return False
+        if upper in _NON_DEVICE_TEXT_EXACT:
+            return False
+        if re.fullmatch(r"N[._-]?O[._-]?P", upper):
+            return False
+        if re.fullmatch(r"F[._-]?C", upper):
+            return False
+        return bool(GRAPHICAL_DEVICE_NAME_RE.fullmatch(normalized))
+
+    def build_global_name_owners(
+        self,
+        parsed: ParsedG,
+        element_catalog=None,
+        name_settings=None,
+        nearest_only=False,
+        device_filter=None,
+    ):
+        """Find the nearest eligible Text independently for each device.
+
+        This is shared by pole switches and TransformerDis. The scan is
+        global across the G file so a device can find a label outside its
+        local XML block, but devices do not compete for a Text and the same
+        Text may be returned for more than one device. The caller supplies
+        the module scope so only the requested device family can participate.
+        No RMU reservation or connection-topology analysis is performed in
+        this fixed-mode name lookup.
+        """
+
+        reserved_text_ids = set()
+
+        devices = []
+        for obj in parsed.objects:
+            if device_filter is not None and not device_filter(obj):
+                continue
+            if not self._is_nameable_device(obj):
+                continue
+            # TransformerDis is not a generic nameable device.  Only the
+            # element explicitly marked Transformer_OH may participate in
+            # the transformer name assignment; otherwise an unmarked
+            # transformer symbol could steal a nearby Text.
+            if obj.tag == "TransformerDis":
+                record = resolve_element_record(
+                    str(obj.attrs.get("devref") or ""),
+                    element_catalog,
+                )
+                if not classification_is(record, "TRANSFORMER_OH"):
+                    continue
+            devices.append(obj)
+        name_settings = dict(name_settings or {})
+        configured_format = str(name_settings.get("name_format") or "").strip()
+        if configured_format:
+            name_format = configured_format
+        else:
+            name_format = (
+                "NUMERIC"
+                if bool(name_settings.get("name_numeric", False))
+                else "AUTO"
+            )
+        color_preferences = name_settings.get("name_colors", ["WHITE"])
+        if not isinstance(color_preferences, (list, tuple, set)):
+            color_preferences = [color_preferences]
+        background_preference = bool(
+            name_settings.get("name_has_background", False)
+        )
+
+        # These three settings are hard eligibility filters. A Text that does
+        # not satisfy the configured format, color, or background rule cannot
+        # be selected by any device.
+        texts = []
+        for obj in parsed.objects:
+            if obj.xml_index in reserved_text_ids:
+                continue
+            if not self._global_text_is_nameable(obj):
+                continue
+            if name_format_penalty(self._text_value(obj), name_format) != 0:
+                continue
+            text_color = str(
+                obj.attrs.get("lc")
+                or obj.attrs.get("lcc")
+                or ""
+            )
+            if color_preference_penalty(text_color, color_preferences) != 0:
+                continue
+            if _text_has_background(obj) != background_preference:
+                continue
+            texts.append(obj)
+
+        if not devices or not texts:
+            return defaultdict(list)
+
+        ranked = {}
+        for device in devices:
+            anchors = [(device.box.cx, device.box.cy)]
+            items = []
+            for text_obj in texts:
+                distance = min(
+                    _point_to_box_distance(px, py, text_obj)
+                    for px, py in anchors
+                )
+                items.append((
+                    0,
+                    0,
+                    float(distance),
+                    text_obj.xml_index,
+                    self._text_value(text_obj),
+                    text_obj,
+                ))
+            if nearest_only:
+                # After hard filtering, physical proximity is the only
+                # meaningful preference.  A farther matching Text must not
+                # beat a nearer matching Text.
+                items.sort(key=lambda item: (item[2], item[3]))
+            else:
+                items.sort(key=lambda item: (item[0], item[1], item[2]))
+            ranked[device.xml_index] = items
+
+        owners = defaultdict(list)
+        for device in devices:
+            items = ranked.get(device.xml_index, [])
+            if not items:
+                continue
+            # Direct parsing: every device independently takes its nearest
+            # eligible Text. There is intentionally no shared assigned_texts
+            # set and no fallback to the second-nearest Text.
+            owners[device.xml_index].append(items[0])
+        return owners
+
+    def find_nearest_name(
+        self,
+        parsed: ParsedG,
+        target: GObject,
+        model: str,
+        frames=(),
+        global_name_owners=None,
+    ):
+        del parsed, frames
+        owners = global_name_owners or {}
+        candidates = [
+            (
+                format_penalty,
+                color_penalty,
                 distance,
-                family_penalty,
-                obj.xml_index,
+                0 if self._family_matches_name(model, text) else 1,
+                xml_index,
                 text,
-                obj,
-            ))
+                text_obj,
+            )
+            for format_penalty, color_penalty, distance, xml_index, text, text_obj in owners.get(
+                target.xml_index,
+                [],
+            )
+        ]
         if not candidates:
             return None, []
-        candidates.sort(key=lambda item: item[:3])
+        candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
         chosen = candidates[0]
         return {
-            "text": chosen[3],
-            "distance": round(float(chosen[0]), 3),
-            "direction": self._direction(target, chosen[4]),
-            "xml_id": chosen[4].xml_id,
-            "object": chosen[4],
+            "text": chosen[5],
+            "distance": round(float(chosen[2]), 3),
+            "direction": self._direction(target, chosen[6]),
+            "xml_id": chosen[6].xml_id,
+            "object": chosen[6],
         }, [
             {
-                "text": item[3],
-                "distance": round(float(item[0]), 3),
-                "family_match": "YES" if item[1] == 0 else "NO",
-                "xml_id": item[4].xml_id,
+                "text": item[5],
+                "distance": round(float(item[2]), 3),
+                "family_match": "YES" if item[3] == 0 else "NO",
+                "xml_id": item[6].xml_id,
             }
             for item in candidates[:10]
         ]
@@ -228,38 +543,42 @@ class PoleSwitchParser:
             return "right"
         return "near"
 
-    def discover(self, parsed: ParsedG):
-        frames = self._rmu_frame_objects(parsed)
-        by_id, graph, components = self._build_topology(parsed)
+    def discover(self, parsed: ParsedG, element_catalog=None, name_settings=None):
+        global_name_owners = self.build_global_name_owners(
+            parsed,
+            element_catalog,
+            name_settings,
+            nearest_only=True,
+            device_filter=lambda obj: (
+                obj.tag == "CBreakerDis"
+                and bool(
+                    _marked_pole_switch_family(
+                        str(obj.attrs.get("devref") or ""),
+                        element_catalog,
+                    )
+                )
+            ),
+        )
         rows = []
         for obj in parsed.objects:
             if obj.tag != POLE_SWITCH_TAG:
                 continue
             raw_devref = str(obj.attrs.get("devref") or "").strip()
-            model = next(
-                (
-                    model_name
-                    for devref, model_name in POLE_SWITCH_DEVREFS.items()
-                    if _norm_devref(raw_devref) == _norm_devref(devref)
-                ),
-                "",
+            devref_keyword = _marked_pole_switch_family(
+                raw_devref,
+                element_catalog,
             )
-            if not model or self._is_inside_rmu(obj, frames):
+            if not devref_keyword:
                 continue
+            model = _devref_model_label(raw_devref, devref_keyword)
 
             label, _label_candidates = self.find_nearest_name(
                 parsed,
                 obj,
                 model,
-                frames,
+                (),
+                global_name_owners,
             )
-            component = components.get(str(obj.xml_id), {})
-            member_ids = component.get("member_ids", set())
-            member_tags = [
-                by_id[member].tag
-                for member in member_ids
-                if member in by_id
-            ]
             row = {
                 "object_type": obj.tag,
                 "xml_id": obj.xml_id,
@@ -272,15 +591,13 @@ class PoleSwitchParser:
                 "device_family": self._model_family(model),
                 "key_name": str(obj.attrs.get("key_name") or "").strip(),
                 "current_keyid": obj.keyid,
-                "inside_rmu": "NO",
-                "topology_component": component.get("component_id", ""),
-                "topology_member_count": len(member_ids),
-                "topology_member_ids": ",".join(sorted(member_ids)),
-                "topology_member_tags": ",".join(sorted(set(member_tags))),
-                "topology_neighbor_count": len(graph.get(str(obj.xml_id), set())),
-                "topology_neighbor_ids": ",".join(
-                    sorted(graph.get(str(obj.xml_id), set()))
-                ),
+                "inside_rmu": "NOT_ANALYZED",
+                "topology_component": "",
+                "topology_member_count": 0,
+                "topology_member_ids": "",
+                "topology_member_tags": "",
+                "topology_neighbor_count": 0,
+                "topology_neighbor_ids": "",
                 "graphical_name": label.get("text", "") if label else "",
                 "name_source": "NEAREST_GRAPHICAL_TEXT" if label else "",
                 "name_distance": label.get("distance", "") if label else "",
@@ -298,8 +615,8 @@ class PoleSwitchModelModule(ModelModule):
     module_id = "POLE_SWITCH"
     display_name = "柱上开关模型"
     description = (
-        "识别 G 文件中环网柜外的 LBS / AR / SEC 柱上开关，"
-        "按图上邻近名称关联 13501 / 13502 并安全回写 KeyID。"
+        "识别图元管理中标记为 LBS / AR / SEC 的柱上开关，"
+        "按整张 G 图中距离最近的 Text 直接解析名称，关联 13501 / 13502 并安全回写 KeyID。"
     )
     SUPPORTED_OPERATIONS = (
         "VALIDATE",
@@ -313,8 +630,8 @@ class PoleSwitchModelModule(ModelModule):
             "CBreakerDis": {
                 "table_id": POLE_SWITCH_TABLE_ID,
                 "domain": POLE_SWITCH_DOMAIN,
-                "match_mode": "COMBINED_CODE_TO_ID_THEN_CB_COMBINED_ID",
-                "description": "柱上开关：13501 NAME/CODE -> 13501 ID -> 13502 combined_id",
+                "match_mode": "CBREAKERDIS_ELEMENT_MARK_NEAREST_TEXT",
+                "description": "柱上开关：CBreakerDis 且图元管理分类标记为 LBS/SEC/AR；每个设备独立取最近合规 Text；13501 ID -> 13502 combined_id",
             }
         }
 
@@ -402,7 +719,7 @@ class PoleSwitchModelModule(ModelModule):
             "table_id": POLE_SWITCH_TABLE_ID,
             "table_name": "dms_cb_device",
             "configured_domain": POLE_SWITCH_DOMAIN,
-            "match_mode": "COMBINED_CODE_TO_ID_THEN_CB_COMBINED_ID",
+            "match_mode": "CBREAKERDIS_ELEMENT_MARK_NEAREST_TEXT",
             "combined_db_match_count": 0,
             "cb_parent_match_count": 0,
             "cb_db_match_count": 0,
@@ -583,9 +900,13 @@ class PoleSwitchModelModule(ModelModule):
             })
         return row
 
-    def _analyze_file(self, db, g_file, log_callback=None, progress_callback=None):
+    def _analyze_file(self, db, g_file, settings=None, log_callback=None, progress_callback=None):
         parsed = GParser().parse(g_file)
-        discovered = PoleSwitchParser().discover(parsed)
+        discovered = PoleSwitchParser().discover(
+            parsed,
+            (settings or {}).get("element_catalog", {}),
+            settings or {},
+        )
         rows = []
         total = max(len(discovered), 1)
         for index, row in enumerate(discovered, start=1):
@@ -623,6 +944,7 @@ class PoleSwitchModelModule(ModelModule):
             report = self._analyze_file(
                 db,
                 g_file,
+                settings,
                 log_callback,
                 lambda current, total, message: progress_callback(
                     int(((file_index - 1) + current / max(total, 1)) / total_files * 90) + 5,
@@ -689,6 +1011,7 @@ class PoleSwitchModelModule(ModelModule):
             "settings_snapshot": {
                 "pole_switch_table_id": POLE_SWITCH_TABLE_ID,
                 "pole_switch_domain": POLE_SWITCH_DOMAIN,
+                "element_catalog": settings.get("element_catalog", {}),
             },
         }
 

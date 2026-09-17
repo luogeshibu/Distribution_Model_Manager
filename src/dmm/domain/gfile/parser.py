@@ -89,6 +89,8 @@ class LabelCandidate:
     is_green: bool = False
     color: str = ""
     gap: float = 0.0
+    axis_offset: float = 0.0
+    pattern: str = ""
 
 
 @dataclass
@@ -679,28 +681,294 @@ class GParser:
             return False
         return True
 
+    @staticmethod
+    def _rmu_name_pattern(value: str) -> str:
+        """Return the lexical style used by an RMU name.
+
+        GFileStudio learns this style at cluster level.  Replacing digit runs
+        instead of individual digits keeps ``AK-900841`` and ``AK-900842`` in
+        one family while keeping ``K-00018`` and ``A-18`` distinct.
+        """
+        value = re.sub(r"\s+", " ", str(value or "").strip()).upper()
+        return re.sub(r"\d+", "#", value)
+
+    @staticmethod
+    def _median(values, default: float) -> float:
+        ordered = sorted(float(value) for value in values if value is not None)
+        if not ordered:
+            return float(default)
+        middle = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[middle]
+        return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+    @staticmethod
+    def _auto_name_relation(rect: Box, text_box: Box, direction: str, projection_tolerance: float, max_distance: float):
+        """Return ``(score, gap, axis_offset)`` for one visual side.
+
+        The relation is intentionally based on the text box edge and projected
+        axis, not on rectangle center distance.  This avoids assigning a label
+        in the gap between two adjacent RMUs to the wrong row.
+        """
+        if direction == "top":
+            gap = rect.top - text_box.bottom
+            axis_offset = abs(text_box.cx - rect.cx)
+            valid = text_box.cy < rect.top and axis_offset <= projection_tolerance
+        elif direction == "bottom":
+            gap = text_box.top - rect.bottom
+            axis_offset = abs(text_box.cx - rect.cx)
+            valid = text_box.cy > rect.bottom and axis_offset <= projection_tolerance
+        elif direction == "left":
+            gap = rect.left - text_box.right
+            axis_offset = abs(text_box.cy - rect.cy)
+            valid = text_box.cx < rect.left and axis_offset <= projection_tolerance
+        elif direction == "right":
+            gap = text_box.left - rect.right
+            axis_offset = abs(text_box.cy - rect.cy)
+            valid = text_box.cx > rect.right and axis_offset <= projection_tolerance
+        else:
+            return None
+        if not valid:
+            return None
+        # Keep the edge distance bounded, but allow overlapping text boxes.  A
+        # large label can overlap the frame in XML while remaining visually on
+        # the correct side.
+        effective_gap = max(0.0, float(gap))
+        score = effective_gap + float(axis_offset) * 0.08
+        if score > max_distance + projection_tolerance * 0.08:
+            return None
+        return score, float(gap), float(axis_offset)
+
+    def _auto_rmu_candidates(
+        self,
+        parsed: ParsedG,
+        frames: Sequence[RmuFrame],
+    ) -> Dict[tuple[int, str], List[LabelCandidate]]:
+        """Build all-side candidates used by the GFileStudio-style resolver."""
+        cabinets = [frame.frame for frame in frames]
+        base_size = self._median(
+            [max(frame.box.w, frame.box.h) for frame in cabinets],
+            220.0,
+        )
+        max_distance = max(160.0, min(320.0, base_size * 1.10))
+        projection_tolerance = max(60.0, min(140.0, base_size * 0.45))
+        texts = [
+            obj for obj in parsed.objects
+            if obj.tag.lower() == "text" and self._valid_rmu_name_text(obj)
+        ]
+        result: Dict[tuple[int, str], List[LabelCandidate]] = {
+            (frame.frame.xml_index, frame.frame.xml_id): []
+            for frame in frames
+        }
+        for text_obj in texts:
+            text_box = text_obj.box
+            if text_box.w <= 0:
+                text_box = Box(text_box.x, text_box.y, 1.0, max(text_box.h, 1.0))
+            if text_box.h <= 0:
+                text_box = Box(text_box.x, text_box.y, max(text_box.w, 1.0), 1.0)
+            for frame in frames:
+                options = []
+                for direction in ("top", "right", "bottom", "left"):
+                    relation = self._auto_name_relation(
+                        frame.frame.box,
+                        text_box,
+                        direction,
+                        projection_tolerance,
+                        max_distance,
+                    )
+                    if relation is not None:
+                        score, gap, axis_offset = relation
+                        options.append((score, abs(gap), axis_offset, direction))
+                if options:
+                    score, _abs_gap, axis_offset, direction = min(options)
+                    # Do not pre-assign the Text to the nearest cabinet here.
+                    # The whole point of auto_cluster is that a farther,
+                    # repeated/style-consistent label can be the correct one.
+                    # One-to-one ownership is enforced after cluster direction
+                    # and style have been learned.
+                    result[(frame.frame.xml_index, frame.frame.xml_id)].append(
+                        LabelCandidate(
+                            text=self._text_value(text_obj),
+                            direction=direction,
+                            score=float(score),
+                            obj=text_obj,
+                            is_green=_is_green_text(text_obj),
+                            color=_text_primary_color(text_obj),
+                            gap=float(_abs_gap),
+                            axis_offset=float(axis_offset),
+                            pattern=self._rmu_name_pattern(self._text_value(text_obj)),
+                        )
+                    )
+        for items in result.values():
+            items.sort(key=lambda item: (item.score, item.axis_offset, item.obj.xml_index, item.text))
+        return result
+
+    @staticmethod
+    def _auto_cluster_frames(frames: Sequence[RmuFrame]) -> List[List[tuple[int, str]]]:
+        """Group repeated RMU layouts by aligned centers, like auto_cluster."""
+        if len(frames) <= 1:
+            return [[(frame.frame.xml_index, frame.frame.xml_id)] for frame in frames]
+        size_x = GParser._median([frame.frame.box.w for frame in frames], 220.0)
+        size_y = GParser._median([frame.frame.box.h for frame in frames], 220.0)
+        proposals = []
+        for axis, size in (("x", size_x), ("y", size_y)):
+            coordinates = []
+            for frame in frames:
+                value = frame.frame.box.cx if axis == "x" else frame.frame.box.cy
+                coordinates.append((value, (frame.frame.xml_index, frame.frame.xml_id)))
+            coordinates.sort()
+            tolerance = max(35.0, min(110.0, size * 0.40))
+            groups = []
+            for value, key in coordinates:
+                if not groups:
+                    groups.append([(value, key)])
+                    continue
+                mean = sum(item[0] for item in groups[-1]) / len(groups[-1])
+                if abs(value - mean) <= tolerance:
+                    groups[-1].append((value, key))
+                else:
+                    groups.append([(value, key)])
+            for group in groups:
+                if len(group) < 2:
+                    continue
+                spread = max(item[0] for item in group) - min(item[0] for item in group)
+                proposals.append((len(group), spread, axis, [item[1] for item in group]))
+        proposals.sort(key=lambda item: (-item[0], item[1], item[2], tuple(item[3])))
+        assigned = set()
+        clusters = []
+        for _size, _spread, _axis, keys in proposals:
+            remaining = [key for key in keys if key not in assigned]
+            if len(remaining) < 2:
+                continue
+            clusters.append(remaining)
+            assigned.update(remaining)
+        for frame in frames:
+            key = (frame.frame.xml_index, frame.frame.xml_id)
+            if key not in assigned:
+                clusters.append([key])
+        return clusters
+
+    @staticmethod
+    def _auto_style_rank(style, cluster, direction, candidates_by_frame):
+        pattern, color = style
+        matched = [
+            (frame_key, item)
+            for frame_key in cluster
+            for item in candidates_by_frame.get(frame_key, [])
+            if item.direction == direction
+        ]
+        covered = {
+            frame_key
+            for frame_key, item in matched
+            if item.pattern == pattern and item.color == color
+        }
+        pattern_covered = {
+            frame_key
+            for frame_key, item in matched
+            if item.pattern == pattern
+        }
+        style_items = [
+            item for _frame_key, item in matched
+            if item.pattern == pattern and item.color == color
+        ]
+        green_bonus = 1 if any(item.is_green for item in style_items) else 0
+        average_score = sum(item.score for item in style_items) / max(1, len(style_items))
+        average_axis = sum(item.axis_offset for item in style_items) / max(1, len(style_items))
+        return (len(covered), green_bonus, len(pattern_covered), -average_score, -average_axis, pattern, color)
+
+    def _auto_assign_cluster(self, cluster, candidates_by_frame):
+        cluster_size = len(cluster)
+        options = []
+        for direction in ("top", "right", "bottom", "left"):
+            directional = [
+                item
+                for key in cluster
+                for item in candidates_by_frame.get(key, [])
+                if item.direction == direction
+            ]
+            styles = {(item.pattern, item.color) for item in directional if item.pattern}
+            if styles:
+                style, style_rank = max(
+                    ((style, self._auto_style_rank(style, cluster, direction, candidates_by_frame)) for style in styles),
+                    key=lambda item: item[1],
+                )
+            else:
+                style, style_rank = None, (0, 0, 0, float("-inf"), float("-inf"), "", "")
+            options.append((style_rank, direction, style, directional))
+        best_rank, direction, dominant_style, directional = max(
+            options,
+            key=lambda item: (item[0], item[1]),
+        )
+        if best_rank[0] < max(2, (cluster_size + 1) // 2):
+            return {}
+        preferred_pattern = dominant_style[0] if dominant_style else ""
+        edges = []
+        for frame_key in cluster:
+            for item in candidates_by_frame.get(frame_key, []):
+                if item.direction != direction:
+                    continue
+                if dominant_style and (item.pattern, item.color) == dominant_style:
+                    level = 0
+                elif preferred_pattern and item.pattern == preferred_pattern:
+                    level = 1
+                else:
+                    level = 2
+                edges.append((level, item.score, item.axis_offset, item.obj.xml_index, frame_key, item))
+        edges.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+        assigned = {}
+        used_texts = set()
+        for level, _score, _axis, _xml_index, frame_key, item in edges:
+            key = (item.obj.xml_index, item.obj.xml_id)
+            if frame_key is None or frame_key in assigned or key in used_texts:
+                continue
+            assigned[frame_key] = item
+            used_texts.add(key)
+        return assigned
+
+    def _assign_rmu_names_auto_cluster(self, parsed: ParsedG, frames: Sequence[RmuFrame]):
+        candidates_by_frame = self._auto_rmu_candidates(parsed, frames)
+        result = {key: [] for key in candidates_by_frame}
+        used_texts = set()
+        for cluster in [cluster for cluster in self._auto_cluster_frames(frames) if len(cluster) >= 2]:
+            assigned = self._auto_assign_cluster(cluster, candidates_by_frame)
+            for frame_key, candidate in assigned.items():
+                text_key = (candidate.obj.xml_index, candidate.obj.xml_id)
+                if text_key in used_texts:
+                    continue
+                used_texts.add(text_key)
+                result[frame_key] = [candidate]
+        unresolved = [key for key, items in result.items() if not items]
+        for frame_key in unresolved:
+            candidates = [
+                item for item in candidates_by_frame.get(frame_key, [])
+                if (item.obj.xml_index, item.obj.xml_id) not in used_texts
+            ]
+            if not candidates:
+                continue
+            # For irregular/single cabinets use geometry, with green as a weak
+            # tie-breaker only.  Cluster style is never invented for a singleton.
+            greens = [item for item in candidates if item.is_green]
+            pool = greens or candidates
+            chosen = min(pool, key=lambda item: (item.score, item.axis_offset, item.obj.xml_index, item.text))
+            used_texts.add((chosen.obj.xml_index, chosen.obj.xml_id))
+            result[frame_key] = [chosen]
+        return result
+
     def assign_rmu_label_candidates_globally(
         self,
         parsed: ParsedG,
         frames: Sequence[RmuFrame],
         positions: Sequence[str],
+        use_auto_cluster: bool = False,
     ) -> Dict[tuple[int, str], List[LabelCandidate]]:
         """Globally assign RMU name Text objects to RMU frames.
 
-        Business rules:
-        1. ONLY user-selected directions participate.
-        2. Search the entire G drawing in those directions. There is NO
-           cabinet-name maximum-distance cut-off.
-        3. Every Text has at most one RMU owner. Ownership goes to the
-           nearest geometrically compatible RMU across the whole drawing.
-        4. A text near a corner may match multiple selected directions for one
-           RMU; only that RMU's best direction is retained.
-        5. Color never affects ownership. Green is used later by the validator
-           only when one RMU owns multiple candidate names.
-
-        This mirrors the supplied GFileStudio global RMU-name assignment model,
-        while extending the selected-direction search to true global distance
-        as requested for merged/large drawings.
+        The caller must provide the visual direction(s) selected by the user.
+        The historical selected-direction resolver is intentionally used by
+        default because automatic direction learning is not reliable across
+        all field layouts.  The GFileStudio-style cluster resolver remains an
+        explicit internal option only.  Text is always read from ``Text.ts``;
+        ``DText`` and XML naming attributes are not used.
         """
         normalized_positions = tuple(
             str(position).strip().lower()
@@ -710,6 +978,11 @@ class GParser:
         )
         if not normalized_positions:
             return {}
+
+        # Cluster learning is opt-in only.  Normal validation always follows
+        # the directions explicitly selected by the user.
+        if use_auto_cluster and set(normalized_positions) == {"top", "bottom", "left", "right"}:
+            return self._assign_rmu_names_auto_cluster(parsed, frames)
 
         tol = self.overlap_tolerance
 
@@ -856,6 +1129,8 @@ class GParser:
                     is_green=is_green,
                     color=color,
                     gap=gap,
+                    axis_offset=float(abs(gap) if gap is not None else 0.0),
+                    pattern=self._rmu_name_pattern(text),
                 )
             )
 

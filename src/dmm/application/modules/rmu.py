@@ -59,6 +59,8 @@ class RmuModelModule(ModelModule):
             ),
             settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS),
         )
+        if not positions:
+            raise ValueError("必须先指定环网柜名称方向（上方、下方、左侧或右侧）。")
         validator = self._new_validator(db, settings, log_callback)
         reports = []
         aggregate = {

@@ -298,6 +298,146 @@ class OracleClient:
             return row
         return None
 
+    def get_transformer_devices_by_name(
+        self,
+        device_name: str,
+        feeder_id: Any = None,
+        table_id: int = 13505,
+    ) -> List[Dict[str, Any]]:
+        """Resolve transformer rows by exact NAME and optional FEEDER_ID.
+
+        dms_tr_device does not expose the RMU-style BV_ID/COMBINED_ID contract,
+        so transformer lookup intentionally selects only columns known to exist
+        in the transformer table.  NAME is the graphical Text business key;
+        feeder_id is applied as an independent ownership constraint.
+        """
+        lookup_name = str(device_name or "").strip()
+        if not lookup_name:
+            return []
+        table_name = self.get_table_name(int(table_id))
+        where = "TRIM(name) = :device_name"
+        binds = {"device_name": lookup_name}
+        if feeder_id not in (None, ""):
+            where += " AND feeder_id = :feeder_id"
+            binds["feeder_id"] = int(feeder_id)
+        rows = self._query(
+            f"""
+            SELECT id, code, name, feeder_id
+            FROM {table_name}
+            WHERE {where}
+            ORDER BY id
+            """,
+            binds,
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
+
+    def get_transformer_device_by_id(
+        self,
+        table_id: int,
+        device_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve one dms_tr_device row without assuming a BV_ID column."""
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT id, code, name, feeder_id
+            FROM {table_name}
+            WHERE id = :device_id
+            """,
+            {"device_id": int(device_id)},
+        )
+        if len(rows) != 1:
+            return None
+        row = dict(rows[0])
+        row["_table_name"] = table_name
+        row["_table_id"] = int(table_id)
+        return row
+
+    def get_breaker_by_id(
+        self,
+        breaker_id: int,
+        table_id: int = 407,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve the source CBreaker row and its BAY_ID."""
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT id, code, name, st_id, bay_id, bv_id
+            FROM {table_name}
+            WHERE id = :breaker_id
+            """,
+            {"breaker_id": int(breaker_id)},
+        )
+        if len(rows) != 1:
+            return None
+        row = dict(rows[0])
+        row["_table_id"] = int(table_id)
+        row["_table_name"] = table_name
+        return row
+
+    def get_bay_by_id(
+        self,
+        bay_id: int,
+        table_id: int = 406,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve BAY_ID to the bay code and station ownership."""
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT id, code, name, st_id, bv_id, vl_id
+            FROM {table_name}
+            WHERE id = :bay_id
+            """,
+            {"bay_id": int(bay_id)},
+        )
+        if len(rows) != 1:
+            return None
+        row = dict(rows[0])
+        row["_table_id"] = int(table_id)
+        row["_table_name"] = table_name
+        return row
+
+    def find_feeders_by_bay(
+        self,
+        bay_code: str,
+        station_id: Any,
+        table_id: int = 13500,
+    ) -> List[Dict[str, Any]]:
+        """Find feeder master rows owned by a bay's station and code.
+
+        Bay.CODE is normally the feeder code (for example AH303).  The exact
+        CODE + ST_ID query is authoritative. GRAPH_NAME/NAME are only checked
+        when CODE has no result, and every result must still be unique.
+        """
+        lookup_code = str(bay_code or "").strip()
+        if not lookup_code or station_id in (None, ""):
+            return []
+        feeder_table = self.get_table_name(int(table_id))
+        base = f"""
+            SELECT id, code, name, st_id, graph_name
+            FROM {feeder_table}
+            WHERE st_id = :station_id
+              AND TRIM({{field}}) = :bay_code
+            ORDER BY id
+        """
+        binds = {"station_id": int(station_id), "bay_code": lookup_code}
+        rows = self._query(base.format(field="code"), binds)
+        match_field = "CODE"
+        if not rows:
+            rows = self._query(base.format(field="graph_name"), binds)
+            match_field = "GRAPH_NAME"
+        if not rows:
+            rows = self._query(base.format(field="name"), binds)
+            match_field = "NAME"
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = feeder_table
+            row["_matched_field"] = match_field
+        return rows
+
     def get_feeder_info(
         self,
         feeder_id: Any,

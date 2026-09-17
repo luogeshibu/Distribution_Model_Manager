@@ -1,0 +1,607 @@
+from __future__ import annotations
+
+import json
+import hashlib
+from pathlib import PurePosixPath
+
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFileDialog,
+    QGridLayout,
+    QGroupBox,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QHeaderView,
+)
+
+from dmm.config.settings import save_settings
+from dmm.domain.gfile.element_catalog import resolve_element_record
+from dmm.infrastructure.remote import ReadOnlySshClient
+
+
+def _record_with_defaults(record: dict) -> dict:
+    result = dict(record or {})
+    # These preferences belong to the concrete model settings, not to an
+    # element mark.  Drop legacy per-element values when old local settings
+    # are loaded so they are not silently carried forward or shared.
+    result.pop("name_format", None)
+    result.pop("color_preference", None)
+    if str(result.get("status") or "").startswith("解析失败："):
+        result["status"] = "历史状态：已改为按图元文件维护"
+    result.setdefault("element_key", "")
+    result.setdefault("file_key", result.get("file_name", ""))
+    result.setdefault("file_name", PurePosixPath(str(result.get("file_key", ""))).name)
+    result.setdefault("target_xml", "")
+    result.setdefault("root_id", "")
+    result.setdefault("width", "")
+    result.setdefault("height", "")
+    result.setdefault("align_center", "")
+    result.setdefault("pins", "")
+    result.setdefault("classification", "")
+    result.setdefault("device_alias", "")
+    result.setdefault("device_code", "")
+    result.setdefault("remark", "")
+    result.setdefault("status", "已保存标记")
+    result.setdefault("definition_hash", "")
+    result.setdefault("missing_on_server", False)
+    return result
+
+
+def _record_identity(record: dict) -> str:
+    """Use the relative file path as the stable maintenance identity."""
+    value = str(record.get("file_key") or record.get("file_name") or "")
+    return value.replace("\\", "/").strip().casefold()
+
+
+def _shared_record(record: dict) -> dict:
+    """Return only portable marks; never export SSH credentials."""
+    return {
+        "element_key": record.get("element_key", ""),
+        "file_key": record.get("file_key", ""),
+        "file_name": record.get("file_name", ""),
+        "root_id": record.get("root_id", ""),
+        "classification": record.get("classification", ""),
+        "remark": record.get("remark", ""),
+        "definition_hash": record.get("definition_hash", ""),
+    }
+
+
+def _definition_changed(saved: dict, current: dict) -> bool:
+    old_hash = str(saved.get("definition_hash") or "").strip()
+    new_hash = str(current.get("definition_hash") or "").strip()
+    if old_hash and new_hash:
+        return old_hash != new_hash
+    fields = ("target_xml", "root_id", "width", "height", "align_center", "pins")
+    return any(
+        str(saved.get(field) or "").strip()
+        and str(saved.get(field) or "").strip()
+        != str(current.get(field) or "").strip()
+        for field in fields
+    )
+
+
+class ElementDefinitionWorker(QThread):
+    loaded = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, ssh_config: dict, remote_directory: str, parent=None):
+        super().__init__(parent)
+        self.ssh_config = dict(ssh_config or {})
+        self.remote_directory = str(remote_directory or "").strip()
+
+    def run(self):
+        client = None
+        try:
+            client = ReadOnlySshClient(
+                host=self.ssh_config.get("host", ""),
+                port=self.ssh_config.get("port", 22),
+                username=self.ssh_config.get("username", ""),
+                password=self.ssh_config.get("password", ""),
+            )
+            rows = []
+            for remote_file in client.list_element_files(self.remote_directory):
+                content = b""
+                try:
+                    content = client.read_file(remote_file.remote_path)
+                    row = _record_with_defaults(
+                        {
+                            "element_key": remote_file.name,
+                            "file_key": remote_file.name,
+                            "file_name": PurePosixPath(remote_file.name).name,
+                            "remote_path": remote_file.remote_path,
+                            "status": "已读取",
+                            "source": "SSH",
+                            "size": remote_file.size,
+                            "mtime_text": remote_file.mtime_text,
+                            "definition_hash": hashlib.sha256(content).hexdigest(),
+                        }
+                    )
+                except Exception as exc:
+                    # Keep an unreadable file visible.  The page is a file
+                    # mark registry and does not require XML parsing.
+                    row = _record_with_defaults(
+                        {
+                            "element_key": remote_file.name,
+                            "file_key": remote_file.name,
+                            "file_name": PurePosixPath(remote_file.name).name,
+                            "remote_path": remote_file.remote_path,
+                            "status": f"读取失败：{exc}",
+                            "source": "SSH",
+                            "size": remote_file.size,
+                            "mtime_text": remote_file.mtime_text,
+                            "definition_hash": hashlib.sha256(content).hexdigest(),
+                        }
+                    )
+                rows.append(row)
+            self.loaded.emit(rows)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            if client is not None:
+                client.close()
+
+
+class ElementManagementWidget(QWidget):
+    """Read-only server inspection plus local maintenance of element marks."""
+
+    catalogChanged = Signal()
+
+    HEADERS = (
+        "图元定义文件",
+        "分类标记",
+        "备注",
+        "状态",
+    )
+
+    def __init__(self, config: dict, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.rows: list[dict] = []
+        self.worker: ElementDefinitionWorker | None = None
+        self._rendering = False
+        self.dirty = False
+        self._build_ui()
+        self._load_saved_records()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 22, 28, 22)
+        layout.setSpacing(12)
+
+        title = QLabel("图元管理")
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+        subtitle = QLabel(
+            "维护服务器图元文件与设备分类标记。进入页面只读取本地缓存，不会自动访问服务器；"
+            "只有点击“手动读取/同步服务器图元”才会重新读取。模型识别按完整图元路径匹配，"
+            "原始服务器文件只读，不会被修改。"
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setObjectName("pageSubtitle")
+        layout.addWidget(subtitle)
+
+        source_box = QGroupBox("图元定义来源")
+        source_grid = QGridLayout(source_box)
+        source_grid.addWidget(QLabel("图元定义来源目录"), 0, 0)
+        ssh_config = dict(self.config.get("ssh", {}) or {})
+        self.directory_edit = QLineEdit(
+            str(
+                ssh_config.get(
+                    "element_directory",
+                    "/home/up8000/data/graph/element",
+                )
+            )
+        )
+        self.directory_edit.setPlaceholderText(
+            "/home/up8000/data/graph/element"
+        )
+        source_grid.addWidget(self.directory_edit, 0, 1)
+
+        self.load_button = QPushButton("手动读取/同步服务器图元")
+        self.load_button.clicked.connect(self.load_remote_definitions)
+        source_grid.addWidget(self.load_button, 0, 2)
+        self.load_saved_button = QPushButton("载入本地标记")
+        self.load_saved_button.clicked.connect(self._load_saved_records)
+        source_grid.addWidget(self.load_saved_button, 0, 3)
+        self.save_button = QPushButton("保存当前标记")
+        self.save_button.clicked.connect(self.save_catalog)
+        source_grid.addWidget(self.save_button, 0, 4)
+        self.import_button = QPushButton("导入共享配置")
+        self.import_button.clicked.connect(self.import_shared_catalog)
+        source_grid.addWidget(self.import_button, 0, 5)
+        self.export_button = QPushButton("导出共享配置")
+        self.export_button.clicked.connect(self.export_shared_catalog)
+        source_grid.addWidget(self.export_button, 0, 6)
+
+        self.status_label = QLabel("尚未手动同步服务器图元；当前仅使用本地缓存。")
+        self.status_label.setWordWrap(True)
+        source_grid.addWidget(self.status_label, 1, 1, 1, 6)
+        layout.addWidget(source_box)
+
+        maintain_box = QGroupBox("标记搜索")
+        maintain_layout = QGridLayout(maintain_box)
+        maintain_layout.addWidget(QLabel("筛选"), 0, 0)
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText(
+            "输入图元文件名、完整路径、分类标记或备注"
+        )
+        self.filter_edit.textChanged.connect(self._apply_filter)
+        maintain_layout.addWidget(self.filter_edit, 0, 1)
+        layout.addWidget(maintain_box)
+
+        self.table = QTableWidget(0, len(self.HEADERS))
+        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.EditKeyPressed
+            | QAbstractItemView.SelectedClicked
+        )
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in range(1, len(self.HEADERS)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        self.table.setTextElideMode(Qt.ElideNone)
+        self.table.setStyleSheet(
+            "QTableWidget {"
+            "selection-background-color: #CFEBDD;"
+            "selection-color: #164E3F;"
+            "}"
+            "QTableWidget::item:selected {"
+            "background-color: #CFEBDD; color: #164E3F;"
+            "}"
+            "QTableWidget::item:selected:!active {"
+            "background-color: #E7F5EE; color: #315B4F;"
+            "}"
+            "QTableWidget::item:hover {"
+            "background-color: transparent; color: inherit;"
+            "}"
+            "QTableWidget::item:selected:hover {"
+            "background-color: #CFEBDD; color: #164E3F;"
+            "}"
+        )
+        self.table.itemChanged.connect(self._on_table_changed)
+        layout.addWidget(self.table, 1)
+
+    def _catalog(self) -> dict:
+        catalog = self.config.get("element_catalog", {})
+        return catalog if isinstance(catalog, dict) else {}
+
+    def _load_saved_records(self):
+        records = self._catalog().get("records", [])
+        self.rows = [
+            _record_with_defaults(record)
+            for record in records
+            if isinstance(record, dict)
+        ]
+        self.dirty = False
+        self._render_rows()
+        self.status_label.setText(
+            f"已载入本地缓存：{len(self.rows)} 条；不会自动访问服务器。"
+        )
+
+    def load_remote_definitions(self):
+        if self.worker is not None and self.worker.isRunning():
+            return
+        if self.dirty:
+            answer = QMessageBox.question(
+                self,
+                "重新读取图元定义",
+                "当前有未保存的图元标记修改，重新读取会刷新表格。是否继续？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        directory = self.directory_edit.text().strip()
+        if not directory:
+            QMessageBox.warning(self, "读取图元定义", "服务器图元目录不能为空。")
+            return
+        ssh_config = dict(self.config.get("ssh", {}) or {})
+        self.load_button.setEnabled(False)
+        self.status_label.setText("正在手动读取服务器图元文件列表，请稍候……")
+        worker = ElementDefinitionWorker(ssh_config, directory, self)
+        self.worker = worker
+        worker.loaded.connect(self._on_remote_loaded)
+        worker.failed.connect(self._on_remote_failed)
+        worker.finished.connect(lambda: self.load_button.setEnabled(True))
+        worker.finished.connect(self._clear_worker)
+        worker.start()
+
+    def _clear_worker(self):
+        self.worker = None
+
+    def _on_remote_failed(self, message: str):
+        self.status_label.setText(f"读取失败：{message}")
+        QMessageBox.warning(self, "读取图元定义失败", message)
+
+    def _on_remote_loaded(self, rows: list):
+        saved_records = [
+            _record_with_defaults(record)
+            for record in self._catalog().get("records", [])
+            if isinstance(record, dict)
+        ]
+        saved_by_identity = {
+            _record_identity(record): record
+            for record in saved_records
+            if _record_identity(record)
+        }
+        current_identities = set()
+        matched_saved_identities = set()
+        merged = []
+        changed_files = []
+        for row in rows:
+            row = _record_with_defaults(row)
+            identity = _record_identity(row)
+            current_identities.add(identity)
+            saved = saved_by_identity.get(identity)
+            if saved is None:
+                saved = resolve_element_record(
+                    row.get("element_key", ""),
+                    {"records": saved_records},
+                )
+            if saved:
+                if _record_identity(saved):
+                    matched_saved_identities.add(_record_identity(saved))
+                for key in (
+                    "classification",
+                    "remark",
+                ):
+                    if saved.get(key) not in (None, ""):
+                        row[key] = saved[key]
+                if _definition_changed(saved, row):
+                    row["status"] = "服务器图元已更新（本地标记已保留）"
+                    changed_files.append(row.get("file_key") or row.get("file_name"))
+            merged.append(row)
+
+        missing = [
+            record
+            for record in saved_records
+            if _record_identity(record)
+            and _record_identity(record) not in current_identities
+            and _record_identity(record) not in matched_saved_identities
+        ]
+        deleted_missing = False
+        if missing:
+            missing_text = "\n".join(
+                f"- {record.get('file_key') or record.get('file_name')}"
+                for record in missing[:12]
+            )
+            suffix = "\n……" if len(missing) > 12 else ""
+            answer = QMessageBox.question(
+                self,
+                "服务器图元已不存在",
+                f"发现 {len(missing)} 个本地标记对应的图元已从服务器消失：\n"
+                f"{missing_text}{suffix}\n\n是否删除这些本地标记？选择“否”将保留并标记为服务器不存在。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            deleted_missing = answer == QMessageBox.Yes
+            if not deleted_missing:
+                for record in missing:
+                    record["status"] = "服务器不存在（本地标记已保留）"
+                    record["missing_on_server"] = True
+                    merged.append(record)
+
+        self.rows = merged
+        self.dirty = True
+        self._render_rows()
+        try:
+            self.save_catalog()
+            auto_saved = True
+        except Exception as exc:
+            auto_saved = False
+            self.status_label.setText(f"服务器读取完成，但本地自动保存失败：{exc}")
+        messages = [f"已读取服务器图元文件：{len(rows)} 条。"]
+        if changed_files:
+            messages.append(
+                f"检测到 {len(changed_files)} 个图元属性或内容更新，原有备注和标记已保留。"
+            )
+        if missing:
+            messages.append(
+                f"服务器消失 {len(missing)} 个；"
+                + ("已删除本地标记。" if deleted_missing else "已保留并标记。")
+            )
+        if auto_saved:
+            messages.append("本次服务器结果和标记已自动保存到本地缓存；下次打开不会自动访问服务器。")
+        else:
+            messages.append("请点击“保存图元标记”重试本地保存。")
+        self.status_label.setText("\n".join(messages))
+
+    def _item(self, value, editable=False):
+        item = QTableWidgetItem(str(value or ""))
+        if not editable:
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        return item
+
+    def _display_file_path(self, row: dict) -> str:
+        relative = str(row.get("file_key") or row.get("file_name") or "").strip()
+        directory = self.directory_edit.text().strip().rstrip("/")
+        relative = relative.replace("\\", "/")
+        if directory:
+            normalized_directory = directory.replace("\\", "/")
+            prefix = normalized_directory + "/"
+            if relative.startswith(prefix):
+                relative = relative[len(prefix):]
+        if relative.startswith("/"):
+            remote_path = str(row.get("remote_path") or "").strip()
+            remote_path = remote_path.replace("\\", "/")
+            prefix = directory.replace("\\", "/").rstrip("/") + "/"
+            if prefix and remote_path.startswith(prefix):
+                relative = remote_path[len(prefix):]
+        return relative
+
+    def _render_rows(self):
+        self._rendering = True
+        self.table.setRowCount(0)
+        for row_index, row in enumerate(self.rows):
+            row = _record_with_defaults(row)
+            self.rows[row_index] = row
+            self.table.insertRow(row_index)
+
+            full_path = self._display_file_path(row)
+            file_item = self._item(full_path)
+            file_item.setToolTip(full_path)
+            file_item.setData(Qt.UserRole, row.get("element_key", ""))
+            self.table.setItem(row_index, 0, file_item)
+            self.table.setItem(
+                row_index,
+                1,
+                self._item(row.get("classification"), editable=True),
+            )
+            self.table.setItem(
+                row_index,
+                2,
+                self._item(row.get("remark"), editable=True),
+            )
+            self.table.setItem(row_index, 3, self._item(row.get("status")))
+        self._rendering = False
+        self._apply_filter(self.filter_edit.text())
+        self.table.resizeColumnsToContents()
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.resizeRowsToContents()
+
+    def _apply_filter(self, text: str):
+        needle = str(text or "").strip().casefold()
+        for row_index in range(self.table.rowCount()):
+            values = [
+                self.table.item(row_index, column).text()
+                for column in range(self.table.columnCount())
+                if self.table.item(row_index, column) is not None
+            ]
+            self.table.setRowHidden(
+                row_index,
+                bool(needle) and needle not in " ".join(values).casefold(),
+            )
+
+    def _sync_rows_from_table(self):
+        for row_index, row in enumerate(self.rows):
+            if row_index >= self.table.rowCount():
+                break
+            row["classification"] = self.table.item(row_index, 1).text().strip()
+            row["remark"] = self.table.item(row_index, 2).text().strip()
+
+    def _on_table_changed(self, _item):
+        if self._rendering:
+            return
+        self.dirty = True
+        self.status_label.setText("有未保存的图元标记修改，请点击“保存图元标记”。")
+
+    def save_catalog(self):
+        self._sync_rows_from_table()
+        self.config.setdefault("ssh", {})["element_directory"] = (
+            self.directory_edit.text().strip()
+        )
+        self.config["element_catalog"] = {
+            "remote_directory": self.directory_edit.text().strip(),
+            "records": [dict(row) for row in self.rows],
+        }
+        save_settings(self.config)
+        self.dirty = False
+        self.status_label.setText(
+            f"已保存 {len(self.rows)} 条图元标记。后续模型识别会按图元文件标识匹配。"
+        )
+        self.catalogChanged.emit()
+
+    def export_shared_catalog(self):
+        self._sync_rows_from_table()
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "导出图元共享配置",
+            "element_marks.json",
+            "JSON 配置 (*.json)",
+        )
+        if not path:
+            return
+        payload = {
+            "schema": "distribution-model-manager.element-marks",
+            "schema_version": 1,
+            "records": [_shared_record(row) for row in self.rows],
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            QMessageBox.warning(self, "导出共享配置失败", str(exc))
+            return
+        self.status_label.setText(
+            f"已导出 {len(self.rows)} 条图元标记共享配置；文件不包含 SSH 主机、用户名和密码。"
+        )
+
+    def import_shared_catalog(self):
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "导入图元共享配置",
+            "",
+            "JSON 配置 (*.json)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if payload.get("schema") != "distribution-model-manager.element-marks":
+                raise ValueError("不是本工具导出的图元共享配置。")
+            records = payload.get("records", [])
+            if not isinstance(records, list):
+                raise ValueError("共享配置 records 必须是数组。")
+        except Exception as exc:
+            QMessageBox.warning(self, "导入共享配置失败", str(exc))
+            return
+
+        current_by_identity = {
+            _record_identity(row): row
+            for row in self.rows
+            if _record_identity(row)
+        }
+        imported = 0
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            incoming = _record_with_defaults(record)
+            identity = _record_identity(incoming)
+            target = current_by_identity.get(identity)
+            if target is None:
+                resolved = resolve_element_record(
+                    incoming.get("element_key") or incoming.get("file_key", ""),
+                    {"records": self.rows},
+                )
+                if resolved:
+                    target = next(
+                        (
+                            row
+                            for row in self.rows
+                            if row.get("element_key") == resolved.get("element_key")
+                            or row.get("file_key") == resolved.get("file_key")
+                            or row.get("file_name") == resolved.get("file_name")
+                        ),
+                        None,
+                    )
+            if target is None:
+                target = incoming
+                target["status"] = "共享配置标记，待读取服务器定义"
+                self.rows.append(target)
+                current_by_identity[identity] = target
+            for key in (
+                "classification",
+                "remark",
+            ):
+                target[key] = incoming.get(key, target.get(key, ""))
+            if incoming.get("definition_hash"):
+                target["definition_hash"] = incoming["definition_hash"]
+            imported += 1
+
+        self.dirty = True
+        self._render_rows()
+        self.status_label.setText(
+            f"已导入 {imported} 条共享标记，尚未写入本地设置；请确认后点击“保存图元标记”。"
+        )

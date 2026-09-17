@@ -86,8 +86,8 @@ class RmuSettingsWidget(QWidget):
         root.setSpacing(12)
 
         info = QLabel(
-            "RMU 环网柜通过 G 文件结构自动识别。开关设备名称可选择使用 "
-            "环网柜内部、紧邻 CBreakerDis 的图上文字。"
+            "RMU 环网柜只有在矩形框内同时包含 CBreakerDis、BusDis、ZhaiWaiJieDiDaoZha 时才识别。"
+            "开关设备名称固定使用环网柜内图上文字；环网柜名称必须由用户指定上方、下方、左侧或右侧方向。"
             "设备命名规则固定使用图上文字，不再读取三类设备 XML 的 p_NameString："
             "CBreakerDis 使用图上名称，接地刀闸使用开关名+D，BusDis 固定使用 BUS。"
         )
@@ -113,8 +113,7 @@ class RmuSettingsWidget(QWidget):
         rg.addWidget(QLabel("环网柜名称位置"), 0, 0)
 
         self.name_detection_mode = NoWheelComboBox()
-        self.name_detection_mode.addItem("自动识别（推荐）", "AUTO")
-        self.name_detection_mode.addItem("按指定方向", "FIXED")
+        self.name_detection_mode.addItem("按指定方向（必须）", "FIXED")
         saved_mode = str(
             config.get(
                 "rmu_name_detection_mode",
@@ -161,8 +160,8 @@ class RmuSettingsWidget(QWidget):
         rg.addWidget(fixed_source, 5, 1)
 
         note = QLabel(
-            "自动识别模式会综合搜索名称附近的上、下、左、右方向；"
-            "指定方向模式仅搜索用户勾选的方向。"
+            "必须由用户指定环网柜名称位于图框的上方、下方、左侧或右侧；"
+            "程序只搜索用户勾选的方向，不自动猜测方向。"
             "开关名称不再读取 XML p_NameString。CBreakerDis 仅使用环网柜内"
             "图上文字；接地刀闸逻辑名称=配对开关名+D；BusDis 固定为 BUS。"
             "图上名称无法唯一识别，或与数据库 CODE 校验失败时，会明确告警对应环网柜。"
@@ -231,18 +230,16 @@ class RmuSettingsWidget(QWidget):
         self.name_exclusions_edit.setText(", ".join(DEFAULT_RMU_NAME_EXCLUSIONS))
 
     def _update_name_direction_controls(self, *_args):
-        """Disable legacy direction filters while automatic mode is active."""
-        fixed_mode = self.name_detection_mode.currentData() == "FIXED"
         for checkbox in self.pos_checks.values():
-            checkbox.setEnabled(fixed_mode)
+            checkbox.setEnabled(True)
 
     def collect_settings(self):
         positions = {
             key: checkbox.isChecked()
             for key, checkbox in self.pos_checks.items()
         }
-        detection_mode = self.name_detection_mode.currentData() or "AUTO"
-        if detection_mode == "FIXED" and not any(positions.values()):
+        detection_mode = "FIXED"
+        if not any(positions.values()):
             raise ValueError(tr("请至少选择一个环网柜名称位置。", self.config.get("language", "zh_CN")))
 
         saved_rules = {}

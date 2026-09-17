@@ -243,6 +243,62 @@ POLE_LABELS_EN = {
     }.items()
 }
 
+TRANSFORMER_FIELDS = [
+    "file_name", "object_type", "xml_id", "devref", "graphical_name",
+    "name_source", "name_distance", "name_direction", "name_xml_id",
+    "feeder_resolution_source", "feeder_id",
+    "feeder_name", "current_keyid", "current_keyid1", "current_keyid2",
+    "current_device_id", "current_table_id", "current_domain",
+    "current_db_name", "current_db_code", "current_feeder_id",
+    "db_match_count", "db_device_id", "db_code", "db_name", "db_feeder_id",
+    "table_id", "table_name", "configured_domain", "expected_keyid",
+    "expected_keyid_verified", "model_linked", "model_link_correct",
+    "model_link_status", "association_action", "association_ready",
+    "writeback_needed", "status", "severity", "reason",
+]
+
+TRANSFORMER_LABELS = {
+    "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID",
+    "devref": "devref", "graphical_name": "图上名称", "name_source": "名称来源",
+    "name_distance": "名称距离", "name_direction": "名称方向", "name_xml_id": "名称XML ID",
+    "feeder_resolution_source": "馈线识别方式", "feeder_id": "目标馈线ID",
+    "feeder_name": "目标馈线名称", "current_keyid": "当前KeyID",
+    "current_keyid1": "当前keyid1", "current_keyid2": "当前keyid2",
+    "current_device_id": "当前设备ID", "current_table_id": "当前表号",
+    "current_domain": "当前域号", "current_db_name": "当前模型设备NAME",
+    "current_db_code": "当前模型设备CODE", "current_feeder_id": "当前模型馈线ID",
+    "db_match_count": "13505匹配数", "db_device_id": "目标设备ID",
+    "db_code": "目标设备CODE", "db_name": "目标设备NAME",
+    "db_feeder_id": "目标设备馈线ID", "table_id": "目标表号",
+    "table_name": "目标数据库表", "configured_domain": "目标域号",
+    "expected_keyid": "期望KeyID", "expected_keyid_verified": "期望KeyID校验",
+    "model_linked": "是否已关联", "model_link_correct": "当前模型是否正确",
+    "model_link_status": "当前模型状态", "association_action": "处理建议",
+    "association_ready": "可进入关联流程", "writeback_needed": "是否需要回写",
+    "status": "状态", "severity": "状态类型", "reason": "说明",
+}
+
+TRANSFORMER_LABELS_EN = {
+    "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID",
+    "devref": "devref", "graphical_name": "Graphical Name", "name_source": "Name Source",
+    "name_distance": "Name Distance", "name_direction": "Name Direction", "name_xml_id": "Name XML ID",
+    "feeder_resolution_source": "Feeder Resolution Source", "feeder_id": "Target Feeder ID",
+    "feeder_name": "Target Feeder Name", "current_keyid": "Current KeyID",
+    "current_keyid1": "Current keyid1", "current_keyid2": "Current keyid2",
+    "current_device_id": "Current Device ID", "current_table_id": "Current Table ID",
+    "current_domain": "Current Domain", "current_db_name": "Current Model NAME",
+    "current_db_code": "Current Model CODE", "current_feeder_id": "Current Model Feeder ID",
+    "db_match_count": "13505 Match Count", "db_device_id": "Target Device ID",
+    "db_code": "Target Device CODE", "db_name": "Target Device NAME",
+    "db_feeder_id": "Target Feeder ID", "table_id": "Target Table ID",
+    "table_name": "Target Database Table", "configured_domain": "Target Domain",
+    "expected_keyid": "Expected KeyID", "expected_keyid_verified": "Expected KeyID Check",
+    "model_linked": "Model Linked", "model_link_correct": "Current Model Correct",
+    "model_link_status": "Current Model Status", "association_action": "Recommended Action",
+    "association_ready": "Ready for Association", "writeback_needed": "Write-back Needed",
+    "status": "Status", "severity": "Status Type", "reason": "Details",
+}
+
 RMU_FIELDS = [
     "file_name", "frame_index", "frame_xml_id", "rmu_name",
     "rmu_type", "rmu_type_source", "rmu_type_text", "rmu_type_devref",
@@ -712,9 +768,62 @@ def flatten_pole_rows(reports):
             row = dict(item)
             for coordinate in ("x", "y", "w", "h"):
                 row.pop(coordinate, None)
+            for key in _POLE_INTERNAL_ONLY_FIELDS:
+                row.pop(key, None)
             row["file_name"] = file_name
             rows.append(row)
     return rows
+
+
+def flatten_transformer_rows(reports):
+    rows = []
+    for report in reports:
+        file_name = report.get("file_name", "")
+        for item in report.get("transformer_rows", []) or []:
+            row = dict(item)
+            for coordinate in ("x", "y", "w", "h"):
+                row.pop(coordinate, None)
+            # Topology internals are used by validation only and are not part
+            # of the user-facing transformer report.
+            for key in (
+                "topology_component", "topology_member_count", "topology_member_ids",
+                "topology_member_tags", "topology_neighbor_count", "topology_neighbor_ids",
+            ):
+                row.pop(key, None)
+            row["file_name"] = file_name
+            rows.append(row)
+    return rows
+
+
+_TRANSFORMER_INTERNAL_ONLY_FIELDS = frozenset(
+    {
+        "source_cbreaker_count",
+        "source_cbreaker_keyid",
+        "source_cbreaker_keyids",
+        "source_cbreaker_keyids_by_transformer",
+        "source_feeder_id",
+        "source_feeder_name",
+        "topology_component",
+        "topology_member_count",
+        "topology_member_ids",
+        "topology_member_tags",
+        "topology_neighbor_count",
+        "topology_neighbor_ids",
+    }
+)
+
+
+def _transformer_report_for_output(report):
+    payload = dict(report)
+    payload["transformer_rows"] = [
+        {
+            key: value
+            for key, value in row.items()
+            if key not in _TRANSFORMER_INTERNAL_ONLY_FIELDS
+        }
+        for row in report.get("transformer_rows", []) or []
+    ]
+    return payload
 
 
 _POLE_INTERNAL_ONLY_FIELDS = frozenset(
@@ -752,6 +861,13 @@ def _is_pole_reports(reports):
     return bool(
         reports
         and str(reports[0].get("report_type", "")).upper() == "POLE_SWITCH"
+    )
+
+
+def _is_transformer_reports(reports):
+    return bool(
+        reports
+        and str(reports[0].get("report_type", "")).upper() == "TRANSFORMER"
     )
 
 
@@ -931,6 +1047,21 @@ def write_report(report, output_dir, domain_rules):
         export_html_bundle(reports, html_path, domain_rules)
         return html_path
 
+    if _is_transformer_reports(reports):
+        _write_csv(
+            output_dir / "transformer_details.csv",
+            flatten_transformer_rows(reports),
+            TRANSFORMER_FIELDS,
+            TRANSFORMER_LABELS,
+        )
+        (output_dir / "report.json").write_text(
+            json.dumps(_transformer_report_for_output(report), ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        html_path = output_dir / "index.html"
+        export_html_bundle(reports, html_path, domain_rules)
+        return html_path
+
     _write_csv(
         output_dir/"rmu_summary.csv",
         flatten_rmu_rows(reports),
@@ -980,6 +1111,19 @@ def export_csv_bundle(reports, export_path, language="zh_CN"):
             language=language,
         )
         return [pole_path]
+
+    if _is_transformer_reports(reports):
+        transformer_path = base.with_name(
+            base.name + ("_transformer_details.csv" if english else "_柱上变压器明细.csv")
+        )
+        _write_csv(
+            transformer_path,
+            flatten_transformer_rows(reports),
+            TRANSFORMER_FIELDS,
+            TRANSFORMER_LABELS_EN if english else TRANSFORMER_LABELS,
+            language=language,
+        )
+        return [transformer_path]
 
     if _is_feeder_reports(reports):
         feeder_path = base.with_name(
@@ -1580,13 +1724,14 @@ def _export_pole_html_bundle(reports, export_path, domain_rules, language="zh_CN
     labels = POLE_LABELS_EN if english else POLE_LABELS
     title = "Pole Switch Model Report" if english else "柱上开关模型报告"
     intro = (
-        "Only CBreakerDis objects outside recognized RMU frames are included. "
-        "The devref must match one of the four configured pole-switch templates; "
-        "the graphical name is resolved from the nearest Text object."
+        "Only CBreakerDis objects whose element file is marked LBS, SEC, or AR in Element Management are included. "
+        "Each device independently resolves its name from the nearest eligible Text; RMU and connection topology are not analyzed."
         if english
         else
-        "本报告只展示识别为环网柜外柱上开关的 CBreakerDis。devref 必须精确匹配四类目标模板，"
-        "设备名称只取邻近 Text，并输出数据库链路和 KeyID 校验结果。"
+        "本报告只展示 CBreakerDis 且对应图元文件在图元管理中标记为 LBS/SEC/AR 的柱上开关，"
+        "每个设备独立取最近合规 Text；Text.ts 中的换行名称会合并为空格后保留，"
+        "kV、A、V 等单位文字不作为名称，"
+        "并输出数据库链路和 KeyID 校验结果。"
     )
     domain_rows = "<tr><td>CBreakerDis</td><td>13502</td><td>40</td></tr>"
     table = _table_html(
@@ -1645,9 +1790,90 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
     return export_path
 
 
+def _export_transformer_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
+    export_path = Path(export_path)
+    language = normalize_language(language)
+    english = language == "en_US"
+    rows = flatten_transformer_rows(reports)
+    labels = TRANSFORMER_LABELS_EN if english else TRANSFORMER_LABELS
+    title = "Pole Transformer Model Report" if english else "柱上变压器模型报告"
+    intro = (
+        "Only TransformerDis objects marked Transformer_OH in Element Management are included. "
+        "Each device independently resolves its name from the nearest eligible Text. "
+        "The feeder uses G-root facID, with a unique facName fallback; connection topology is not analyzed."
+        if english
+        else
+        "本报告只展示图元管理中标记为 Transformer_OH 的 TransformerDis 图元。"
+        "每个设备独立取整张 G 图中最近的合规 Text 直接解析，"
+        "馈线使用 G 根 facID，查不到时仅使用唯一 facName 兜底，不分析连接拓扑。"
+    )
+    domain_rows = "<tr><td>TransformerDis</td><td>13505</td><td>1</td></tr>"
+    table = _table_html(
+        rows,
+        TRANSFORMER_FIELDS,
+        labels,
+        "status",
+        selectable=True,
+        table_id="transformer-table",
+        filter_placeholder=(
+            "Enter a transformer name, feeder ID, devref, or XML ID"
+            if english
+            else "输入变压器名称、馈线ID、devref 或 XML ID"
+        ),
+        language=language,
+    )
+    text = f"""<!doctype html>
+<html lang="{'en' if english else 'zh-CN'}">
+<head>
+<meta charset="utf-8">
+<title>{esc(title)}</title>
+<style>
+body{{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;margin:0;background:#F3F7F5;color:#17372E}}
+header{{background:#006B52;color:white;padding:24px 32px;border-bottom:5px solid #00B578}}
+main{{padding:24px 30px}} .card{{background:white;border:1px solid #D3E3DC;border-radius:10px;padding:16px;margin-bottom:18px}}
+table{{border-collapse:collapse;width:100%;font-size:12px}} th{{background:#006B52;color:white;position:sticky;top:0}}
+th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowrap}}
+.scroll{{overflow:auto;max-height:700px}} .pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}}
+.relink{{background:#FFE8CC}} .rmu-relink{{background:#F0E7FF}} .blocked{{background:#EAF3FF}}
+.fail{{background:#FFF0F0}} .info{{background:#EAF3FF}}
+.table-filter{{display:flex;align-items:center;gap:10px;margin:10px 0 12px;flex-wrap:wrap}}
+.table-filter-input{{width:min(560px,70vw);padding:8px 11px;border:1px solid #D3E3DC;border-radius:6px}}
+.status-list{{display:flex;flex-direction:column;gap:8px;max-width:1100px}}
+.status-item{{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:14px;padding:9px 12px;border-radius:6px;border:1px solid #D3E3DC}}
+.status-item strong{{white-space:nowrap}} .status-item span{{line-height:1.55}}
+</style>
+</head>
+<body>
+<header><h1>{esc(title)}</h1><div>{esc(APP_NAME if not english else APP_NAME_EN)}　v{esc(APP_VERSION)}</div></header>
+<main>
+<div class="card"><h2>{'Association Rules' if english else '关联规则'}</h2>
+<p>{esc(intro)}</p><table><thead><tr><th>{'G Object Type' if english else 'G图元类型'}</th><th>{'Table ID' if english else '表号'}</th><th>{'Domain' if english else '域号'}</th></tr></thead><tbody>{domain_rows}</tbody></table></div>
+<div class="card"><h2>{'Status Legend' if english else '状态颜色说明'}</h2>
+<div class="status-list">
+  <div class="status-item pass"><strong>{'Green PASS' if english else '绿色 PASS'}</strong><span>{'The current keyid1/keyid2 pair points to the correct transformer; no action is required.' if english else '当前 keyid1/keyid2 均已关联到正确的数据库变压器，无需处理。'}</span></div>
+  <div class="status-item warn"><strong>{'Yellow UNLINKED' if english else '黄色 UNLINKED'}</strong><span>{'The Text name, feeder, and 13505 target are unique; the transformer can be linked.' if english else '图上 Text 名称、馈线和 13505 目标均唯一，可以关联。'}</span></div>
+  <div class="status-item relink"><strong>{'Orange RELINK' if english else '橙色 RELINK'}</strong><span>{'The existing transformer KeyID pair is stale or incomplete; the unique 13505 target can be written again.' if english else '已有变压器 KeyID 不完整或已失效，当前唯一 13505 目标可以重新关联。'}</span></div>
+  <div class="status-item rmu-relink"><strong>{'Purple RMU_RELINK' if english else '紫色 RMU_RELINK'}</strong><span>{'Reserved for the shared association status palette.' if english else '沿用统一设备关联颜色体系的保留状态。'}</span></div>
+  <div class="status-item blocked"><strong>{'Blue BLOCKED' if english else '蓝色 BLOCKED'}</strong><span>{'Manual confirmation is required.' if english else '需要人工确认。'}</span></div>
+  <div class="status-item fail"><strong>{'Red FAIL' if english else '红色 FAIL'}</strong><span>{'The feeder, name, target device, or Expected KeyID cannot be determined safely.' if english else '馈线、名称、目标设备或 Expected KeyID 无法安全确定。'}</span></div>
+</div></div>
+<div class="card"><h2>{'Pole Transformer Details' if english else '柱上变压器明细'}</h2>{table}</div>
+</main>
+</body></html>"""
+    export_path.write_text(text, encoding="utf-8")
+    return export_path
+
+
 def export_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
     if _is_pole_reports(reports):
         return _export_pole_html_bundle(
+            reports,
+            export_path,
+            domain_rules,
+            language=language,
+        )
+    if _is_transformer_reports(reports):
+        return _export_transformer_html_bundle(
             reports,
             export_path,
             domain_rules,

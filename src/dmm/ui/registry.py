@@ -1,12 +1,14 @@
 from dmm.ui.widgets.feeder_settings import FeederSettingsWidget
 from dmm.ui.widgets.pole_switch_settings import PoleSwitchSettingsWidget
 from dmm.ui.widgets.rmu_settings import RmuSettingsWidget
+from dmm.ui.widgets.transformer_settings import TransformerSettingsWidget
 
 
 SETTINGS_WIDGETS = {
     "RMU": RmuSettingsWidget,
     "FEEDER": FeederSettingsWidget,
     "POLE_SWITCH": PoleSwitchSettingsWidget,
+    "TRANSFORMER": TransformerSettingsWidget,
 }
 
 
