@@ -60,6 +60,38 @@ def _record_identity(record: dict) -> str:
     return value.replace("\\", "/").strip().casefold()
 
 
+def _merge_duplicate_records(records) -> list[dict]:
+    """Collapse repeated rows for the same relative element path.
+
+    A server listing or an older local cache can contain the same path more
+    than once.  The path is the maintenance identity, so duplicate rows must
+    not become duplicate devices in the UI.  Preserve any non-empty user mark
+    or remark found on one of the duplicate records.
+    """
+    merged_by_identity = {}
+    order = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        row = _record_with_defaults(record)
+        identity = _record_identity(row)
+        if not identity:
+            continue
+        existing = merged_by_identity.get(identity)
+        if existing is None:
+            merged_by_identity[identity] = row
+            order.append(identity)
+            continue
+        for key in ("classification", "remark", "device_alias", "device_code"):
+            if not str(existing.get(key) or "").strip() and str(row.get(key) or "").strip():
+                existing[key] = row[key]
+        if row.get("missing_on_server"):
+            existing["missing_on_server"] = True
+        if row.get("definition_hash") and not existing.get("definition_hash"):
+            existing["definition_hash"] = row["definition_hash"]
+    return [merged_by_identity[identity] for identity in order]
+
+
 def _shared_record(record: dict) -> dict:
     """Return only portable marks; never export SSH credentials."""
     return {
@@ -85,6 +117,31 @@ def _definition_changed(saved: dict, current: dict) -> bool:
         != str(current.get(field) or "").strip()
         for field in fields
     )
+
+
+def _merge_server_metadata(local: dict, remote: dict) -> dict:
+    """Refresh server metadata while keeping the user's local mark fields."""
+    merged = dict(local or {})
+    for key in (
+        "element_key",
+        "file_key",
+        "file_name",
+        "remote_path",
+        "source",
+        "size",
+        "mtime_text",
+        "definition_hash",
+        "target_xml",
+        "root_id",
+        "width",
+        "height",
+        "align_center",
+        "pins",
+    ):
+        if key in remote:
+            merged[key] = remote[key]
+    merged["missing_on_server"] = False
+    return _record_with_defaults(merged)
 
 
 class ElementDefinitionWorker(QThread):
@@ -278,15 +335,11 @@ class ElementManagementWidget(QWidget):
 
     def _load_saved_records(self):
         records = self._catalog().get("records", [])
-        self.rows = [
-            _record_with_defaults(record)
-            for record in records
-            if isinstance(record, dict)
-        ]
+        self.rows = _merge_duplicate_records(records)
         self.dirty = False
         self._render_rows()
         self.status_label.setText(
-            f"已载入本地缓存：{len(self.rows)} 条；不会自动访问服务器。"
+            f"已载入本地缓存：{len(self.rows)} 条（相同图元路径已合并）；不会自动访问服务器。"
         )
 
     def load_remote_definitions(self):
@@ -325,11 +378,9 @@ class ElementManagementWidget(QWidget):
         QMessageBox.warning(self, "读取图元定义失败", message)
 
     def _on_remote_loaded(self, rows: list):
-        saved_records = [
-            _record_with_defaults(record)
-            for record in self._catalog().get("records", [])
-            if isinstance(record, dict)
-        ]
+        remote_count = len(rows or [])
+        rows = _merge_duplicate_records(rows)
+        saved_records = _merge_duplicate_records(self._catalog().get("records", []))
         saved_by_identity = {
             _record_identity(record): record
             for record in saved_records
@@ -344,23 +395,18 @@ class ElementManagementWidget(QWidget):
             identity = _record_identity(row)
             current_identities.add(identity)
             saved = saved_by_identity.get(identity)
-            if saved is None:
-                saved = resolve_element_record(
-                    row.get("element_key", ""),
-                    {"records": saved_records},
-                )
             if saved:
                 if _record_identity(saved):
                     matched_saved_identities.add(_record_identity(saved))
-                for key in (
-                    "classification",
-                    "remark",
-                ):
-                    if saved.get(key) not in (None, ""):
-                        row[key] = saved[key]
-                if _definition_changed(saved, row):
-                    row["status"] = "服务器图元已更新（本地标记已保留）"
+                changed = _definition_changed(saved, row)
+                row = _merge_server_metadata(saved, row)
+                if changed:
+                    row["status"] = "服务器图元已更新（本地标记已保留，请确认）"
                     changed_files.append(row.get("file_key") or row.get("file_name"))
+                else:
+                    row["status"] = "本地缓存与服务器一致"
+            else:
+                row["status"] = "服务器新增图元（待标记）"
             merged.append(row)
 
         missing = [
@@ -401,7 +447,12 @@ class ElementManagementWidget(QWidget):
         except Exception as exc:
             auto_saved = False
             self.status_label.setText(f"服务器读取完成，但本地自动保存失败：{exc}")
-        messages = [f"已读取服务器图元文件：{len(rows)} 条。"]
+        if remote_count != len(rows):
+            messages = [
+                f"已读取服务器图元文件：{remote_count} 条，按相对路径去重后 {len(rows)} 条。"
+            ]
+        else:
+            messages = [f"已读取服务器图元文件：{len(rows)} 条。"]
         if changed_files:
             messages.append(
                 f"检测到 {len(changed_files)} 个图元属性或内容更新，原有备注和标记已保留。"

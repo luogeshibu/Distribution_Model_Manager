@@ -10,6 +10,10 @@ from dmm.config.constants import (
     RMU_LABEL_SEARCH_MAX_DISTANCE,
     RMU_LABEL_EDGE_TOLERANCE,
     RMU_LABEL_PATTERN,
+    RMU_RELAY_SIGNAL_CODE,
+    RMU_RELAY_SIGNAL_DOMAIN,
+    RMU_RELAY_SIGNAL_TABLE_ID,
+    RMU_RELAY_SIGNAL_TAG,
 )
 from dmm.config.defaults import (
     DEFAULT_DEVICE_RULES,
@@ -28,8 +32,39 @@ class RmuModelModule(ModelModule):
     description = "RMU 环网柜模型校验、候选选择及安全回写。"
     SUPPORTED_OPERATIONS = ("VALIDATE", "PREVIEW_ASSOCIATION", "APPLY_ASSOCIATION")
 
+    @staticmethod
+    def _runtime_device_rules(settings):
+        """Return editable RMU rules plus the fixed EFI signal rule.
+
+        The G-file/devref and database CODE remain fixed for the EFI signal;
+        its table ID and domain are operator-editable association settings.
+        """
+        rules = dict(settings.get("_runtime_rules", {}) or {})
+        configured = dict(
+            rules.get(RMU_RELAY_SIGNAL_TAG)
+            or (settings.get("device_rules", {}) or {}).get(
+                RMU_RELAY_SIGNAL_TAG, {}
+            )
+        )
+        relay_rule = {
+            "table_id": RMU_RELAY_SIGNAL_TABLE_ID,
+            "domain": RMU_RELAY_SIGNAL_DOMAIN,
+            "match_mode": "FIXED_GFILE_EFI_INDICATOR",
+            "description": (
+                "NariPd_Normal.pwbh.icn.g -> "
+                "dms_relay_sig.CODE=EFI INDICATOR"
+            ),
+            "fixed_code": RMU_RELAY_SIGNAL_CODE,
+            "voltype_required": False,
+        }
+        for key in ("table_id", "domain"):
+            if key in configured:
+                relay_rule[key] = int(configured[key])
+        rules[RMU_RELAY_SIGNAL_TAG] = relay_rule
+        return rules
+
     def _new_validator(self, db, settings, log_callback):
-        rules = settings["_runtime_rules"]
+        rules = self._runtime_device_rules(settings)
         parser = GParser(
             # RMU structure is a hard rule: the rectangle must contain all
             # three core G object types, regardless of configurable table IDs.
@@ -60,7 +95,7 @@ class RmuModelModule(ModelModule):
             settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS),
         )
         if not positions:
-            raise ValueError("必须先指定环网柜名称方向（上方、下方、左侧或右侧）。")
+            raise ValueError("至少选择一个环网柜名称方向（默认是上方）。")
         validator = self._new_validator(db, settings, log_callback)
         reports = []
         aggregate = {
@@ -87,10 +122,22 @@ class RmuModelModule(ModelModule):
             reports.append(report)
             for key in aggregate:
                 aggregate[key] += report["summary"].get(key, 0)
-        return reports, aggregate, settings["_runtime_rules"]
+        return reports, aggregate, self._runtime_device_rules(settings)
 
     @staticmethod
     def _attributes_for_row(row):
+        if row.get("object_type") == RMU_RELAY_SIGNAL_TAG:
+            # NariPd_Normal stores the EFI value link in slot 1.  Keep the
+            # same fixed attributes already present in the supplied G files.
+            return {
+                "app": "6500000",
+                "app1": "6500000",
+                "voltype1": "0",
+                "p_ReportType1": "1",
+                "state1": "41",
+                "keyid1": str(row["expected_keyid"]),
+            }
+
         bv_id = str(row.get("db_bv_id", "") or "").strip()
         if not bv_id:
             raise ValueError(
@@ -164,11 +211,18 @@ class RmuModelModule(ModelModule):
                     changes_by_file[g_file].append(change)
 
                     preview_row = dict(row)
-                    preview_row["reason"] = (
-                        f"PREVIEW_WRITE app=6500000 "
-                        f"voltype={attrs['voltype']} p_ReportType=1 "
-                        f"state={attrs['state']} keyid={attrs['keyid']}"
-                    )
+                    if row.get("object_type") == RMU_RELAY_SIGNAL_TAG:
+                        preview_row["reason"] = (
+                            "PREVIEW_WRITE app1=6500000 voltype1=0 "
+                            f"p_ReportType1=1 state1=41 "
+                            f"keyid1={attrs['keyid1']}"
+                        )
+                    else:
+                        preview_row["reason"] = (
+                            f"PREVIEW_WRITE app=6500000 "
+                            f"voltype={attrs['voltype']} p_ReportType=1 "
+                            f"state={attrs['state']} keyid={attrs['keyid']}"
+                        )
                     rows.append(preview_row)
 
         preview_summary = dict(summary)
@@ -204,7 +258,9 @@ class RmuModelModule(ModelModule):
                     )
                     or DEFAULT_RMU_NAME_DETECTION_MODE
                 ).upper(),
-                "rmu_name_positions": dict(settings.get("rmu_name_positions", {})),
+                "rmu_name_positions": dict(
+                    settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS)
+                ),
                 "breaker_name_source": "GRAPHICAL_TEXT",
                 "device_rules": dict(settings.get("device_rules", {})),
             },
@@ -248,7 +304,7 @@ class RmuModelModule(ModelModule):
                 or DEFAULT_RMU_NAME_DETECTION_MODE
             ).upper(),
             "rmu_name_positions": dict(
-                settings.get("rmu_name_positions", {})
+                settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS)
             ),
             "breaker_name_source": "GRAPHICAL_TEXT",
             "device_rules": dict(settings.get("device_rules", {})),
@@ -301,7 +357,7 @@ class RmuModelModule(ModelModule):
             f"{selected_count} 个设备，不再重新扫描整张 G 图。"
         )
 
-        runtime_rules = settings.get("_runtime_rules", {}) or {}
+        runtime_rules = self._runtime_device_rules(settings)
         rmu_cache = {}
         device_cache = {}
         executable = defaultdict(list)
@@ -393,12 +449,21 @@ class RmuModelModule(ModelModule):
                 cache_key = (rmu_id, table_id)
 
                 if cache_key not in device_cache:
-                    device_cache[cache_key] = (
-                        db.get_devices_by_combined_id(
-                            table_id,
-                            rmu_id,
+                    if tag == RMU_RELAY_SIGNAL_TAG:
+                        device_cache[cache_key] = (
+                            db.get_relay_signals_by_combined_id(
+                                rmu_id,
+                                RMU_RELAY_SIGNAL_CODE,
+                                table_id=table_id,
+                            )
                         )
-                    )
+                    else:
+                        device_cache[cache_key] = (
+                            db.get_devices_by_combined_id(
+                                table_id,
+                                rmu_id,
+                            )
+                        )
 
                 table_name, db_rows = device_cache[cache_key]
                 matches = [
@@ -451,7 +516,7 @@ class RmuModelModule(ModelModule):
                         "EXEC_DEVICE_ID_INVALID",
                     )
                     continue
-                if not bv_id:
+                if tag != RMU_RELAY_SIGNAL_TAG and not bv_id:
                     make_fail(
                         change,
                         base_row,

@@ -27,28 +27,59 @@ DEFAULT_DEVICE_RULES = {
     },
 }
 
+# 配网主站设备关联。Bus 的数据库表号没有在当前需求的 SQL 中明确给出，
+# 因此默认保持 0（未配置），避免把母线误写入 breaker/disconnector 表。
+DEFAULT_MASTER_STATION_RULES = {
+    "Bus": {
+        "table_id": 0,
+        "domain": 40,
+        "table_name": "",
+        "description": "主站母线图元（请配置对应数据库表号）",
+    },
+    "CBreaker": {
+        "table_id": 407,
+        "domain": 40,
+        "table_name": "breaker",
+        "description": "主站断路器",
+    },
+    "Disconnector": {
+        "table_id": 408,
+        "domain": 40,
+        "table_name": "disconnector",
+        "description": "主站隔离开关",
+    },
+    "GroundDisconnector": {
+        "table_id": 409,
+        "domain": 40,
+        "table_name": "grounddisconnector",
+        "description": "主站接地开关",
+    },
+}
+
 DEFAULT_NAME_POSITIONS = {
-    "top": False,
+    "top": True,
     "right": False,
     "left": False,
     "bottom": False,
 }
 
-# RMU name labels must use the direction explicitly selected by the user.
-# Keeping the direction in settings is intentional: different G-file sites
-# place cabinet names in different visual bands.
+# RMU name direction remains configurable.  The Jeddah default is top, while
+# operators may enable multiple sides when a drawing family requires it.
 RMU_NAME_DIRECTIONS = ("top", "right", "left", "bottom")
 DEFAULT_RMU_NAME_DETECTION_MODE = "FIXED"
 
 
 def resolve_rmu_name_positions(mode="FIXED", configured_positions=None):
-    """Return only the directions explicitly selected by the user."""
-    configured_positions = configured_positions or {}
-    return [
+    """Return the configured RMU name directions in stable UI order."""
+    configured_positions = configured_positions or DEFAULT_NAME_POSITIONS
+    selected = [
         position
         for position in RMU_NAME_DIRECTIONS
         if bool(configured_positions.get(position, False))
     ]
+    # Older Jeddah workspace files may contain the previous all-false value;
+    # migrate that state to the current default instead of disabling naming.
+    return selected or ["top"]
 
 DEFAULT_RMU_NAME_EXCLUSIONS = [
     "N.O.P",
@@ -94,6 +125,7 @@ DEFAULT_SETTINGS = {
     "rmu_name_detection_mode": DEFAULT_RMU_NAME_DETECTION_MODE,
     "rmu_name_exclusions": DEFAULT_RMU_NAME_EXCLUSIONS,
     "device_rules": {},
+    "master_station_rules": {},
     "breaker_name_source": "GRAPHICAL_TEXT",
     "feeder_table_id": 13500,
     "section_table_id": 13503,

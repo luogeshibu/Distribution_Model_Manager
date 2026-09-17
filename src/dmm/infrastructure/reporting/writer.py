@@ -190,25 +190,25 @@ POLE_FIELDS = [
 ]
 
 POLE_LABELS = {
-    "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID",
+    "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID（来源：G文件）",
     "device_model": "柱上开关型号", "device_family": "设备族",
     "devref": "devref", "graphical_name": "图上名称", "name_source": "名称来源",
     "name_distance": "名称距离", "name_direction": "名称方向", "name_xml_id": "名称XML ID",
     "inside_rmu": "是否在环网柜内", "key_name": "XML key_name",
-    "current_keyid": "当前KeyID", "current_device_id": "当前设备ID",
-    "current_table_id": "当前表号", "current_domain": "当前域号",
-    "current_db_name": "当前模型设备NAME", "current_db_code": "当前模型设备CODE",
+    "current_keyid": "当前KeyID（来源：G文件）", "current_device_id": "当前设备ID（来源：数据库）",
+    "current_table_id": "当前表号（KeyID反解/数据库定义）", "current_domain": "当前域号（KeyID反解/数据库定义）",
+    "current_db_name": "当前模型设备NAME（来源：数据库）", "current_db_code": "当前模型设备CODE（来源：数据库）",
     "current_combined_id": "当前模型combined_id", "combined_name": "图上名称/查询值",
-    "combined_db_code": "13501 CODE", "combined_db_name": "13501 NAME",
+    "combined_db_code": "13501 CODE（来源：数据库）", "combined_db_name": "13501 NAME（来源：数据库）",
     "combined_match_field": "13501匹配字段",
-    "combined_db_match_count": "13501匹配数", "db_combined_id": "13501 ID",
+    "combined_db_match_count": "13501匹配数", "db_combined_id": "13501 ID（来源：数据库）",
     "cb_parent_match_count": "13502父设备记录数",
-    "cb_db_match_count": "13502目标匹配数", "db_device_id": "目标设备ID",
-    "db_code": "目标设备CODE", "db_name": "目标设备NAME",
-    "db_cb_combined_id": "目标combined_id", "db_bv_id": "目标BV_ID",
-    "table_id": "目标表号", "table_name": "目标数据库表",
-    "configured_domain": "目标域号", "expected_keyid": "期望KeyID",
-    "expected_keyid_verified": "期望KeyID校验", "model_linked": "是否已关联",
+    "cb_db_match_count": "13502目标匹配数", "db_device_id": "目标设备ID（来源：数据库）",
+    "db_code": "目标设备CODE（来源：数据库）", "db_name": "目标设备NAME（来源：数据库）",
+    "db_cb_combined_id": "目标combined_id（来源：数据库）", "db_bv_id": "目标BV_ID（来源：数据库）",
+    "table_id": "目标表号（来源：数据库定义）", "table_name": "目标数据库表（来源：数据库）",
+    "configured_domain": "目标域号（来源：数据库定义）", "expected_keyid": "期望KeyID（程序计算）",
+    "expected_keyid_verified": "期望KeyID校验（数据库）", "model_linked": "是否已关联",
     "model_link_correct": "当前模型是否正确", "model_link_status": "当前模型状态",
     "association_action": "处理建议", "association_ready": "可进入关联流程",
     "writeback_needed": "是否需要回写", "status": "状态", "severity": "状态类型",
@@ -217,25 +217,25 @@ POLE_LABELS = {
 
 POLE_LABELS_EN = {
     key: value for key, value in {
-        "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID",
+        "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID (G File)",
         "device_model": "Pole Switch Model", "device_family": "Device Family",
         "devref": "devref", "graphical_name": "Graphical Name", "name_source": "Name Source",
         "name_distance": "Name Distance", "name_direction": "Name Direction", "name_xml_id": "Name XML ID",
         "inside_rmu": "Inside RMU", "key_name": "XML key_name",
-        "current_keyid": "Current KeyID", "current_device_id": "Current Device ID",
-        "current_table_id": "Current Table ID", "current_domain": "Current Domain",
-        "current_db_name": "Current Model NAME", "current_db_code": "Current Model CODE",
+        "current_keyid": "Current KeyID (G File)", "current_device_id": "Current Device ID (Database)",
+        "current_table_id": "Current Table ID (Decoded/DB Definition)", "current_domain": "Current Domain (Decoded/DB Definition)",
+        "current_db_name": "Current Model NAME (Database)", "current_db_code": "Current Model CODE (Database)",
         "current_combined_id": "Current Model combined_id", "combined_name": "Graphical Name / Lookup",
-        "combined_db_code": "13501 CODE", "combined_db_name": "13501 NAME",
+        "combined_db_code": "13501 CODE (Database)", "combined_db_name": "13501 NAME (Database)",
         "combined_match_field": "13501 Match Field",
-        "combined_db_match_count": "13501 Match Count", "db_combined_id": "13501 ID",
+        "combined_db_match_count": "13501 Match Count", "db_combined_id": "13501 ID (Database)",
         "cb_parent_match_count": "13502 Parent Record Count",
-        "cb_db_match_count": "13502 Target Match Count", "db_device_id": "Target Device ID",
-        "db_code": "Target Device CODE", "db_name": "Target Device NAME",
-        "db_cb_combined_id": "Target combined_id", "db_bv_id": "Target BV_ID",
-        "table_id": "Target Table ID", "table_name": "Target Database Table",
-        "configured_domain": "Target Domain", "expected_keyid": "Expected KeyID",
-        "expected_keyid_verified": "Expected KeyID Check", "model_linked": "Model Linked",
+        "cb_db_match_count": "13502 Target Match Count", "db_device_id": "Target Device ID (Database)",
+        "db_code": "Target Device CODE (Database)", "db_name": "Target Device NAME (Database)",
+        "db_cb_combined_id": "Target combined_id (Database)", "db_bv_id": "Target BV_ID (Database)",
+        "table_id": "Target Table ID (Database Definition)", "table_name": "Target Database Table (Database)",
+        "configured_domain": "Target Domain (Database Definition)", "expected_keyid": "Expected KeyID (Calculated)",
+        "expected_keyid_verified": "Expected KeyID Check (Database)", "model_linked": "Model Linked",
         "model_link_correct": "Current Model Correct", "model_link_status": "Current Model Status",
         "association_action": "Recommended Action", "association_ready": "Ready for Association",
         "writeback_needed": "Write-back Needed", "status": "Status", "severity": "Status Type",
@@ -258,20 +258,20 @@ TRANSFORMER_FIELDS = [
 ]
 
 TRANSFORMER_LABELS = {
-    "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID",
+    "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID（来源：G文件）",
     "devref": "devref", "graphical_name": "图上名称", "name_source": "名称来源",
     "name_distance": "名称距离", "name_direction": "名称方向", "name_xml_id": "名称XML ID",
     "feeder_resolution_source": "馈线识别方式", "feeder_id": "目标馈线ID",
-    "feeder_name": "目标馈线名称", "current_keyid": "当前KeyID",
+    "feeder_name": "目标馈线名称（来源：数据库）", "current_keyid": "当前KeyID（来源：G文件）",
     "current_keyid1": "当前keyid1", "current_keyid2": "当前keyid2",
-    "current_device_id": "当前设备ID", "current_table_id": "当前表号",
-    "current_domain": "当前域号", "current_db_name": "当前模型设备NAME",
-    "current_db_code": "当前模型设备CODE", "current_feeder_id": "当前模型馈线ID",
+    "current_device_id": "当前设备ID（来源：数据库）", "current_table_id": "当前表号（KeyID反解/数据库定义）",
+    "current_domain": "当前域号（KeyID反解/数据库定义）", "current_db_name": "当前模型设备NAME（来源：数据库）",
+    "current_db_code": "当前模型设备CODE（来源：数据库）", "current_feeder_id": "当前模型馈线ID（来源：数据库）",
     "db_match_count": "13505匹配数", "db_device_id": "目标设备ID",
-    "db_code": "目标设备CODE", "db_name": "目标设备NAME",
-    "db_feeder_id": "目标设备馈线ID", "table_id": "目标表号",
-    "table_name": "目标数据库表", "configured_domain": "目标域号",
-    "expected_keyid": "期望KeyID", "expected_keyid_verified": "期望KeyID校验",
+    "db_code": "目标设备CODE（来源：数据库）", "db_name": "目标设备NAME（来源：数据库）",
+    "db_feeder_id": "目标设备馈线ID（来源：数据库）", "table_id": "目标表号（来源：数据库定义）",
+    "table_name": "目标数据库表（来源：数据库）", "configured_domain": "目标域号（来源：数据库定义）",
+    "expected_keyid": "期望KeyID（程序计算）", "expected_keyid_verified": "期望KeyID校验（数据库）",
     "model_linked": "是否已关联", "model_link_correct": "当前模型是否正确",
     "model_link_status": "当前模型状态", "association_action": "处理建议",
     "association_ready": "可进入关联流程", "writeback_needed": "是否需要回写",
@@ -279,24 +279,89 @@ TRANSFORMER_LABELS = {
 }
 
 TRANSFORMER_LABELS_EN = {
-    "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID",
+    "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID (G File)",
     "devref": "devref", "graphical_name": "Graphical Name", "name_source": "Name Source",
     "name_distance": "Name Distance", "name_direction": "Name Direction", "name_xml_id": "Name XML ID",
     "feeder_resolution_source": "Feeder Resolution Source", "feeder_id": "Target Feeder ID",
-    "feeder_name": "Target Feeder Name", "current_keyid": "Current KeyID",
+    "feeder_name": "Target Feeder Name (Database)", "current_keyid": "Current KeyID (G File)",
     "current_keyid1": "Current keyid1", "current_keyid2": "Current keyid2",
-    "current_device_id": "Current Device ID", "current_table_id": "Current Table ID",
-    "current_domain": "Current Domain", "current_db_name": "Current Model NAME",
-    "current_db_code": "Current Model CODE", "current_feeder_id": "Current Model Feeder ID",
+    "current_device_id": "Current Device ID (Database)", "current_table_id": "Current Table ID (Decoded/DB Definition)",
+    "current_domain": "Current Domain (Decoded/DB Definition)", "current_db_name": "Current Model NAME (Database)",
+    "current_db_code": "Current Model CODE (Database)", "current_feeder_id": "Current Model Feeder ID (Database)",
     "db_match_count": "13505 Match Count", "db_device_id": "Target Device ID",
-    "db_code": "Target Device CODE", "db_name": "Target Device NAME",
-    "db_feeder_id": "Target Feeder ID", "table_id": "Target Table ID",
-    "table_name": "Target Database Table", "configured_domain": "Target Domain",
-    "expected_keyid": "Expected KeyID", "expected_keyid_verified": "Expected KeyID Check",
+    "db_code": "Target Device CODE (Database)", "db_name": "Target Device NAME (Database)",
+    "db_feeder_id": "Target Feeder ID (Database)", "table_id": "Target Table ID (Database Definition)",
+    "table_name": "Target Database Table (Database)", "configured_domain": "Target Domain (Database Definition)",
+    "expected_keyid": "Expected KeyID (Calculated)", "expected_keyid_verified": "Expected KeyID Check (Database)",
     "model_linked": "Model Linked", "model_link_correct": "Current Model Correct",
     "model_link_status": "Current Model Status", "association_action": "Recommended Action",
     "association_ready": "Ready for Association", "writeback_needed": "Write-back Needed",
     "status": "Status", "severity": "Status Type", "reason": "Details",
+}
+
+MASTER_STATION_FIELDS = [
+    "file_name", "object_type", "xml_id", "key_name", "logical_code",
+    "context_source", "context_station_id", "context_station_name",
+    "context_feeder_id", "context_feeder_code", "context_feeder_name", "context_bay_id",
+    "context_rmu_frame_xml_id", "context_rmu_id", "context_rmu_name",
+    "context_anchor_type", "context_anchor_xml_id", "context_anchor_keyid",
+    "current_keyid", "current_device_id", "current_table_id", "current_domain",
+    "table_id", "table_name", "configured_domain", "db_match_count",
+    "db_device_id", "db_code", "db_name", "db_bv_id", "expected_keyid",
+    "expected_keyid_verified", "model_linked", "model_link_correct",
+    "model_link_status", "association_action", "association_ready",
+    "writeback_needed", "status", "severity", "reason",
+]
+
+MASTER_STATION_LABELS = {
+    "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID（来源：G文件）",
+    "key_name": "XML key_name（来源：G文件）", "logical_code": "解析出的CODE（来源：G文件）",
+    "context_source": "馈线上下文来源（KeyID/数据库）", "context_station_id": "厂站ID（数据库）",
+    "context_station_name": "厂站名称（数据库）", "context_feeder_id": "馈线ID（数据库）",
+    "context_feeder_code": "馈线CODE（数据库）", "context_feeder_name": "馈线名称（数据库）",
+    "context_bay_id": "锚点Bay ID（数据库）",
+    "context_rmu_frame_xml_id": "最近环网柜矩形框XML ID（G文件）",
+    "context_rmu_id": "环网柜ID（数据库）", "context_rmu_name": "环网柜名称（数据库）",
+    "context_anchor_type": "框内关联锚点类型（G文件）",
+    "context_anchor_xml_id": "框内关联锚点XML ID（G文件）",
+    "context_anchor_keyid": "框内关联锚点KeyID（G文件）",
+    "current_keyid": "当前KeyID（来源：G文件）", "current_device_id": "当前设备ID（KeyID反解）",
+    "current_table_id": "当前表号（KeyID反解）", "current_domain": "当前域号（KeyID反解）",
+    "table_id": "目标表号（配置/数据库定义）", "table_name": "目标数据库表（数据库）",
+    "configured_domain": "目标域号（配置/数据库定义）", "db_match_count": "CODE匹配数（数据库）",
+    "db_device_id": "目标设备ID（数据库）", "db_code": "目标CODE（数据库）",
+    "db_name": "目标NAME（数据库）", "db_bv_id": "目标BV_ID（数据库）",
+    "expected_keyid": "期望KeyID（程序计算）", "expected_keyid_verified": "期望KeyID校验（数据库）",
+    "model_linked": "是否已关联", "model_link_correct": "当前模型是否正确",
+    "model_link_status": "当前模型状态", "association_action": "处理建议",
+    "association_ready": "可进入关联流程", "writeback_needed": "是否需要回写",
+    "status": "状态", "severity": "状态类型", "reason": "说明",
+}
+MASTER_STATION_LABELS_EN = {
+    key: value for key, value in {
+        "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID (G File)",
+        "key_name": "XML key_name (G File)", "logical_code": "Parsed CODE (G File)",
+        "context_source": "Feeder Context Source (KeyID/Database)", "context_station_id": "Station ID (Database)",
+        "context_station_name": "Station Name (Database)", "context_feeder_id": "Feeder ID (Database)",
+        "context_feeder_code": "Feeder CODE (Database)", "context_feeder_name": "Feeder Name (Database)",
+        "context_bay_id": "Anchor Bay ID (Database)",
+        "context_rmu_frame_xml_id": "Nearest RMU Frame XML ID (G File)",
+        "context_rmu_id": "RMU ID (Database)", "context_rmu_name": "RMU Name (Database)",
+        "context_anchor_type": "In-frame Anchor Type (G File)",
+        "context_anchor_xml_id": "In-frame Anchor XML ID (G File)",
+        "context_anchor_keyid": "In-frame Anchor KeyID (G File)",
+        "current_keyid": "Current KeyID (G File)", "current_device_id": "Current Device ID (Decoded)",
+        "current_table_id": "Current Table ID (Decoded)", "current_domain": "Current Domain (Decoded)",
+        "table_id": "Target Table ID (Config/DB Definition)", "table_name": "Target DB Table (Database)",
+        "configured_domain": "Target Domain (Config/DB Definition)", "db_match_count": "CODE Match Count (Database)",
+        "db_device_id": "Target Device ID (Database)", "db_code": "Target CODE (Database)",
+        "db_name": "Target NAME (Database)", "db_bv_id": "Target BV_ID (Database)",
+        "expected_keyid": "Expected KeyID (Calculated)", "expected_keyid_verified": "Expected KeyID Check (Database)",
+        "model_linked": "Model Linked", "model_link_correct": "Current Model Correct",
+        "model_link_status": "Current Model Status", "association_action": "Recommended Action",
+        "association_ready": "Ready for Association", "writeback_needed": "Write-back Needed",
+        "status": "Status", "severity": "Severity", "reason": "Details",
+    }.items()
 }
 
 RMU_FIELDS = [
@@ -316,7 +381,7 @@ RMU_FIELDS = [
 
 DEVICE_LABELS = {
     "file_name": "G文件",
-    "rmu_name": "环网柜名称",
+    "rmu_name": "环网柜名称（来源：G文件图上文字）",
     "rmu_type": "环网柜类型",
     "rmu_type_source": "类型识别来源",
     "rmu_type_text": "图内文字类型",
@@ -326,34 +391,34 @@ DEVICE_LABELS = {
     "rmu_type_check_reason": "柜型交叉校验说明",
     "rmu_is_smart": "是否智能",
     "rmu_smart_marker_types": "智能标识",
-    "rmu_id": "环网柜ID",
+    "rmu_id": "环网柜ID（来源：数据库）",
     "object_type": "G图元类型",
-    "xml_id": "图元XML ID",
+    "xml_id": "图元XML ID（来源：G文件）",
     "logical_code": "逻辑CODE（图上规则）",
     "graphical_name": "图上名称",
     "selected_name_source": "设备名称来源",
     "selected_device_name": "最终设备名称",
     "paired_breaker_name": "配对开关名称",
-    "table_id": "表号",
-    "table_name": "数据库表",
-    "configured_domain": "域号",
+    "table_id": "表号（来源：数据库定义）",
+    "table_name": "数据库表（来源：数据库）",
+    "configured_domain": "域号（来源：数据库定义）",
     "match_mode": "匹配规则",
     "db_match_count": "数据库匹配数",
-    "db_device_id": "关联数据库设备ID",
-    "db_code": "关联设备CODE",
-    "db_name": "关联设备NAME",
-    "db_combined_id": "所属环网柜ID",
-    "db_bv_id": "BV_ID",
-    "expected_keyid": "期望KeyID",
-    "expected_keyid_verified": "期望KeyID校验",
-    "current_keyid": "当前KeyID",
-    "current_device_id": "当前设备ID",
-    "current_table_id": "当前表号",
-    "current_domain": "当前域号",
-    "current_table_name": "当前模型数据库表",
-    "current_db_code": "当前模型设备CODE",
-    "current_db_name": "当前模型设备NAME",
-    "current_combined_id": "当前模型所属环网柜ID",
+    "db_device_id": "关联数据库设备ID（来源：数据库）",
+    "db_code": "关联设备CODE（来源：数据库）",
+    "db_name": "关联设备NAME（来源：数据库）",
+    "db_combined_id": "所属环网柜ID（来源：数据库）",
+    "db_bv_id": "BV_ID（来源：数据库）",
+    "expected_keyid": "期望KeyID（程序计算/数据库校验）",
+    "expected_keyid_verified": "期望KeyID校验（数据库）",
+    "current_keyid": "当前KeyID（来源：G文件）",
+    "current_device_id": "当前设备ID（KeyID反解/数据库）",
+    "current_table_id": "当前表号（KeyID反解/数据库定义）",
+    "current_domain": "当前域号（KeyID反解/数据库定义）",
+    "current_table_name": "当前模型数据库表（来源：数据库）",
+    "current_db_code": "当前模型设备CODE（来源：数据库）",
+    "current_db_name": "当前模型设备NAME（来源：数据库）",
+    "current_combined_id": "当前模型所属环网柜ID（来源：数据库）",
     "current_rmu_name": "当前模型所属环网柜名称",
     "current_rmu_match": "当前模型环网柜ID是否正确",
     "current_rmu_name_match": "当前模型环网柜名称是否正确",
@@ -371,8 +436,8 @@ DEVICE_LABELS = {
 RMU_LABELS = {
     "file_name": "G文件",
     "frame_index": "环网柜序号",
-    "frame_xml_id": "矩形框XML ID",
-    "rmu_name": "环网柜名称",
+    "frame_xml_id": "矩形框XML ID（来源：G文件）",
+    "rmu_name": "环网柜名称（来源：G文件图上文字）",
     "rmu_type": "环网柜类型",
     "rmu_type_source": "类型识别来源",
     "rmu_type_text": "图内文字类型",
@@ -386,7 +451,7 @@ RMU_LABELS = {
     "rmu_reason": "说明",
     "rmu_db_count": "数据库记录数",
     "database_unique": "数据库是否唯一",
-    "rmu_id": "环网柜ID",
+    "rmu_id": "环网柜ID（来源：数据库）",
     "device_count": "G图设备数",
     "matched_device_count": "数据库唯一匹配设备数",
     "device_complete": "环网柜设备是否完整",
@@ -434,20 +499,20 @@ FEEDLINE_LABELS_EN = {
 }
 
 DEVICE_LABELS_EN = {
-    "file_name": "G File", "rmu_name": "RMU Name", "rmu_type": "RMU Type", "rmu_type_source": "Type Source",
+    "file_name": "G File", "rmu_name": "RMU Name (G Text)", "rmu_type": "RMU Type", "rmu_type_source": "Type Source",
     "rmu_type_text": "Graphical Text Type", "rmu_type_devref": "devref Type", "rmu_type_consistent": "Type Cross-check",
     "rmu_type_check_status": "Type Check Status", "rmu_type_check_reason": "Type Cross-check Details",
-    "rmu_is_smart": "Smart Type", "rmu_smart_marker_types": "Smart Markers", "rmu_id": "RMU ID",
-    "object_type": "G Object Type", "xml_id": "XML ID", "logical_code": "Logical CODE (Graph Rule)",
+    "rmu_is_smart": "Smart Type", "rmu_smart_marker_types": "Smart Markers", "rmu_id": "RMU ID (Database)",
+    "object_type": "G Object Type", "xml_id": "XML ID (G File)", "logical_code": "Logical CODE (Graph Rule)",
     "graphical_name": "Graphical Name", "selected_name_source": "Device Name Source", "selected_device_name": "Final Device Name",
-    "paired_breaker_name": "Paired Breaker Name", "table_id": "Table ID", "table_name": "Database Table",
-    "configured_domain": "Domain", "match_mode": "Match Rule", "db_match_count": "DB Match Count",
-    "db_device_id": "Matched DB Device ID", "db_code": "Matched Device CODE", "db_name": "Matched Device NAME",
-    "db_combined_id": "RMU ID", "db_bv_id": "BV_ID", "expected_keyid": "Expected KeyID",
-    "expected_keyid_verified": "Expected KeyID Check", "current_keyid": "Current KeyID", "current_device_id": "Current Device ID",
-    "current_table_id": "Current Table ID", "current_domain": "Current Domain", "current_table_name": "Current Model DB Table",
-    "current_db_code": "Current Model Device CODE", "current_db_name": "Current Model Device NAME",
-    "current_combined_id": "Current Model RMU ID", "current_rmu_name": "Current Model RMU Name",
+    "paired_breaker_name": "Paired Breaker Name", "table_id": "Table ID (Database Definition)", "table_name": "Database Table",
+    "configured_domain": "Domain (Database Definition)", "match_mode": "Match Rule", "db_match_count": "DB Match Count",
+    "db_device_id": "Matched DB Device ID (Database)", "db_code": "Matched Device CODE (Database)", "db_name": "Matched Device NAME (Database)",
+    "db_combined_id": "RMU ID (Database)", "db_bv_id": "BV_ID", "expected_keyid": "Expected KeyID (Calculated/Verified)",
+    "expected_keyid_verified": "Expected KeyID Check (Database)", "current_keyid": "Current KeyID (G File)", "current_device_id": "Current Device ID (Decoded/Database)",
+    "current_table_id": "Current Table ID (Decoded/DB Definition)", "current_domain": "Current Domain (Decoded/DB Definition)", "current_table_name": "Current Model DB Table (Database)",
+    "current_db_code": "Current Model Device CODE (Database)", "current_db_name": "Current Model Device NAME (Database)",
+    "current_combined_id": "Current Model RMU ID (Database)", "current_rmu_name": "Current Model RMU Name",
     "current_rmu_match": "Current RMU ID Correct", "current_rmu_name_match": "Current RMU Name Correct",
     "model_linked": "Device Linked", "model_link_correct": "Current Model Correct", "model_link_status": "Current Model Status",
     "association_action": "Recommended Action", "writeback_needed": "Write-back Needed", "association_ready": "Ready for Association",
@@ -455,12 +520,12 @@ DEVICE_LABELS_EN = {
 }
 
 RMU_LABELS_EN = {
-    "file_name": "G File", "frame_index": "RMU Index", "frame_xml_id": "Frame XML ID", "rmu_name": "RMU Name",
+    "file_name": "G File", "frame_index": "RMU Index (G File)", "frame_xml_id": "Frame XML ID (G File)", "rmu_name": "RMU Name (G Text)",
     "rmu_type": "RMU Type", "rmu_type_source": "Type Source", "rmu_type_text": "Graphical Text Type",
     "rmu_type_devref": "devref Type", "rmu_type_consistent": "Type Cross-check", "rmu_type_check_status": "Type Check Status",
     "rmu_type_check_reason": "Type Cross-check Details", "rmu_is_smart": "Smart Type", "rmu_smart_marker_types": "Smart Markers",
     "rmu_status": "Status", "rmu_reason": "Details", "rmu_db_count": "DB Record Count", "database_unique": "DB Unique",
-    "rmu_id": "RMU ID", "device_count": "G Device Count", "matched_device_count": "Unique DB Matched Devices",
+    "rmu_id": "RMU ID (Database)", "device_count": "G Device Count", "matched_device_count": "Unique DB Matched Devices",
     "device_complete": "RMU Devices Complete", "linked_correct_count": "Correctly Linked Devices", "unlinked_count": "Unlinked Devices",
     "linked_wrong_count": "Incorrectly Linked Devices", "association_eligible": "RMU Association Eligible",
     "association_block_reasons": "RMU-level Block Reasons", "device_block_reasons": "Device-level Block Reasons",
@@ -795,6 +860,19 @@ def flatten_transformer_rows(reports):
     return rows
 
 
+def flatten_master_station_rows(reports):
+    rows = []
+    for report in reports:
+        file_name = report.get("file_name", "")
+        for item in report.get("master_station_rows", []) or []:
+            row = dict(item)
+            for coordinate in ("x", "y", "w", "h"):
+                row.pop(coordinate, None)
+            row["file_name"] = file_name
+            rows.append(row)
+    return rows
+
+
 _TRANSFORMER_INTERNAL_ONLY_FIELDS = frozenset(
     {
         "source_cbreaker_count",
@@ -875,6 +953,13 @@ def _is_feeder_reports(reports):
     return bool(
         reports
         and str(reports[0].get("report_type", "")).upper() == "FEEDER"
+    )
+
+
+def _is_master_station_reports(reports):
+    return bool(
+        reports
+        and str(reports[0].get("report_type", "")).upper() == "MASTER_STATION"
     )
 
 
@@ -1062,6 +1147,21 @@ def write_report(report, output_dir, domain_rules):
         export_html_bundle(reports, html_path, domain_rules)
         return html_path
 
+    if _is_master_station_reports(reports):
+        _write_csv(
+            output_dir / "master_station_details.csv",
+            flatten_master_station_rows(reports),
+            MASTER_STATION_FIELDS,
+            MASTER_STATION_LABELS,
+        )
+        (output_dir / "report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        html_path = output_dir / "index.html"
+        export_html_bundle(reports, html_path, domain_rules)
+        return html_path
+
     _write_csv(
         output_dir/"rmu_summary.csv",
         flatten_rmu_rows(reports),
@@ -1124,6 +1224,19 @@ def export_csv_bundle(reports, export_path, language="zh_CN"):
             language=language,
         )
         return [transformer_path]
+
+    if _is_master_station_reports(reports):
+        master_path = base.with_name(
+            base.name + ("_master_station_details.csv" if english else "_配网主站设备明细.csv")
+        )
+        _write_csv(
+            master_path,
+            flatten_master_station_rows(reports),
+            MASTER_STATION_FIELDS,
+            MASTER_STATION_LABELS_EN if english else MASTER_STATION_LABELS,
+            language=language,
+        )
+        return [master_path]
 
     if _is_feeder_reports(reports):
         feeder_path = base.with_name(
@@ -1338,6 +1451,18 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"
             "Device details include only device objects that actually exist in the G file."
         )
 
+    source_note = (
+        "字段来源说明：矩形框 XML ID、图元 XML ID、当前 G 文件 KeyID 来自 G 文件；"
+        "环网柜 ID、设备 ID、CODE、NAME、BV_ID、所属环网柜 ID 来自数据库；"
+        "表号和域号来自数据库定义；期望 KeyID 是程序按设备 ID + 域号计算后，再通过数据库函数校验的结果。"
+    )
+    if english:
+        source_note = (
+            "Field sources: Frame XML ID, G-object XML ID, and current G-file KeyID come from the G file; "
+            "RMU ID, device ID, CODE, NAME, BV_ID, and owning RMU ID come from the database; "
+            "table/domain values come from database definitions; Expected KeyID is calculated from device ID + domain and then verified by the database function."
+        )
+
     domain_rows = "".join(
         f"<tr><td>{esc(tag)}</td><td>{esc(rule['table_id'])}</td><td>{esc(rule['domain'])}</td></tr>"
         for tag, rule in domain_rules.items()
@@ -1408,6 +1533,7 @@ thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}
 .status-item strong{{white-space:nowrap}}
 .status-item span{{line-height:1.55}}
 .meta{{color:#D7EEE5}}
+.source-note{{background:#F0F8F5;border:1px solid var(--border);border-radius:6px;padding:10px 12px;line-height:1.6;margin-top:10px}}
 </style>
 </head>
 <body>
@@ -1418,8 +1544,9 @@ thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}
 <main>
   <div class="card">
     <h2>{("Device Model Association Rules" if english else "设备模型关联规则")}</h2>
+    <div class="source-note">{esc(source_note)}</div>
     <table>
-      <thead><tr><th>{("G Object Type" if english else "G 图元类型")}</th><th>{("Table ID" if english else "表号")}</th><th>{("Domain" if english else "域号")}</th></tr></thead>
+      <thead><tr><th>{("G Object Type" if english else "G 图元类型")}</th><th>{("Table ID (Database Definition)" if english else "表号（数据库定义）")}</th><th>{("Domain (Database Definition)" if english else "域号（数据库定义）")}</th></tr></thead>
       <tbody>{domain_rows}</tbody>
     </table>
   </div>
@@ -1627,7 +1754,7 @@ td.select-col{{background:inherit}}
   <div class="card">
     <h2>{("Feeder Section Model Rules" if english else "馈线段模型规则")}</h2>
     <table>
-      <thead><tr><th>{"G Object Type" if english else "G 图元类型"}</th><th>{"Table ID" if english else "表号"}</th><th>{"Domain" if english else "域号"}</th></tr></thead>
+      <thead><tr><th>{"G Object Type" if english else "G 图元类型"}</th><th>{"Table ID (Database Definition)" if english else "表号（数据库定义）"}</th><th>{"Domain (Database Definition)" if english else "域号（数据库定义）"}</th></tr></thead>
       <tbody>{domain_rows}</tbody>
     </table>
     <p>{esc(feeder_rule_intro)}</p>
@@ -1773,7 +1900,7 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
 <header><h1>{esc(title)}</h1><div>{esc(APP_NAME if not english else APP_NAME_EN)}　v{esc(APP_VERSION)}</div></header>
 <main>
 <div class="card"><h2>{'Association Rules' if english else '关联规则'}</h2>
-<p>{esc(intro)}</p><table><thead><tr><th>{'G Object Type' if english else 'G图元类型'}</th><th>{'Table ID' if english else '表号'}</th><th>{'Domain' if english else '域号'}</th></tr></thead><tbody>{domain_rows}</tbody></table></div>
+<p>{esc(intro)}</p><p><strong>{'Field sources:' if english else '字段来源：'}</strong>{'G file name, object type, XML ID, text name, and current KeyID come from the G file; target device ID, CODE, NAME, table ID, and Domain come from the database or its table definition.' if english else 'G文件名、图元类型、XML ID、图上名称和当前KeyID来自G文件；目标设备ID、CODE、NAME、表号和域号来自数据库或数据库定义。'}</p><table><thead><tr><th>{'G Object Type' if english else 'G图元类型'}</th><th>{'Table ID (Database Definition)' if english else '表号（数据库定义）'}</th><th>{'Domain (Database Definition)' if english else '域号（数据库定义）'}</th></tr></thead><tbody>{domain_rows}</tbody></table></div>
 <div class="card"><h2>{'Status Legend' if english else '状态颜色说明'}</h2>
 <div class="status-list">
   <div class="status-item pass"><strong>{'Green PASS' if english else '绿色 PASS'}</strong><span>{'The current model is linked to the correct current database device; no action is required.' if english else '当前模型已关联到数据库当前正确设备，无需处理。'}</span></div>
@@ -1847,7 +1974,7 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
 <header><h1>{esc(title)}</h1><div>{esc(APP_NAME if not english else APP_NAME_EN)}　v{esc(APP_VERSION)}</div></header>
 <main>
 <div class="card"><h2>{'Association Rules' if english else '关联规则'}</h2>
-<p>{esc(intro)}</p><table><thead><tr><th>{'G Object Type' if english else 'G图元类型'}</th><th>{'Table ID' if english else '表号'}</th><th>{'Domain' if english else '域号'}</th></tr></thead><tbody>{domain_rows}</tbody></table></div>
+<p>{esc(intro)}</p><p><strong>{'Field sources:' if english else '字段来源：'}</strong>{'G file name, object type, XML ID, text name, and current KeyID come from the G file; target device ID, CODE, NAME, table ID, and Domain come from the database or its table definition.' if english else 'G文件名、图元类型、XML ID、图上名称和当前KeyID来自G文件；目标设备ID、CODE、NAME、表号和域号来自数据库或数据库定义。'}</p><table><thead><tr><th>{'G Object Type' if english else 'G图元类型'}</th><th>{'Table ID (Database Definition)' if english else '表号（数据库定义）'}</th><th>{'Domain (Database Definition)' if english else '域号（数据库定义）'}</th></tr></thead><tbody>{domain_rows}</tbody></table></div>
 <div class="card"><h2>{'Status Legend' if english else '状态颜色说明'}</h2>
 <div class="status-list">
   <div class="status-item pass"><strong>{'Green PASS' if english else '绿色 PASS'}</strong><span>{'The current keyid1/keyid2 pair points to the correct transformer; no action is required.' if english else '当前 keyid1/keyid2 均已关联到正确的数据库变压器，无需处理。'}</span></div>
@@ -1860,6 +1987,64 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
 <div class="card"><h2>{'Pole Transformer Details' if english else '柱上变压器明细'}</h2>{table}</div>
 </main>
 </body></html>"""
+    export_path.write_text(text, encoding="utf-8")
+    return export_path
+
+
+def _export_master_station_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
+    export_path = Path(export_path)
+    language = normalize_language(language)
+    english = language == "en_US"
+    rows = flatten_master_station_rows(reports)
+    labels = MASTER_STATION_LABELS_EN if english else MASTER_STATION_LABELS
+    title = "Master Station Device Association Report" if english else "配网主站设备关联报告"
+    intro = (
+        "Only the configured Bus, CBreaker, Disconnector, and GroundDisconnector G objects are processed. "
+        "The CODE is extracted from key_name and matched exactly against the configured database table; topology is not analyzed."
+        if english else
+        "本报告只处理配置中的 Bus、CBreaker、Disconnector、GroundDisconnector 图元。"
+        "程序从 G 文件 key_name 提取 CODE，按配置表号精确查询数据库，不分析拓扑。"
+    )
+    source_note = (
+        "字段来源说明：G 文件名、图元类型、XML ID、key_name、CODE 和当前 KeyID 来自 G 文件；"
+        "目标设备 ID、CODE、NAME、BV_ID 来自数据库；目标表号和域号来自本模块配置/数据库定义；"
+        "期望 KeyID 由程序按设备 ID + 域号计算并通过数据库函数校验。回写只修改 G 图元中已有属性。"
+        if not english else
+        "Field sources: file name, object type, XML ID, key_name, CODE, and current KeyID come from the G file; "
+        "target ID, CODE, NAME, and BV_ID come from the database; table/domain come from module configuration/database definition; "
+        "Expected KeyID is calculated and verified by the database. Write-back changes existing G attributes only."
+    )
+    domain_rows = "".join(
+        f"<tr><td>{esc(tag)}</td><td>{esc(rule.get('table_id', ''))}</td><td>{esc(rule.get('domain', ''))}</td><td>{esc(rule.get('table_name', '') or '未配置' if not english else rule.get('table_name', '') or 'Not configured')}</td></tr>"
+        for tag, rule in (domain_rules or {}).items()
+    )
+    table = _table_html(
+        rows,
+        MASTER_STATION_FIELDS,
+        labels,
+        "status",
+        selectable=True,
+        table_id="master-station-table",
+        filter_placeholder=("Enter CODE, G object type, or XML ID" if english else "输入 CODE、图元类型或 XML ID"),
+        language=language,
+    )
+    text = f"""<!doctype html>
+<html lang="{'en' if english else 'zh-CN'}"><head><meta charset="utf-8">
+<title>{esc(title)}</title>
+<style>
+body{{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;margin:0;background:#F3F7F5;color:#17372E}}
+header{{background:#006B52;color:white;padding:24px 32px;border-bottom:5px solid #00B578}}
+main{{padding:24px 30px}} .card{{background:white;border:1px solid #D3E3DC;border-radius:10px;padding:16px;margin-bottom:18px}}
+table{{border-collapse:collapse;width:100%;font-size:12px}} th{{background:#006B52;color:white;position:sticky;top:0}}
+th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowrap}}
+.scroll{{overflow:auto;max-height:700px}} .pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}}
+.relink{{background:#FFE8CC}} .fail{{background:#FFF0F0}} .blocked{{background:#EAF3FF}}
+.table-filter{{display:flex;align-items:center;gap:10px;margin:10px 0 12px;flex-wrap:wrap}}
+.table-filter-input{{width:min(560px,70vw);padding:8px 11px;border:1px solid #D3E3DC;border-radius:6px}}
+</style></head><body><header><h1>{esc(title)}</h1><div>{esc(APP_NAME if not english else APP_NAME_EN)}　v{esc(APP_VERSION)}</div></header>
+<main><div class="card"><h2>{'Association Rules' if english else '关联规则'}</h2><p>{esc(intro)}</p><p><strong>{'Field sources:' if english else '字段来源：'}</strong>{esc(source_note)}</p>
+<table><thead><tr><th>{'G Object Type' if english else 'G图元类型'}</th><th>{'Table ID' if english else '表号'}</th><th>{'Domain' if english else '域号'}</th><th>{'Database Table' if english else '数据库表'}</th></tr></thead><tbody>{domain_rows}</tbody></table></div>
+<div class="card"><h2>{'Master Station Device Details' if english else '配网主站设备明细'}</h2>{table}</div></main></body></html>"""
     export_path.write_text(text, encoding="utf-8")
     return export_path
 
@@ -1881,6 +2066,13 @@ def export_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
         )
     if _is_feeder_reports(reports):
         return _export_feeder_html_bundle(
+            reports,
+            export_path,
+            domain_rules,
+            language=language,
+        )
+    if _is_master_station_reports(reports):
+        return _export_master_station_html_bundle(
             reports,
             export_path,
             domain_rules,

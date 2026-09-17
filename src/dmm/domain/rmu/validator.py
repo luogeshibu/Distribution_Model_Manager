@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 from dmm.domain.gfile.parser import GParser, RmuFrame, GObject
+from dmm.config.constants import (
+    RMU_RELAY_SIGNAL_CODE,
+    RMU_RELAY_SIGNAL_DEVREF,
+    RMU_RELAY_SIGNAL_TAG,
+    RMU_RELAY_SIGNAL_TABLE_ID,
+)
 from dmm.infrastructure.database.oracle import OracleClient
 
 KEYID_STEP = 2 ** 32
@@ -43,6 +49,20 @@ class RmuValidator:
         self.breaker_name_source = "GRAPHICAL_TEXT"
         self.log = log or (lambda msg: None)
 
+    @staticmethod
+    def _is_normal_relay_signal(elem):
+        """Match only the explicitly designated EFI G element."""
+        if elem.tag != RMU_RELAY_SIGNAL_TAG:
+            return False
+        devref = norm(elem.attrs.get("devref"))
+        file_part = devref.lstrip("#").split(":", 1)[0].replace("\\", "/")
+        return file_part.rsplit("/", 1)[-1].casefold() == RMU_RELAY_SIGNAL_DEVREF
+
+    @staticmethod
+    def _relay_keyid(elem):
+        """NariPd_Normal uses slot 1 for the EFI value KeyID."""
+        return norm(elem.attrs.get("keyid1"))
+
     def _resolve_rmu_name(
         self,
         parsed,
@@ -68,7 +88,7 @@ class RmuValidator:
                 "status": "FAIL",
                 "reason": (
                     "RMU_NAME_NOT_PARSED: "
-                    "在用户指定的环网柜名称方向内未解析到有效名称文字"
+                    "在指定的环网柜名称方向内未解析到有效名称文字"
                 ),
                 "candidate_rows": [],
                 "selected": None,
@@ -80,15 +100,8 @@ class RmuValidator:
         # 1. Candidate ownership has already been resolved by GParser:
         #    one Text can belong to only one nearest RMU frame.
         #
-        # 2. If this RMU has ONLY ONE candidate in the selected direction,
-        #    use it directly, regardless of color.
-        #
-        # 3. If this RMU has MULTIPLE candidates:
-        #       - if green candidates exist -> choose nearest green;
-        #       - otherwise -> choose nearest candidate regardless of color.
-        #
-        # Green is therefore only a disambiguation rule for "multiple names",
-        # not a global priority rule.
+        # 2. The parser has already reduced the selected-direction candidates
+        #    to one nearest Text. Color is not a naming priority.
         # --------------------------------------------------------------
         ordered = sorted(
             all_candidates,
@@ -99,24 +112,8 @@ class RmuValidator:
             ),
         )
 
-        if len(ordered) == 1:
-            chosen = ordered[0]
-            selection_reason = "SINGLE_NEAREST_LABEL"
-        else:
-            green_candidates = [c for c in ordered if c.is_green]
-            if green_candidates:
-                chosen = min(
-                    green_candidates,
-                    key=lambda c: (
-                        c.score,
-                        c.obj.xml_index,
-                        c.text,
-                    ),
-                )
-                selection_reason = "MULTIPLE_LABELS_GREEN_PRIORITY"
-            else:
-                chosen = ordered[0]
-                selection_reason = "MULTIPLE_LABELS_NEAREST_FALLBACK"
+        chosen = ordered[0]
+        selection_reason = "SINGLE_NEAREST_DIRECTION_LABEL"
 
         chosen_name = norm(getattr(chosen, "text", ""))
         if not chosen_name:
@@ -460,7 +457,16 @@ class RmuValidator:
                 row["writeback_needed"] = "NO"
                 self._set_fail(row, issue)
 
-    def _evaluate_current_model(self, row, elem, device_id, rule, rmu_id):
+    def _evaluate_current_model(
+        self,
+        row,
+        elem,
+        device_id,
+        rule,
+        rmu_id,
+        current_keyid_value=None,
+        require_bv_id=True,
+    ):
         """
         Evaluate the CURRENT G model only after the CURRENT DATABASE target
         has already passed all hard business rules.
@@ -480,13 +486,19 @@ class RmuValidator:
         Only failures in the CURRENT database target are hard blockers; those
         are handled before this method is called.
         """
+        current_keyid_text = (
+            elem.keyid
+            if current_keyid_value is None
+            else norm(current_keyid_value)
+        )
+
         # No current model: normal association candidate.
-        if not elem.keyid:
+        if not current_keyid_text:
             row["model_linked"] = "NO"
             row["model_link_correct"] = ""
             row["model_link_status"] = "未关联"
 
-            if not norm(row.get("db_bv_id")):
+            if require_bv_id and not norm(row.get("db_bv_id")):
                 row["association_action"] = "禁止自动关联"
                 row["writeback_needed"] = "NO"
                 row["association_ready"] = "NO"
@@ -508,7 +520,7 @@ class RmuValidator:
         row["writeback_needed"] = "NO"
 
         # Any corrective write-back needs the CURRENT target BV_ID.
-        if not norm(row.get("db_bv_id")):
+        if require_bv_id and not norm(row.get("db_bv_id")):
             row["model_link_correct"] = "NO"
             row["model_link_status"] = "当前模型需要修复，但数据库BV_ID为空"
             row["association_action"] = "禁止自动关联"
@@ -518,12 +530,12 @@ class RmuValidator:
             )
             return
 
-        current_keyid = int_or_none(elem.keyid)
+        current_keyid = int_or_none(current_keyid_text)
 
         # A malformed old keyid is not a hard database error.  The current
         # target is already uniquely known, so simply replace the old model.
         if current_keyid is None:
-            row["current_keyid"] = elem.keyid
+            row["current_keyid"] = current_keyid_text
             self._set_relink(
                 row,
                 "CURRENT_KEYID_INVALID: 当前G文件KeyID格式错误；"
@@ -698,6 +710,8 @@ class RmuValidator:
         row,
         elem,
         rmu_reason,
+        current_keyid_value=None,
+        rule=None,
     ):
         """
         RMU database identity is missing or duplicated.
@@ -716,7 +730,13 @@ class RmuValidator:
         row["association_ready"] = "NO"
         row["writeback_needed"] = "NO"
 
-        if not elem.keyid:
+        current_keyid_text = (
+            elem.keyid
+            if current_keyid_value is None
+            else norm(current_keyid_value)
+        )
+
+        if not current_keyid_text:
             row["model_linked"] = "NO"
             row["model_link_correct"] = ""
             row["model_link_status"] = "未关联"
@@ -733,7 +753,7 @@ class RmuValidator:
         row["model_link_status"] = "已人工关联，正在检查"
         row["association_action"] = "检查现有人工关联"
 
-        current_keyid = int_or_none(elem.keyid)
+        current_keyid = int_or_none(current_keyid_text)
         if current_keyid is None:
             self._set_fail(row, "CURRENT_KEYID_INVALID")
             return
@@ -873,10 +893,23 @@ class RmuValidator:
             return
 
         try:
-            _, owner_rows = self.db.get_devices_by_combined_id(
-                current_table_id,
-                current_combined_id,
+            relay_table_id = int(
+                (rule or {}).get("table_id", RMU_RELAY_SIGNAL_TABLE_ID)
             )
+            if (
+                row.get("object_type") == RMU_RELAY_SIGNAL_TAG
+                and current_table_id == relay_table_id
+            ):
+                _, owner_rows = self.db.get_relay_signals_by_combined_id(
+                    current_combined_id,
+                    RMU_RELAY_SIGNAL_CODE,
+                    table_id=current_table_id,
+                )
+            else:
+                _, owner_rows = self.db.get_devices_by_combined_id(
+                    current_table_id,
+                    current_combined_id,
+                )
         except Exception as exc:
             self._set_fail(
                 row,
@@ -1163,6 +1196,14 @@ class RmuValidator:
         for elem in elements:
             elements_by_tag[elem.tag].append(elem)
 
+        # The relay-signal rule is exact: other pwbh symbols are not RMU
+        # devices and must not enter the association report.
+        elements_by_tag[RMU_RELAY_SIGNAL_TAG] = [
+            elem
+            for elem in elements_by_tag.get(RMU_RELAY_SIGNAL_TAG, [])
+            if self._is_normal_relay_signal(elem)
+        ]
+
         breakers = elements_by_tag.get("CBreakerDis", [])
         grounds = elements_by_tag.get("ZhaiWaiJieDiDaoZha", [])
         buses = elements_by_tag.get("BusDis", [])
@@ -1196,6 +1237,10 @@ class RmuValidator:
                 rule,
                 {"table_name": ""},
             )
+            if elem.tag == RMU_RELAY_SIGNAL_TAG:
+                relay_keyid = self._relay_keyid(elem)
+                row["current_keyid"] = relay_keyid
+                row["model_linked"] = "YES" if relay_keyid else "NO"
             return row
 
         for elem in breakers:
@@ -1227,6 +1272,7 @@ class RmuValidator:
                 row,
                 elem,
                 resolved_reason,
+                rule=self.device_rules[elem.tag],
             )
             rmu_result["device_rows"].append(row)
 
@@ -1257,6 +1303,7 @@ class RmuValidator:
                     row,
                     elem,
                     resolved_reason,
+                    rule=self.device_rules[elem.tag],
                 )
             rmu_result["device_rows"].append(row)
 
@@ -1270,6 +1317,22 @@ class RmuValidator:
                 row,
                 elem,
                 resolved_reason,
+                rule=self.device_rules[elem.tag],
+            )
+            rmu_result["device_rows"].append(row)
+
+        for elem in elements_by_tag.get(RMU_RELAY_SIGNAL_TAG, []):
+            row = make_row(elem)
+            row["selected_name_source"] = "FIXED_EFI_INDICATOR"
+            row["logical_code"] = RMU_RELAY_SIGNAL_CODE
+            row["selected_device_name"] = RMU_RELAY_SIGNAL_CODE
+            row["graphical_name"] = norm(elem.attrs.get("key_name1"))
+            self._inspect_current_link_without_unique_rmu(
+                row,
+                elem,
+                resolved_reason,
+                current_keyid_value=self._relay_keyid(elem),
+                rule=self.device_rules[elem.tag],
             )
             rmu_result["device_rows"].append(row)
 
@@ -1282,6 +1345,59 @@ class RmuValidator:
             "db_combined_id": dev.get("combined_id", ""),
             "db_bv_id": dev.get("bv_id", ""),
         })
+
+    def _validate_relay_signal(self, row, elem, db_set, rule):
+        """Validate NariPd_Normal against dms_relay_sig.CODE exactly."""
+        row["selected_name_source"] = "FIXED_EFI_INDICATOR"
+        row["logical_code"] = RMU_RELAY_SIGNAL_CODE
+        row["selected_device_name"] = RMU_RELAY_SIGNAL_CODE
+        row["graphical_name"] = norm(elem.attrs.get("key_name1"))
+
+        matches = self._find_by_code(db_set.get("rows", []), RMU_RELAY_SIGNAL_CODE)
+        row["db_match_count"] = len(matches)
+        if len(matches) == 0:
+            self._set_fail(
+                row,
+                "RELAY_SIGNAL_NOT_FOUND: "
+                f"table={rule['table_id']}.CODE={RMU_RELAY_SIGNAL_CODE} "
+                "在当前环网柜中不存在",
+            )
+            return
+        if len(matches) > 1:
+            self._set_fail(
+                row,
+                "RELAY_SIGNAL_CODE_DUPLICATE: "
+                f"table={rule['table_id']}.CODE={RMU_RELAY_SIGNAL_CODE} "
+                f"存在{len(matches)}条记录",
+            )
+            return
+
+        dev = matches[0]
+        self._fill_db_fields(row, dev)
+        if norm(dev.get("code")) != RMU_RELAY_SIGNAL_CODE:
+            self._set_fail(row, "RELAY_SIGNAL_CODE_MISMATCH")
+            return
+
+        device_id = int_or_none(dev.get("id"))
+        if device_id is None:
+            self._set_fail(row, "RELAY_SIGNAL_DEVICE_ID_INVALID")
+            return
+        if not self._validate_expected_device_ownership(
+            row, dev, row.get("rmu_id")
+        ):
+            return
+        if not self._verify_expected_keyid(row, device_id, rule):
+            return
+
+        self._evaluate_current_model(
+            row,
+            elem,
+            device_id,
+            rule,
+            row.get("rmu_id"),
+            current_keyid_value=self._relay_keyid(elem),
+            require_bv_id=False,
+        )
 
     def _validate_breaker(self, row, elem, db_set, rule, selected_name, graphical_name):
         row["graphical_name"] = graphical_name
@@ -1784,9 +1900,16 @@ class RmuValidator:
             db_sets = {}
             for tag, rule in self.device_rules.items():
                 try:
-                    table_name, rows = self.db.get_devices_by_combined_id(
-                        int(rule["table_id"]), rmu_id
-                    )
+                    if tag == RMU_RELAY_SIGNAL_TAG:
+                        table_name, rows = self.db.get_relay_signals_by_combined_id(
+                            rmu_id,
+                            RMU_RELAY_SIGNAL_CODE,
+                            table_id=int(rule["table_id"]),
+                        )
+                    else:
+                        table_name, rows = self.db.get_devices_by_combined_id(
+                            int(rule["table_id"]), rmu_id
+                        )
                     db_sets[tag] = {
                         "table_id": int(rule["table_id"]),
                         "table_name": table_name,
@@ -1824,6 +1947,14 @@ class RmuValidator:
             elements_by_tag = defaultdict(list)
             for elem in elements:
                 elements_by_tag[elem.tag].append(elem)
+
+            # Only the explicitly named Normal pwbh object is a relay signal.
+            # Other pwbh objects in the same RMU are unrelated graphics.
+            elements_by_tag[RMU_RELAY_SIGNAL_TAG] = [
+                elem
+                for elem in elements_by_tag.get(RMU_RELAY_SIGNAL_TAG, [])
+                if self._is_normal_relay_signal(elem)
+            ]
 
             # The G file is authoritative for device validation.
             #
@@ -1904,6 +2035,24 @@ class RmuValidator:
                 db_set = db_sets[elem.tag]
                 row = self._default_device_row(rmu_result["rmu_name"], rmu_id, elem, rule, db_set)
                 self._validate_bus(row, elem, db_set, rule)
+                rmu_result["device_rows"].append(row)
+
+            # Fixed EFI relay signal inside the RMU.
+            for elem in elements_by_tag.get(RMU_RELAY_SIGNAL_TAG, []):
+                rule = self.device_rules[elem.tag]
+                db_set = db_sets[elem.tag]
+                row = self._default_device_row(
+                    rmu_result["rmu_name"],
+                    rmu_id,
+                    elem,
+                    rule,
+                    db_set,
+                )
+                row["current_keyid"] = self._relay_keyid(elem)
+                row["model_linked"] = (
+                    "YES" if row["current_keyid"] else "NO"
+                )
+                self._validate_relay_signal(row, elem, db_set, rule)
                 rmu_result["device_rows"].append(row)
 
             # Enforce hard one-to-one mapping after all G target rows have

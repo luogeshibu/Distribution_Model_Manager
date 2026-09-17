@@ -1134,7 +1134,7 @@ class GParser:
                 )
             )
 
-        for candidates in result.values():
+        for key, candidates in result.items():
             candidates.sort(
                 key=lambda c: (
                     c.score,
@@ -1143,6 +1143,10 @@ class GParser:
                     c.direction,
                 )
             )
+            # RMU cabinet names are singular: after the selected-direction
+            # filter, retain only the nearest Text for each frame.
+            if candidates:
+                result[key] = candidates[:1]
         return result
 
     def find_label_candidates(

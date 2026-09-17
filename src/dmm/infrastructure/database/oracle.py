@@ -275,6 +275,65 @@ class OracleClient:
         rows = self._query(sql, {"combined_id": int(combined_id)})
         return table_name, rows
 
+    def get_devices_by_code(
+        self,
+        table_id: int,
+        code: str,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Resolve a model device by exact CODE.
+
+        The table name is still resolved through ``sys_table_info``.  This is
+        used by the fixed main-station association rules (407/408/409), where
+        the G key_name carries the model CODE.
+        """
+        table_name = self.get_table_name(int(table_id))
+        lookup_code = str(code or "").strip()
+        if not lookup_code:
+            return table_name, []
+        rows = self._query(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE TRIM(code) = :code
+            """,
+            {"code": lookup_code},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return table_name, rows
+
+    def get_relay_signals_by_combined_id(
+        self,
+        combined_id: int,
+        code: str = "EFI INDICATOR",
+        table_id: int = 13533,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Read the fixed EFI signal row for one RMU.
+
+        ``dms_relay_sig`` is intentionally queried with ``SELECT *`` because
+        the relay table's auxiliary columns are not part of the generic
+        device-table contract.  The association rule itself only requires
+        ID, CODE and COMBINED_ID (plus whatever optional BV_ID is present).
+        """
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE combined_id = :combined_id
+              AND TRIM(code) = :code
+            """,
+            {
+                "combined_id": int(combined_id),
+                "code": str(code or "").strip(),
+            },
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return table_name, rows
+
 
     def get_device_by_id(self, table_id: int, device_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -284,19 +343,74 @@ class OracleClient:
         verify the current G-file model link, especially its COMBINED_ID.
         """
         table_name = self.get_table_name(int(table_id))
-        rows = self._query(
-            f"""
-            SELECT id, code, name, feeder_id, combined_id, bv_id
-            FROM {table_name}
-            WHERE id = :device_id
-            """,
-            {"device_id": int(device_id)},
-        )
+        if int(table_id) == 13533:
+            rows = self._query(
+                f"""
+                SELECT *
+                FROM {table_name}
+                WHERE id = :device_id
+                """,
+                {"device_id": int(device_id)},
+            )
+        else:
+            rows = self._query(
+                f"""
+                SELECT id, code, name, feeder_id, combined_id, bv_id
+                FROM {table_name}
+                WHERE id = :device_id
+                """,
+                {"device_id": int(device_id)},
+            )
         if len(rows) == 1:
             row = dict(rows[0])
             row["_table_name"] = table_name
             return row
         return None
+
+    def get_raw_device_by_id(
+        self,
+        table_id: int,
+        device_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Read one model row without assuming a shared column contract."""
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE id = :device_id
+            """,
+            {"device_id": int(device_id)},
+        )
+        if len(rows) != 1:
+            return None
+        row = dict(rows[0])
+        row["_table_id"] = int(table_id)
+        row["_table_name"] = table_name
+        return row
+
+    def get_feeders_by_station(
+        self,
+        station_id: Any,
+        table_id: int = 13500,
+    ) -> List[Dict[str, Any]]:
+        """List feeder master records owned by one substation."""
+        if station_id in (None, ""):
+            return []
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT id, code, name, st_id, graph_name
+            FROM {table_name}
+            WHERE st_id = :station_id
+            ORDER BY id
+            """,
+            {"station_id": int(station_id)},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
 
     def get_transformer_devices_by_name(
         self,
