@@ -292,7 +292,7 @@ class MainWindow(QMainWindow):
 
         #header {
             background: #006B52;
-            border-bottom: 4px solid #00B578;
+            border-bottom: 4px solid #D3A84C;
         }
 
         #headerTitle {
@@ -302,23 +302,31 @@ class MainWindow(QMainWindow):
         }
 
         #headerSub {
-            color: #D8EEE6;
+            color: #EFE9D7;
         }
 
         #brandTag {
-            color: #72E6B7;
+            color: #F2D28A;
             font-weight: 700;
             letter-spacing: 1px;
         }
 
+        #siteMark {
+            color: #F2D28A;
+            font-family: "Segoe UI Symbol", "Microsoft YaHei UI";
+            font-size: 27pt;
+            font-weight: 700;
+            padding: 0 8px 0 2px;
+        }
+
         #sideNav {
-            background: #005B46;
+            background: #004E3D;
             border: none;
         }
 
         QListWidget#navList {
-            background: #005B46;
-            color: #D8EEE6;
+            background: #004E3D;
+            color: #E6E8D8;
             border: none;
             outline: 0;
             font-size: 10.5pt;
@@ -331,12 +339,12 @@ class MainWindow(QMainWindow):
         }
 
         QListWidget#navList::item:selected {
-            background: #00966E;
+            background: #B58A36;
             color: white;
         }
 
         QListWidget#navList::item:hover {
-            background: #00785B;
+            background: #006650;
         }
 
         #pageTitle {
@@ -351,7 +359,7 @@ class MainWindow(QMainWindow):
 
         QGroupBox {
             background: white;
-            border: 1px solid #CFE0D9;
+            border: 1px solid #DCCFAE;
             border-radius: 10px;
             margin-top: 16px;
             padding-top: 8px;
@@ -365,7 +373,7 @@ class MainWindow(QMainWindow):
             left: 12px;
             top: 1px;
             padding: 0 7px;
-            background: #F1F6F3;
+            background: #F4F2E9;
         }
 
         /* Console-adjacent Task Progress should visually merge with its
@@ -427,7 +435,7 @@ class MainWindow(QMainWindow):
         QLineEdit:focus,
         QComboBox:focus,
         QSpinBox:focus {
-            border: 1px solid #00966E;
+            border: 1px solid #B58A36;
         }
 
         /* 保留 QSpinBox 原生上下按钮，保证按钮可点击 */
@@ -458,17 +466,17 @@ class MainWindow(QMainWindow):
 
         QPushButton:hover {
             background: #EAF5F0;
-            border-color: #7EB5A1;
+            border-color: #BDA365;
         }
 
         QPushButton:pressed {
-            background: #00966E;
+            background: #B58A36;
             color: white;
-            border-color: #00785B;
+            border-color: #8F6A27;
         }
 
         QPushButton:focus {
-            border: 1px solid #00966E;
+            border: 1px solid #B58A36;
         }
 
         QPushButton#primary {
@@ -518,9 +526,9 @@ class MainWindow(QMainWindow):
         }
 
         QLabel#moduleDescription {
-            background: #F1F8F5;
-            color: #587269;
-            border: 1px solid #D7E8E1;
+            background: #F5F3EA;
+            color: #5F6C5D;
+            border: 1px solid #E2D6B7;
             border-radius: 7px;
             padding: 9px;
         }
@@ -536,7 +544,7 @@ class MainWindow(QMainWindow):
 
         #metricCard {
             background: white;
-            border: 1px solid #CFE0D9;
+            border: 1px solid #DCCFAE;
             border-radius: 9px;
         }
 
@@ -578,12 +586,12 @@ class MainWindow(QMainWindow):
         }
 
         QProgressBar::chunk {
-            background: #00966E;
+            background: #B58A36;
             border-radius: 6px;
         }
 
         QTabWidget::pane {
-            border: 1px solid #CFE0D9;
+            border: 1px solid #DCCFAE;
             background: white;
         }
 
@@ -594,7 +602,7 @@ class MainWindow(QMainWindow):
         }
 
         QTabBar::tab:selected {
-            background: #00966E;
+            background: #B58A36;
             color: white;
         }
         """)
@@ -646,6 +654,13 @@ class MainWindow(QMainWindow):
             )
             logo.setFixedSize(82, 82)
             header_layout.addWidget(logo)
+
+        # Small Makkah-site visual mark: restrained star-and-crescent accent
+        # beside the existing NARI logo, without changing the page structure.
+        site_mark = QLabel("☪")
+        site_mark.setObjectName("siteMark")
+        site_mark.setAccessibleName("麦加现场标识")
+        header_layout.addWidget(site_mark)
 
         titles = QVBoxLayout()
 
@@ -703,10 +718,10 @@ class MainWindow(QMainWindow):
         self.nav = QListWidget()
         self.nav.setObjectName("navList")
 
-        for label in ("数据库", "模型工作区", "图元管理", "运行历史", "设置", "帮助"):
+        for label in ("模型工作区", "数据库", "图元管理", "运行历史", "设置", "帮助"):
             self.nav.addItem(QListWidgetItem(label))
 
-        self.nav.setCurrentRow(1)
+        self.nav.setCurrentRow(0)
         sidebar_layout.addWidget(self.nav)
         body_layout.addWidget(sidebar)
 
@@ -714,15 +729,15 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
 
-        self.pages.addWidget(self._build_database_page())
         self.pages.addWidget(self._build_workspace_page())
+        self.pages.addWidget(self._build_database_page())
         self.element_management_page = self._build_element_management_page()
         self.pages.addWidget(self.element_management_page)
         self.pages.addWidget(self._build_history_page())
         self.pages.addWidget(self._build_settings_page())
         self.pages.addWidget(self._build_help_page())
 
-        self.pages.setCurrentIndex(1)
+        self.pages.setCurrentIndex(0)
         body_layout.addWidget(self.pages, 1)
 
     # ------------------------------------------------------------
@@ -1356,7 +1371,7 @@ class MainWindow(QMainWindow):
 
         database_btn = QPushButton("数据库设置")
         database_btn.setObjectName("secondary")
-        database_btn.clicked.connect(lambda: self.nav.setCurrentRow(0))
+        database_btn.clicked.connect(lambda: self.nav.setCurrentRow(1))
 
         for button in (
             self.validate_btn,
@@ -2825,6 +2840,8 @@ class MainWindow(QMainWindow):
         try:
             cfg = self._current_ssh_config()
             self.cfg["ssh"] = cfg
+            if hasattr(self, "element_management_page"):
+                self.element_management_page.refresh_server_info()
             self.cfg["input_source"] = "SSH"
             save_settings(self.cfg)
             self._set_ssh_connection_status(
@@ -2998,6 +3015,8 @@ class MainWindow(QMainWindow):
                 client.test_connection()
 
             self.cfg["ssh"] = cfg
+            if hasattr(self, "element_management_page"):
+                self.element_management_page.refresh_server_info()
             self.cfg["input_source"] = "SSH"
             save_settings(self.cfg)
             self._set_ssh_connection_status(
