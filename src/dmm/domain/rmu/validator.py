@@ -30,6 +30,67 @@ def int_or_none(v):
         return None
 
 
+def resolve_duplicate_name_records(records, entity_code):
+    """Judge duplicate database names using only their FEEDER_ID values."""
+    all_records = list(records or [])
+    if len(all_records) <= 1:
+        return {
+            "records": all_records,
+            "all_records": all_records,
+            "status": "UNIQUE_NAME",
+            "reason": "",
+            "feeder_ids": sorted({
+                feeder_id
+                for feeder_id in (
+                    int_or_none(row.get("feeder_id"))
+                    for row in all_records
+                )
+                if feeder_id is not None
+            }),
+        }
+
+    feeder_values = [int_or_none(row.get("feeder_id")) for row in all_records]
+    feeder_ids = sorted({item for item in feeder_values if item is not None})
+    if any(item is None for item in feeder_values):
+        return {
+            "records": all_records,
+            "all_records": all_records,
+            "status": "DUPLICATE_FEEDER_UNRESOLVED",
+            "reason": (
+                f"{entity_code}_DUPLICATE_NAME_FEEDER_UNRESOLVED: "
+                "名称存在多条数据库记录，但其中存在空的 FEEDER_ID。"
+            ),
+            "feeder_ids": feeder_ids,
+        }
+
+    if len(set(feeder_values)) == len(feeder_values):
+        return {
+            # The existing association pipeline requires one target row.  The
+            # duplicate is safe because FEEDER_ID separates the records; keep
+            # the first database row as the concrete target while retaining
+            # all rows for diagnostics.
+            "records": [all_records[0]],
+            "all_records": all_records,
+            "status": "DUPLICATE_RESOLVED_BY_FEEDER",
+            "reason": (
+                f"{entity_code}_DUPLICATE_NAME_DIFFERENT_FEEDER: "
+                f"名称重复，但 FEEDER_ID 分别为={','.join(str(x) for x in feeder_values)}。"
+            ),
+            "feeder_ids": feeder_ids,
+        }
+
+    return {
+        "records": all_records,
+        "all_records": all_records,
+        "status": "DUPLICATE_SAME_FEEDER",
+        "reason": (
+            f"{entity_code}_DUPLICATE_NAME_SAME_FEEDER: "
+            f"名称重复，且 FEEDER_ID={','.join(str(x) for x in feeder_values)} 中存在重复。"
+        ),
+        "feeder_ids": feeder_ids,
+    }
+
+
 class RmuValidator:
     def __init__(
         self,
@@ -129,9 +190,21 @@ class RmuValidator:
 
         candidate_rows = []
         selected_row = None
+        resolution_cache = {}
+
+        def resolve_records(name):
+            key = norm(name)
+            if key not in resolution_cache:
+                raw_records = self.db.get_rmu_records(key)
+                resolution_cache[key] = resolve_duplicate_name_records(
+                    raw_records,
+                    "RMU",
+                )
+            return resolution_cache[key]
 
         for c in all_candidates:
-            records = self.db.get_rmu_records(c.text)
+            resolution = resolve_records(c.text)
+            records = resolution["records"]
             row = {
                 "name": c.text,
                 "directions": c.direction,
@@ -142,6 +215,9 @@ class RmuValidator:
                 "xml_id": c.obj.xml_id,
                 "db_count": len(records),
                 "db_records": records,
+                "db_all_count": len(resolution["all_records"]),
+                "db_feeder_ids": resolution["feeder_ids"],
+                "db_resolution": resolution["status"],
                 "selected_by_rule": "YES" if c is chosen else "NO",
                 "selection_reason": (
                     selection_reason if c is chosen else ""
@@ -152,28 +228,33 @@ class RmuValidator:
             if c is chosen:
                 selected_row = row
 
-        records = self.db.get_rmu_records(chosen_name)
+        resolution = resolve_records(chosen_name)
+        records = resolution["records"]
 
         if len(records) == 1:
             return {
                 "status": "PASS",
                 "reason": (
-                    "RMU_CONFIRMED_SINGLE_LABEL"
-                    if len(ordered) == 1
+                    resolution["reason"]
+                    if resolution["status"] == "DUPLICATE_RESOLVED_BY_FEEDER"
                     else (
-                        "RMU_CONFIRMED_GREEN_LABEL"
-                        if chosen.is_green
-                        else "RMU_CONFIRMED_NEAREST_LABEL"
+                        "RMU_CONFIRMED_SINGLE_LABEL"
+                        if len(ordered) == 1
+                        else (
+                            "RMU_CONFIRMED_GREEN_LABEL"
+                            if chosen.is_green
+                            else "RMU_CONFIRMED_NEAREST_LABEL"
+                        )
                     )
                 ),
                 "candidate_rows": candidate_rows,
                 "selected": selected_row,
             }
 
-        if len(records) > 1:
+        if len(resolution["all_records"]) > 1:
             return {
                 "status": "FAIL",
-                "reason": "RMU_DUPLICATE_IN_DATABASE",
+                "reason": resolution["reason"] or "RMU_DUPLICATE_IN_DATABASE",
                 "candidate_rows": candidate_rows,
                 "selected": selected_row,
             }
@@ -186,7 +267,13 @@ class RmuValidator:
         }
 
     @staticmethod
-    def _default_device_row(rmu_name, rmu_id, elem, rule, db_set):
+    def _default_device_row(
+        rmu_name,
+        rmu_id,
+        elem,
+        rule,
+        db_set,
+    ):
         return {
             "rmu_name": rmu_name,
             "rmu_id": rmu_id,
@@ -1595,10 +1682,15 @@ class RmuValidator:
                 "环网柜身份未可靠确定，禁止该RMU及柜内设备自动关联。"
             )
 
-        if code == "RMU_DUPLICATE_IN_DATABASE":
+        if code in {
+            "RMU_DUPLICATE_IN_DATABASE",
+            "RMU_DUPLICATE_NAME_SAME_FEEDER",
+            "RMU_DUPLICATE_NAME_FEEDER_UNRESOLVED",
+        }:
+            detail = reason_text.split(":", 1)[1].strip() if ":" in reason_text else ""
             return (
-                "RMU_DUPLICATE_IN_DATABASE: "
-                f"已解析环网柜名称={name_ref or '-'}，但数据库存在多条同名记录；"
+                f"{code}: "
+                f"已解析环网柜名称={name_ref or '-'}；{detail or '数据库存在多条无法唯一确定的同名记录'}；"
                 "环网柜必须唯一，禁止自动关联。"
             )
 
@@ -1993,7 +2085,13 @@ class RmuValidator:
             for elem in breakers:
                 rule = self.device_rules[elem.tag]
                 db_set = db_sets[elem.tag]
-                row = self._default_device_row(rmu_result["rmu_name"], rmu_id, elem, rule, db_set)
+                row = self._default_device_row(
+                    rmu_result["rmu_name"],
+                    rmu_id,
+                    elem,
+                    rule,
+                    db_set,
+                )
                 graphical_name = norm(graph_names.get(elem.xml_id, {}).get("name"))
                 selected_name = breaker_names.get(elem.xml_id, "")
                 info = graph_names.get(elem.xml_id, {})
@@ -2023,7 +2121,13 @@ class RmuValidator:
             for elem in grounds:
                 rule = self.device_rules[elem.tag]
                 db_set = db_sets[elem.tag]
-                row = self._default_device_row(rmu_result["rmu_name"], rmu_id, elem, rule, db_set)
+                row = self._default_device_row(
+                    rmu_result["rmu_name"],
+                    rmu_id,
+                    elem,
+                    rule,
+                    db_set,
+                )
                 br_id = ground_to_breaker.get(elem.xml_id, "")
                 breaker_name = breaker_names.get(br_id, "")
                 self._validate_ground(row, elem, db_set, rule, breaker_name)
@@ -2033,7 +2137,13 @@ class RmuValidator:
             for elem in buses:
                 rule = self.device_rules[elem.tag]
                 db_set = db_sets[elem.tag]
-                row = self._default_device_row(rmu_result["rmu_name"], rmu_id, elem, rule, db_set)
+                row = self._default_device_row(
+                    rmu_result["rmu_name"],
+                    rmu_id,
+                    elem,
+                    rule,
+                    db_set,
+                )
                 self._validate_bus(row, elem, db_set, rule)
                 rmu_result["device_rows"].append(row)
 

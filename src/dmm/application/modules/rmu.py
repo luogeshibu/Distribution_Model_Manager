@@ -23,7 +23,13 @@ from dmm.config.defaults import (
     resolve_rmu_name_positions,
 )
 from dmm.domain.gfile.parser import GParser
-from dmm.domain.rmu.validator import RmuValidator, KEYID_STEP, norm, int_or_none
+from dmm.domain.rmu.validator import (
+    RmuValidator,
+    KEYID_STEP,
+    norm,
+    int_or_none,
+    resolve_duplicate_name_records,
+)
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 
 class RmuModelModule(ModelModule):
@@ -411,18 +417,24 @@ class RmuModelModule(ModelModule):
                     )
 
                 if rmu_name not in rmu_cache:
-                    rmu_cache[rmu_name] = db.get_rmu_records(rmu_name)
-                    log_callback(
-                        f"复核环网柜 {rmu_name}："
-                        f"数据库记录数={len(rmu_cache[rmu_name])}"
+                    raw_rmu_records = db.get_rmu_records(rmu_name)
+                    rmu_cache[rmu_name] = resolve_duplicate_name_records(
+                        raw_rmu_records,
+                        "RMU",
                     )
-
-                rmu_records = rmu_cache[rmu_name]
+                rmu_resolution = rmu_cache[rmu_name]
+                rmu_records = rmu_resolution["records"]
+                log_callback(
+                    f"复核环网柜 {rmu_name}："
+                    f"数据库记录数={len(rmu_resolution['all_records'])}；"
+                    f"当前馈线匹配数={len(rmu_records)}"
+                )
                 if len(rmu_records) != 1:
                     make_fail(
                         change,
                         base_row,
-                        f"EXEC_RMU_NOT_UNIQUE: 当前记录数={len(rmu_records)}",
+                        rmu_resolution["reason"]
+                        or f"EXEC_RMU_NOT_UNIQUE: 当前记录数={len(rmu_records)}",
                     )
                     continue
 

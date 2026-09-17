@@ -10,7 +10,11 @@ from dmm.domain.gfile.element_catalog import (
     classification_is,
     resolve_element_record,
 )
-from dmm.domain.rmu.validator import int_or_none, norm
+from dmm.domain.rmu.validator import (
+    int_or_none,
+    norm,
+    resolve_duplicate_name_records,
+)
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 from dmm.application.modules.pole_switch import (
     POLE_SWITCH_NAME_RE,
@@ -51,10 +55,6 @@ class TransformerParser(PoleSwitchParser):
     @staticmethod
     def _text_value(obj: GObject) -> str:
         return re.sub(r"\s+", " ", str(obj.attrs.get("ts") or "")).strip()
-
-    @staticmethod
-    def _root_int(parsed: ParsedG, attribute: str):
-        return int_or_none(parsed.root.attrib.get(attribute))
 
     @classmethod
     def _is_transformer_object(cls, obj: GObject, element_catalog=None) -> bool:
@@ -140,9 +140,9 @@ class TransformerParser(PoleSwitchParser):
                 element_catalog,
             ),
         )
-        # Feeder resolution is intentionally fixed-mode: use only the G-root
-        # facID (with the unique facName fallback below). No topology branch
-        # or CBreaker traversal is performed during model association.
+        # Transformer names are resolved independently from topology. Feeder
+        # IDs are consulted only after the database name lookup returns
+        # duplicate rows.
         source_keyids_by_transformer = {}
         all_source_keyids = []
         rows = []
@@ -187,11 +187,7 @@ class TransformerParser(PoleSwitchParser):
         source_keyid = ""
         if source_keyids:
             source_keyid = source_keyids[0]
-        root_fac_id = self._root_int(parsed, "facID")
-        root_fac_name = str(parsed.root.attrib.get("facName") or "").strip()
         context = {
-            "root_fac_id": root_fac_id,
-            "root_fac_name": root_fac_name,
             "source_cbreaker_count": 0,
             "source_cbreaker_keyid": source_keyid,
             "source_cbreaker_keyids": source_keyids,
@@ -208,7 +204,7 @@ class TransformerModelModule(ModelModule):
     display_name = "柱上变压器模型"
     description = (
         "只识别图元管理中标记为 Transformer_OH 的图元；被标记图元直接视为柱上变压器，"
-        "每个设备独立取最近合规 Text，馈线固定使用 G 根 facID 查询，必要时仅用唯一 facName 兜底，"
+        "每个设备独立取最近合规 Text；数据库同名记录按 FEEDER_ID 判定是否重复，"
         "按 13505 / dms_tr_device 计算双 KeyID 并安全回写。"
     )
     SUPPORTED_OPERATIONS = (
@@ -223,11 +219,11 @@ class TransformerModelModule(ModelModule):
             TRANSFORMER_TAG: {
                 "table_id": TRANSFORMER_TABLE_ID,
                 "domain": TRANSFORMER_DOMAIN,
-                "match_mode": "TRANSFORMERDIS_NEAREST_TEXT_AND_ROOT_FACID",
+                "match_mode": "TRANSFORMERDIS_NEAREST_TEXT_AND_FEEDER_NAME",
                 "description": (
                     "仅使用图元管理标记 Transformer_OH 的图元，直接视为柱上变压器；"
                     "每个变压器直接解析整张 G 图中最近的 Text，不依赖现场图元文件名；"
-                    "G 根 facID 确认馈线；目标表为 13505，Domain=1"
+                    "数据库同名记录仅按 FEEDER_ID 判定；目标表为 13505，Domain=1"
                 ),
             }
         }
@@ -257,28 +253,6 @@ class TransformerModelModule(ModelModule):
             "keyid1": expected,
             "keyid2": expected,
         }
-
-    @staticmethod
-    def _resolve_feeder(db, context):
-        root_fac_id = int_or_none(context.get("root_fac_id"))
-        if root_fac_id is not None:
-            feeder = db.get_feeder_info(root_fac_id)
-            if feeder:
-                return feeder, "G_ROOT_FACID"
-
-        # Last-resort label fallback remains unique-only after the fixed
-        # facID lookup. It does not inspect topology.
-        hint = str(context.get("root_fac_name") or "").strip()
-        if hint:
-            candidates = db.find_feeders_by_name_hint(hint)
-            unique = {}
-            for candidate in candidates:
-                candidate_id = int_or_none(candidate.get("id"))
-                if candidate_id is not None:
-                    unique[candidate_id] = candidate
-            if len(unique) == 1:
-                return next(iter(unique.values())), "G_ROOT_FACNAME_UNIQUE"
-        return None, "UNRESOLVED"
 
     @staticmethod
     def _current_keyids(row):
@@ -348,28 +322,33 @@ class TransformerModelModule(ModelModule):
         })
         self._current_link_fields(row, db)
 
-        if feeder_id is None:
-            return self._fail(
-                row,
-                "TRANSFORMER_FEEDER_NOT_RESOLVED: G 根 facID 和唯一 facName 均未能解析到 13500 馈线。",
-            )
         if not name:
             return self._fail(
                 row,
                 "TRANSFORMER_NAME_NOT_FOUND: 未找到 Transformer_OH 图元对应的最近 Text。",
             )
 
-        records = db.get_transformer_devices_by_name(
+        raw_records = db.get_transformer_devices_by_name(
             name,
-            feeder_id=feeder_id,
             table_id=TRANSFORMER_TABLE_ID,
         )
+        resolution = resolve_duplicate_name_records(
+            raw_records,
+            "TRANSFORMER",
+        )
+        records = resolution["records"]
         row["db_match_count"] = len(records)
+        row["db_all_match_count"] = len(resolution["all_records"])
+        row["db_feeder_ids"] = resolution["feeder_ids"]
+        row["db_resolution"] = resolution["status"]
         if len(records) != 1:
             return self._fail(
                 row,
-                "TRANSFORMER_DATABASE_NOT_UNIQUE: "
-                f"dms_tr_device NAME={name} 且 FEEDER_ID={feeder_id}；匹配数={len(records)}。",
+                resolution["reason"]
+                or (
+                    "TRANSFORMER_DATABASE_NOT_UNIQUE: "
+                    f"dms_tr_device NAME={name}；匹配数={len(records)}。"
+                ),
             )
 
         device = records[0]
@@ -457,8 +436,7 @@ class TransformerModelModule(ModelModule):
             row_source_keyids = list(row.get("source_cbreaker_keyids") or [])
             if row_source_keyids:
                 row_context["source_cbreaker_keyids"] = row_source_keyids
-            feeder, feeder_source = self._resolve_feeder(db, row_context)
-            resolved = self._resolve_row(dict(row), db, feeder, feeder_source)
+            resolved = self._resolve_row(dict(row), db, None, "DATABASE_NAME")
             resolved["file_name"] = Path(g_file).name
             rows.append(resolved)
             if progress_callback:
@@ -586,7 +564,7 @@ class TransformerModelModule(ModelModule):
                         "id": base.get("feeder_id"),
                         "display_name": base.get("feeder_name"),
                     },
-                    base.get("feeder_resolution_source", "G_ROOT_FACID"),
+                    base.get("feeder_resolution_source", "DATABASE_NAME"),
                 )
                 if current.get("association_ready") != "YES" or current.get("writeback_needed") != "YES":
                     current["_execution_result"] = "SKIPPED"

@@ -94,8 +94,8 @@ class RmuSettingsWidget(QWidget):
 
         info = QLabel(
             "RMU 环网柜只有在矩形框内同时包含 CBreakerDis、BusDis、ZhaiWaiJieDiDaoZha 时才识别。"
-            "开关设备名称固定使用环网柜内图上文字；吉达现场默认读取图框上方名称。"
-            "允许多选名称方向，多选时只保留所选方向中距离最近的一个 Text。"
+            "开关设备名称固定使用环网柜内图上文字；积攒现场默认读取图框上方名称。"
+            "每个环网柜只取一个名称，可指定上方、下方、左侧或右侧；多选时只保留候选中距离最近的一个 Text。"
             "设备命名规则固定使用图上文字，不再读取三类设备 XML 的 p_NameString："
             "CBreakerDis 使用图上名称，接地刀闸使用开关名+D，BusDis 固定使用 BUS。"
             "RMU 内 NariPd_Normal.pwbh.icn.g 为固定 EFI 信号：默认按环网柜 ID 查询 13533 dms_relay_sig，"
@@ -167,7 +167,7 @@ class RmuSettingsWidget(QWidget):
         rg.addWidget(fixed_source, 5, 1)
 
         note = QLabel(
-            "默认勾选上方；允许同时勾选多个方向。多选时程序只保留所选方向中距离最近的一个 Text，"
+            "默认勾选上方；每个环网柜只取一个名称，也可指定一个或多个方向。多选时程序只保留候选中距离最近的一个 Text，"
             "开关名称不再读取 XML p_NameString。CBreakerDis 仅使用环网柜内"
             "图上文字；接地刀闸逻辑名称=配对开关名+D；BusDis 固定为 BUS。"
             "NariPd_Normal.pwbh.icn.g 仍按固定 CODE=EFI INDICATOR 关联，但其表号和域号也可在右侧直接调整。"

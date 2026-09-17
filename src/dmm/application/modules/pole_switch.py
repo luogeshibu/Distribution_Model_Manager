@@ -14,7 +14,11 @@ from dmm.domain.gfile.element_catalog import (
     resolve_element_record,
 )
 from dmm.domain.gfile.parser import GParser, GObject, ParsedG
-from dmm.domain.rmu.validator import int_or_none, norm
+from dmm.domain.rmu.validator import (
+    int_or_none,
+    norm,
+    resolve_duplicate_name_records,
+)
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 
 
@@ -721,6 +725,9 @@ class PoleSwitchModelModule(ModelModule):
             "configured_domain": POLE_SWITCH_DOMAIN,
             "match_mode": "CBREAKERDIS_ELEMENT_MARK_NEAREST_TEXT",
             "combined_db_match_count": 0,
+            "combined_db_all_match_count": 0,
+            "combined_db_feeder_ids": [],
+            "combined_db_resolution": "",
             "cb_parent_match_count": 0,
             "cb_db_match_count": 0,
             "db_combined_id": "",
@@ -747,15 +754,28 @@ class PoleSwitchModelModule(ModelModule):
             })
             return row
 
-        combined_records = db.get_combined_device_records(name)
+        raw_combined_records = db.get_combined_device_records(name)
+        combined_resolution = resolve_duplicate_name_records(
+            raw_combined_records,
+            "POLE_SWITCH",
+        )
+        combined_records = combined_resolution["records"]
         row["combined_db_match_count"] = len(combined_records)
+        row["combined_db_all_match_count"] = len(
+            combined_resolution["all_records"]
+        )
+        row["combined_db_feeder_ids"] = combined_resolution["feeder_ids"]
+        row["combined_db_resolution"] = combined_resolution["status"]
         if len(combined_records) != 1:
             row.update({
                 "status": "FAIL",
                 "severity": "ERROR",
                 "reason": (
-                    "POLE_SWITCH_COMBINED_NAME_NOT_UNIQUE: "
-                    f"13501 NAME/CODE={name}；匹配数={len(combined_records)}。"
+                    combined_resolution["reason"]
+                    or (
+                        "POLE_SWITCH_COMBINED_NAME_NOT_UNIQUE: "
+                        f"13501 NAME/CODE={name}；匹配数={len(combined_records)}。"
+                    )
                 ),
             })
             return row

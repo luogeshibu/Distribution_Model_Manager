@@ -3,7 +3,7 @@ APP_NAME_EN = "Distribution Model Manager"
 APP_VERSION = "4.1.39"
 APP_DESCRIPTION = "配网 G 文件模型校验、候选选择及安全关联回写工具"
 APP_EDITION = "团队内部版"
-APP_SITE_LABEL = "吉达现场版"
+APP_SITE_LABEL = "积攒现场版"
 APP_SITE_LABEL_EN = "Jeddah Site Edition"
 APP_BUILD_DATE = "2026-08-31"
 
