@@ -1360,6 +1360,7 @@ class RmuValidator:
         frame,
         rmu_result,
         resolved_reason,
+        skip_db_lookup=False,
     ):
         """
         Expose G-file device rows even when RMU DB identity is 0/multiple.
@@ -1448,12 +1449,15 @@ class RmuValidator:
                 rmu_result["device_rows"].append(row)
                 continue
 
-            self._inspect_current_link_without_unique_rmu(
-                row,
-                elem,
-                resolved_reason,
-                rule=self.device_rules[elem.tag],
-            )
+            if skip_db_lookup:
+                self._set_fail(row, resolved_reason)
+            else:
+                self._inspect_current_link_without_unique_rmu(
+                    row,
+                    elem,
+                    resolved_reason,
+                    rule=self.device_rules[elem.tag],
+                )
             rmu_result["device_rows"].append(row)
 
         for elem in grounds:
@@ -1479,12 +1483,15 @@ class RmuValidator:
                     "GROUND_BREAKER_PAIR_NOT_RESOLVED",
                 )
             else:
-                self._inspect_current_link_without_unique_rmu(
-                    row,
-                    elem,
-                    resolved_reason,
-                    rule=self.device_rules[elem.tag],
-                )
+                if skip_db_lookup:
+                    self._set_fail(row, resolved_reason)
+                else:
+                    self._inspect_current_link_without_unique_rmu(
+                        row,
+                        elem,
+                        resolved_reason,
+                        rule=self.device_rules[elem.tag],
+                    )
             rmu_result["device_rows"].append(row)
 
         for elem in buses:
@@ -1493,12 +1500,15 @@ class RmuValidator:
             row["logical_code"] = "BUS"
             row["selected_device_name"] = "BUS"
 
-            self._inspect_current_link_without_unique_rmu(
-                row,
-                elem,
-                resolved_reason,
-                rule=self.device_rules[elem.tag],
-            )
+            if skip_db_lookup:
+                self._set_fail(row, resolved_reason)
+            else:
+                self._inspect_current_link_without_unique_rmu(
+                    row,
+                    elem,
+                    resolved_reason,
+                    rule=self.device_rules[elem.tag],
+                )
             rmu_result["device_rows"].append(row)
 
         for elem in elements_by_tag.get(RMU_RELAY_SIGNAL_TAG, []):
@@ -1507,13 +1517,16 @@ class RmuValidator:
             row["logical_code"] = RMU_RELAY_SIGNAL_CODE
             row["selected_device_name"] = RMU_RELAY_SIGNAL_CODE
             row["graphical_name"] = norm(elem.attrs.get("key_name1"))
-            self._inspect_current_link_without_unique_rmu(
-                row,
-                elem,
-                resolved_reason,
-                current_keyid_value=self._relay_keyid(elem),
-                rule=self.device_rules[elem.tag],
-            )
+            if skip_db_lookup:
+                self._set_fail(row, resolved_reason)
+            else:
+                self._inspect_current_link_without_unique_rmu(
+                    row,
+                    elem,
+                    resolved_reason,
+                    current_keyid_value=self._relay_keyid(elem),
+                    rule=self.device_rules[elem.tag],
+                )
             rmu_result["device_rows"].append(row)
 
 
@@ -1780,12 +1793,13 @@ class RmuValidator:
             "RMU_DUPLICATE_NAME_SAME_FEEDER",
             "RMU_DUPLICATE_NAME_FEEDER_UNRESOLVED",
             "RMU_DUPLICATE_NAME_DIAGRAM_FEEDER_NOT_FOUND",
+            "RMU_GRAPHICAL_NAME_DUPLICATE",
         }:
             detail = reason_text.split(":", 1)[1].strip() if ":" in reason_text else ""
             return (
                 f"{code}: "
                 f"已解析环网柜名称={name_ref or '-'}；{detail or '数据库存在多条无法唯一确定的同名记录'}；"
-                "环网柜必须唯一，禁止自动关联。"
+                "环网柜图上名称必须唯一，禁止自动关联。"
             )
 
         if code == "RMU_DIAGRAM_FEEDER_NOT_RESOLVED":
@@ -1846,8 +1860,71 @@ class RmuValidator:
         pre_resolved_names = {}
         diagram_feeder_candidates = []
         diagram_feeder_source = None
+        graphical_name_choices = {}
+        graphical_name_groups = defaultdict(list)
+
+        # This pass is deliberately database-free.  A repeated RMU name in
+        # the drawing is a Jazan graphical warning and must be reported before
+        # any database lookup for that name is attempted.
+        for frame_index, frame in enumerate(frames, start=1):
+            frame_key = (frame.frame.xml_index, frame.frame.xml_id)
+            candidates = list(
+                preassigned_name_candidates.get(frame_key, [])
+                if not name_assignment_error
+                else []
+            )
+            ordered = sorted(
+                candidates,
+                key=lambda c: (
+                    c.score,
+                    c.obj.xml_index,
+                    c.text,
+                ),
+            )
+            chosen = ordered[0] if ordered else None
+            chosen_name = norm(getattr(chosen, "text", "")) if chosen else ""
+            if chosen_name:
+                choice = {
+                    "frame_index": frame_index,
+                    "frame_xml_id": frame.frame.xml_id,
+                    "name": chosen_name,
+                }
+                graphical_name_choices[frame.frame.xml_id] = choice
+                graphical_name_groups[chosen_name.casefold()].append(choice)
+
+        graphical_duplicate_groups = {
+            key: items
+            for key, items in graphical_name_groups.items()
+            if len(items) > 1
+        }
+
         if not name_assignment_error:
             for frame_index, frame in enumerate(frames, start=1):
+                graphical_choice = graphical_name_choices.get(frame.frame.xml_id)
+                duplicate_items = (
+                    graphical_duplicate_groups.get(
+                        graphical_choice["name"].casefold(), []
+                    )
+                    if graphical_choice
+                    else []
+                )
+                if duplicate_items:
+                    duplicate_name = graphical_choice["name"]
+                    duplicate_indexes = ",".join(
+                        str(item["frame_index"]) for item in duplicate_items
+                    )
+                    pre_resolved_names[frame.frame.xml_id] = {
+                        "status": "FAIL",
+                        "reason": (
+                            "RMU_GRAPHICAL_NAME_DUPLICATE: "
+                            f"本张G图中环网柜名称“{duplicate_name}”出现 "
+                            f"{len(duplicate_items)} 次（环网柜序号：{duplicate_indexes}）；"
+                            "按Jazan规则直接告警，不查询该名称的数据库记录。"
+                        ),
+                        "candidate_rows": [],
+                        "selected": None,
+                    }
+                    continue
                 try:
                     resolved = self._resolve_rmu_name(
                         parsed,
@@ -1972,6 +2049,7 @@ class RmuValidator:
                         "最终按有效devref类型。"
                     )
 
+            graphical_choice = graphical_name_choices.get(frame.frame.xml_id)
             rmu_result = {
                 "frame_index": index,
                 "frame_xml_id": frame.frame.xml_id,
@@ -2022,6 +2100,32 @@ class RmuValidator:
                 "rmu_db_all_count": 0,
                 "rmu_feeder_id": "",
                 "diagram_feeder_id": diagram_feeder_id or "",
+                "graphical_duplicate": (
+                    "YES"
+                    if graphical_choice
+                    and graphical_choice["name"].casefold()
+                    in graphical_duplicate_groups
+                    else "NO"
+                ),
+                "graphical_duplicate_count": (
+                    len(
+                        graphical_duplicate_groups.get(
+                            graphical_choice["name"].casefold(), []
+                        )
+                    )
+                    if graphical_choice
+                    else 0
+                ),
+                "graphical_duplicate_frame_indexes": ",".join(
+                    str(item["frame_index"])
+                    for item in (
+                        graphical_duplicate_groups.get(
+                            graphical_choice["name"].casefold(), []
+                        )
+                        if graphical_choice
+                        else []
+                    )
+                ),
                 "diagram_feeder_source": (
                     "YES"
                     if diagram_feeder_source
@@ -2042,6 +2146,8 @@ class RmuValidator:
                 "device_block_reasons": [],
                 "label_candidates": [],
             }
+            if graphical_choice:
+                rmu_result["rmu_name"] = graphical_choice["name"]
 
             if name_assignment_error:
                 resolved = {
@@ -2060,7 +2166,14 @@ class RmuValidator:
                 )
 
                 try:
-                    if diagram_feeder_id is not None:
+                    is_graphical_duplicate = (
+                        rmu_result.get("graphical_duplicate") == "YES"
+                    )
+                    if is_graphical_duplicate:
+                        # The graphical duplicate warning is authoritative;
+                        # do not query RMU or child-device tables.
+                        pass
+                    elif diagram_feeder_id is not None:
                         # Re-resolve the name with the feeder inferred from a
                         # unique RMU elsewhere in this same G file.
                         resolved = self._resolve_rmu_name(
@@ -2171,6 +2284,9 @@ class RmuValidator:
                     frame,
                     rmu_result,
                     resolved["reason"],
+                    skip_db_lookup=(
+                        rmu_result.get("graphical_duplicate") == "YES"
+                    ),
                 )
                 self._validate_nonunique_rmu_existing_links(rmu_result)
                 self._validate_one_to_one_device_mapping(rmu_result)

@@ -366,6 +366,8 @@ MASTER_STATION_LABELS_EN = {
 
 RMU_FIELDS = [
     "file_name", "frame_index", "frame_xml_id", "rmu_name",
+    "graphical_duplicate", "graphical_duplicate_count",
+    "graphical_duplicate_frame_indexes",
     "rmu_type", "rmu_type_source", "rmu_type_text", "rmu_type_devref",
     "rmu_type_consistent", "rmu_type_check_status", "rmu_type_check_reason",
     "rmu_is_smart", "rmu_smart_marker_types",
@@ -439,6 +441,9 @@ RMU_LABELS = {
     "frame_index": "环网柜序号",
     "frame_xml_id": "矩形框XML ID（来源：G文件）",
     "rmu_name": "环网柜名称（来源：G文件图上文字）",
+    "graphical_duplicate": "图上名称是否重复",
+    "graphical_duplicate_count": "图上同名环网柜数量",
+    "graphical_duplicate_frame_indexes": "图上同名环网柜序号",
     "rmu_type": "环网柜类型",
     "rmu_type_source": "类型识别来源",
     "rmu_type_text": "图内文字类型",
@@ -526,6 +531,8 @@ DEVICE_LABELS_EN = {
 
 RMU_LABELS_EN = {
     "file_name": "G File", "frame_index": "RMU Index (G File)", "frame_xml_id": "Frame XML ID (G File)", "rmu_name": "RMU Name (G Text)",
+    "graphical_duplicate": "Graphical Name Duplicate", "graphical_duplicate_count": "Graphical Duplicate Count",
+    "graphical_duplicate_frame_indexes": "Graphical Duplicate RMU Indexes",
     "rmu_type": "RMU Type", "rmu_type_source": "Type Source", "rmu_type_text": "Graphical Text Type",
     "rmu_type_devref": "devref Type", "rmu_type_consistent": "Type Cross-check", "rmu_type_check_status": "Type Check Status",
     "rmu_type_check_reason": "Type Cross-check Details", "rmu_is_smart": "Smart Type", "rmu_smart_marker_types": "Smart Markers",
@@ -731,6 +738,11 @@ def flatten_rmu_rows(reports):
                 "frame_index": rmu.get("frame_index", ""),
                 "frame_xml_id": rmu.get("frame_xml_id", ""),
                 "rmu_name": rmu.get("rmu_name", ""),
+                "graphical_duplicate": rmu.get("graphical_duplicate", "NO"),
+                "graphical_duplicate_count": rmu.get("graphical_duplicate_count", 0),
+                "graphical_duplicate_frame_indexes": rmu.get(
+                    "graphical_duplicate_frame_indexes", ""
+                ),
                 "rmu_type": rmu.get("rmu_type", "UNKNOWN"),
                 "rmu_type_source": rmu.get("rmu_type_source", ""),
                 "rmu_type_text": rmu.get("rmu_type_text", ""),
@@ -1466,6 +1478,100 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"
             "Device details include only device objects that actually exist in the G file."
         )
 
+    # Keep the RMU report action-oriented: show the drawing feeder source and
+    # graphical duplicate names before the detailed rules and tables.
+    source_rows = [
+        row for row in rmu_rows
+        if str(row.get("diagram_feeder_source", "NO")).upper() == "YES"
+    ]
+    duplicate_groups = {}
+    for row in rmu_rows:
+        if str(row.get("graphical_duplicate", "NO")).upper() != "YES":
+            continue
+        key = (str(row.get("file_name", "")), str(row.get("rmu_name", "")))
+        duplicate_groups.setdefault(key, []).append(row)
+
+    if english:
+        if source_rows:
+            source_body = "".join(
+                "<tr>"
+                f"<td>{esc(row.get('file_name', ''))}</td>"
+                f"<td>{esc(row.get('rmu_name', ''))}</td>"
+                f"<td>{esc(row.get('frame_index', ''))}</td>"
+                f"<td>{esc(row.get('frame_xml_id', ''))}</td>"
+                f"<td>{esc(row.get('rmu_id', ''))}</td>"
+                f"<td>{esc(row.get('diagram_feeder_id', '') or row.get('rmu_feeder_id', ''))}</td>"
+                "</tr>"
+                for row in source_rows
+            )
+            source_focus = (
+                "<table class='focus-table'><thead><tr>"
+                "<th>G File</th><th>Source RMU</th><th>Index</th>"
+                "<th>Frame XML ID</th><th>RMU ID</th><th>FEEDER_ID</th>"
+                f"</tr></thead><tbody>{source_body}</tbody></table>"
+            )
+        else:
+            source_focus = "<div class='focus-alert'>No unique RMU feeder source was found.</div>"
+        if duplicate_groups:
+            duplicate_body = "".join(
+                "<tr>"
+                f"<td>{esc(file_name)}</td><td>{esc(name)}</td>"
+                f"<td>{esc(len(rows))}</td>"
+                f"<td>{esc(', '.join(str(row.get('frame_index', '')) for row in rows))}</td>"
+                "</tr>"
+                for (file_name, name), rows in duplicate_groups.items()
+            )
+            duplicate_focus = (
+                "<table class='focus-table focus-alert-table'><thead><tr>"
+                "<th>G File</th><th>Duplicate RMU Name</th><th>Count</th><th>RMU Indexes</th>"
+                f"</tr></thead><tbody>{duplicate_body}</tbody></table>"
+            )
+        else:
+            duplicate_focus = "<div class='focus-ok'>No graphical RMU name duplicates were found.</div>"
+        focus_title = "Key Findings"
+        source_title = "Drawing feeder source RMU"
+        duplicate_title = "Graphical duplicate RMU names"
+    else:
+        if source_rows:
+            source_body = "".join(
+                "<tr>"
+                f"<td>{esc(row.get('file_name', ''))}</td>"
+                f"<td>{esc(row.get('rmu_name', ''))}</td>"
+                f"<td>{esc(row.get('frame_index', ''))}</td>"
+                f"<td>{esc(row.get('frame_xml_id', ''))}</td>"
+                f"<td>{esc(row.get('rmu_id', ''))}</td>"
+                f"<td>{esc(row.get('diagram_feeder_id', '') or row.get('rmu_feeder_id', ''))}</td>"
+                "</tr>"
+                for row in source_rows
+            )
+            source_focus = (
+                "<table class='focus-table'><thead><tr>"
+                "<th>G文件</th><th>来源环网柜</th><th>序号</th>"
+                "<th>矩形框XML ID</th><th>环网柜ID</th><th>FEEDER_ID</th>"
+                f"</tr></thead><tbody>{source_body}</tbody></table>"
+            )
+        else:
+            source_focus = "<div class='focus-alert'>本图没有找到可唯一确定馈线的环网柜。</div>"
+        if duplicate_groups:
+            duplicate_body = "".join(
+                "<tr>"
+                f"<td>{esc(file_name)}</td><td>{esc(name)}</td>"
+                f"<td>{esc(len(rows))}</td>"
+                f"<td>{esc('、'.join(str(row.get('frame_index', '')) for row in rows))}</td>"
+                "</tr>"
+                for (file_name, name), rows in duplicate_groups.items()
+            )
+            duplicate_focus = (
+                "<table class='focus-table focus-alert-table'><thead><tr>"
+                "<th>G文件</th><th>重复环网柜名称</th><th>数量</th><th>环网柜序号</th>"
+                f"</tr></thead><tbody>{duplicate_body}</tbody></table>"
+            )
+        else:
+            duplicate_focus = "<div class='focus-ok'>未发现图形上重复的环网柜名称。</div>"
+        focus_title = "重点结论"
+        source_title = "本图馈线推断来源环网柜"
+        duplicate_title = "图形上重复的环网柜名称"
+
     source_note = (
         "字段来源说明：矩形框 XML ID、图元 XML ID、当前 G 文件 KeyID 来自 G 文件；"
         "环网柜 ID、设备 ID、CODE、NAME、BV_ID、所属环网柜 ID 来自数据库；"
@@ -1549,6 +1655,16 @@ thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}
 .status-item span{{line-height:1.55}}
 .meta{{color:#D7EEE5}}
 .source-note{{background:#F0F8F5;border:1px solid var(--border);border-radius:6px;padding:10px 12px;line-height:1.6;margin-top:10px}}
+.focus-card{{border:2px solid #00A878;background:#FFFFFF}}
+.focus-card h2{{margin-top:0;color:var(--green-dark)}}
+.focus-section{{margin-top:14px}}
+.focus-section h3{{margin:0 0 7px 0;font-size:14px;color:var(--green-dark)}}
+.focus-table{{width:100%;font-size:12px;border-collapse:collapse}}
+.focus-table th{{background:#0B715A}}
+.focus-table td,.focus-table th{{border:1px solid var(--border);padding:6px 8px;white-space:nowrap}}
+.focus-alert-table th{{background:#A45A00}}
+.focus-alert{{background:#FFF1D6;border:1px solid #E6B86A;border-radius:6px;padding:9px 11px;line-height:1.5}}
+.focus-ok{{background:#EAF8F2;border:1px solid #A9D8C4;border-radius:6px;padding:9px 11px}}
 </style>
 </head>
 <body>
@@ -1557,6 +1673,12 @@ thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}
   <div class="meta">{("Software: " + esc(APP_NAME_EN) + "  Version: " + esc(APP_VERSION) + "  Exported: " + esc(now)) if english else ("软件：" + esc(APP_NAME) + "　版本：" + esc(APP_VERSION) + "　导出时间：" + esc(now))}</div>
 </header>
 <main>
+  <div class="card focus-card">
+    <h2>{esc(focus_title)}</h2>
+    <div class="focus-section"><h3>{esc(source_title)}</h3>{source_focus}</div>
+    <div class="focus-section"><h3>{esc(duplicate_title)}</h3>{duplicate_focus}</div>
+  </div>
+
   <div class="card">
     <h2>{("Device Model Association Rules" if english else "设备模型关联规则")}</h2>
     <div class="source-note">{esc(source_note)}</div>
