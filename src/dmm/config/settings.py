@@ -3,7 +3,11 @@ from __future__ import annotations
 import copy
 import json
 
-from dmm.config.defaults import DEFAULT_SETTINGS
+from dmm.config.defaults import (
+    DEFAULT_NAME_POSITIONS,
+    DEFAULT_RMU_NAME_POSITIONS,
+    DEFAULT_SETTINGS,
+)
 from dmm.infrastructure.filesystem.workspace import CONFIG_PATH, ensure_workspace
 
 
@@ -25,8 +29,18 @@ def load_settings() -> dict:
             settings["ssh"].update(value)
         elif key == "rmu_name_positions" and isinstance(value, dict):
             settings["rmu_name_positions"].update(value)
+        elif key == "feeder_rmu_name_positions" and isinstance(value, dict):
+            settings["feeder_rmu_name_positions"].update(value)
         else:
             settings[key] = value
+
+    # Migrate the previous Jeddah/top-only default to the Makkah/right-side
+    # default once. An explicit custom RMU direction is preserved.
+    if (
+        not bool(settings.get("rmu_name_positions_custom", False))
+        and settings.get("rmu_name_positions") == DEFAULT_NAME_POSITIONS
+    ):
+        settings["rmu_name_positions"] = dict(DEFAULT_RMU_NAME_POSITIONS)
 
     # The project has a fixed default Oracle password.
     # If an older workspace config saved an empty password, fall back to default.

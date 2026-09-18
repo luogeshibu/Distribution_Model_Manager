@@ -1474,13 +1474,10 @@ class MainWindow(QMainWindow):
                 <h2>Feeder Model Help</h2>
                 <h3>1. Feeder Resolution</h3>
                 <ol>
-                  <li><b>G root facID</b>: when FACID is selected, query 13500 / dms_feeder_device exactly by the current root ID.</li>
-                  <li><b>File name</b>: supports both one file and batch folders. Each file independently resolves substation + feeder token; for example JED-NTH-ABH-03 resolves 03 within ABH (such as AH303), while JED-NTH-ABH-AH303 uses AH303 directly.</li>
-                  <li><b>Manual input</b>: the entered feeder name must uniquely match 13500 / dms_feeder_device.</li>
-                  <li><b>The three sources are independent:</b> an existing root facID is current-state evidence only and does not override File Name or Manual mode.</li>
-                  <li>If the selected target differs from the existing facID / FeedLine feeder ownership, explicit override must be enabled before any safe-copy overwrite/relink candidate is generated.</li>
-                  <li>RMU data and reverse FEEDER_ID inference are not used to determine the feeder.</li>
-                  <li>If the feeder cannot be uniquely resolved, processing is blocked; no feeder section is created and no FeedLine association is performed.</li>
+                  <li>Run the feeder model after RMU, pole-switch, and pole-transformer models have been associated.</li>
+                  <li>For each FeedLine, find the nearest RMU or switch-like device by geometry and use the FEEDER_ID from its existing model link.</li>
+                  <li>If the nearest device has no model, its model cannot resolve to a feeder, or it belongs to another feeder, the FeedLine is blocked with a warning.</li>
+                  <li>No feeder name, substation name, file-name token, or G-root facID needs to be entered by the user.</li>
                 </ol>
                 <h3>2. Database Query / Create Boundary</h3>
                 <ul>
@@ -1493,7 +1490,7 @@ class MainWindow(QMainWindow):
                 </ul>
                 <h3>3. FeedLine Allocation and Association</h3>
                 <ul>
-                  <li>Correct existing FeedLine associations are preserved. Unlinked/stale FeedLines use currently unused database sections in deterministic order; only the true shortage is created.</li>
+                  <li>Correct existing FeedLine associations are preserved. Unlinked/stale FeedLines use currently unused database sections in deterministic order; only the true shortage is created. Multiple-feeder ring diagrams use the same rule by feeder region.</li>
                   <li>ls=2 → SECTION_TYPE=0; ls=1 → SECTION_TYPE=1; missing/empty ls → SECTION_TYPE=3.</li>
                   <li>After creation, 13503 is queried again and the final database ID / BV_ID is used to calculate Expected KeyID.</li>
                   <li>The existing LINK / RELINK and duplicate-association rules then continue normally.</li>
@@ -1662,13 +1659,10 @@ class MainWindow(QMainWindow):
 
             <h3>1. 馈线确定方式</h3>
             <ol>
-              <li><b>G 根节点 facID</b>：选择 FACID 模式时，按当前根 facID 精确查询 13500 / dms_feeder_device。</li>
-              <li><b>文件名</b>：同时支持单文件和批量目录。每个文件独立解析变电站 + 馈线号；例如 JED-NTH-ABH-03 在 ABH 站内解析 03（如 AH303），JED-NTH-ABH-AH303 则直接使用 AH303。</li>
-              <li><b>人工输入</b>：用户输入馈线名称后，必须唯一匹配到 13500 / dms_feeder_device。</li>
-              <li><b>三种来源相互独立：</b>已有 G 根 facID 只表示当前关联，不再强制覆盖文件名/人工输入选择。</li>
-              <li>若本次目标与已有 facID / FeedLine 馈线归属不同，必须显式勾选“允许覆盖现有 facID 和馈线段关联”才生成安全副本覆盖/重关联候选。</li>
-              <li><b>不再使用 RMU、环网柜、连接拓扑或 FEEDER_ID 反向推断馈线。</b></li>
-              <li>三种方式最终都无法唯一确认时，整张 G 图直接报错并阻断，不创建馈线段，也不执行 FeedLine 关联。</li>
+              <li>馈线模型必须在环网柜、柱上开关、柱上变压器模型完成关联后使用。</li>
+              <li>每条 FeedLine 按几何距离寻找最近的环网柜或开关等设备，并使用该设备已关联模型所属的 FEEDER_ID。</li>
+              <li>最近设备没有模型、模型无法反查馈线，或附近设备属于不同馈线时，直接告警并阻断该馈线段。</li>
+              <li>不再要求用户填写馈线名、变电站名或选择馈线识别方式；不会用文件名或 G 根 facID 猜测馈线段归属。</li>
             </ol>
 
             <h3>2. 数据库查询与创建边界</h3>
@@ -1711,8 +1705,8 @@ class MainWindow(QMainWindow):
           <li>如果文字类型与 devref 类型不一致，报告中显示“类型交叉校验=NO”，最终“环网柜类型”采用 devref 类型；该差异本身不改变 RMU 数据库关联资格。</li>
           <li><b>智能环网柜识别：</b>在整张 G 图全局寻找 Text 中精确的 SMART 和 SMR，并把每个标识唯一归属给距离最近的 RMU。SMART 通常在柜内、SMR 可以在柜外，因此不设置最大距离限制。</li>
           <li>一个 RMU 只要命中 SMART 或 SMR 任意一种，报告“是否智能”列显示 <b>SMART</b>；未命中则显示 <b>NORMAL</b>。若两种标识都归属于同一个柜，“智能标识”仍记录 <b>SMART, SMR</b>。</li>
-           <li>环网柜名称默认搜索矩形框上方，也可以多选右侧、左侧或下方；多选时按距离只保留最近的一个 Text。</li>
-           <li>每个 RMU 只保留一个名称；同一 Text 全局只归属距离最近的一个环网柜，避免名称重复使用。</li>
+           <li>麦加现场环网柜名称默认搜索矩形框右侧，也可以多选其它方向；多选时按距离只保留最近的一个 Text。</li>
+           <li>每个 RMU 只保留一个名称；数据库中必须唯一匹配一条同名环网柜记录；同一 Text 全局只归属距离最近的一个环网柜，避免名称重复使用。</li>
           <li>名称始终按照字符串处理，支持数字、字母、横线、下划线等常见工程名称。</li>
         </ul>
 
@@ -2315,8 +2309,8 @@ class MainWindow(QMainWindow):
         rmu_naming_text = QLabel(
             "• 环网柜只有在矩形框内同时存在 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元时才识别为 RMU。\n"
             "• RMU 柜型：柜内 Y*/Q* 文字与 CBreakerDis.devref 模板结构独立计算并交叉验证；devref 不解析任何现场图元关键字，只检查 Y 类同模板、Q 类同模板且 Y/Q 模板可区分。有效 devref 与文字冲突时仍以 devref 为准，同时 WARN。\n"
-             "• 环网柜名称默认搜索矩形框上方，也可以多选右侧、左侧或下方；多选时按距离只保留最近的一个 Text。\n"
-             "• 每个 RMU 只保留一个名称；每个 Text 全局只分配给距离最近的一个环网柜。\n"
+             "• 麦加现场环网柜名称默认搜索矩形框右侧，也可以多选其它方向；多选时按距离只保留最近的一个 Text。\n"
+             "• 每个 RMU 只保留一个名称；数据库中必须唯一匹配一条同名环网柜记录；每个 Text 全局只分配给距离最近的一个环网柜。\n"
             "• 绿色依据 G 文件属性判断：lc=0,255,0 或 lcc=#00ff00；实际名称读取 Text 的 ts 属性。\n"
             "• 环网柜名称始终按字符串处理，支持 42646、RMU-42646、ABC_123、JED-RMU-01、ABC.01 等常见工程名称，不会强制转换成数字。"
         )
@@ -2408,9 +2402,9 @@ class MainWindow(QMainWindow):
         feeder_help = QGroupBox("馈线模型规则")
         feeder_help_layout = QVBoxLayout(feeder_help)
         feeder_help_text = QLabel(
-            "• 当前版本仅处理单馈线 G 图，不处理一个文件内多馈线总图。\n"
-            "• 馈线名称优先从 <Bus> 周围最近的有效 Text 获取，例如 AJWD-07；若找不到，再从文件名提取。\n"
-            "• 数据库可读馈线名称由站名 + dms_feeder_device.NAME 组合；名称匹配忽略横线、下划线和空格：AJWD-07 → AJWD07；JED CTL AJWD + 07 → JEDCTLAJWD07。\n"
+            "• 支持单馈线 G 图和一个文件内的多馈线环网图；多馈线按连接区域及最近设备分别处理。\n"
+            "• 馈线模型必须后置执行：先完成环网柜、柱上开关、柱上变压器模型关联。\n"
+            "• 每条 FeedLine 按几何距离取最近的已关联设备；最近设备无模型时提示“未关联附近设备模型，馈线段无法创建模型或者关联模型”。\n"
             "• 馈线主表：13500 / dms_feeder_device；馈线段表：13503 / dms_section_device；默认域号：1。\n"
             "• G 馈线段图元为 <FeedLine>。已有关联时，当前 KeyID 必须反解到 13503 / Domain 1 且数据库记录属于当前馈线。\n"
             "• 已关联 FeedLine：13503、Domain、FEEDER_ID 均正确即保持原关联，不按几何顺序重排 SEC。\n• 未关联/失效关联 FeedLine：已正确关联的数据库馈线段先视为占用；其余数据库馈线段按自然顺序分配，真实数量不足时才新建缺少数量。\n"
@@ -3689,6 +3683,8 @@ class MainWindow(QMainWindow):
 
             for key in (
                 "rmu_name_positions",
+                "rmu_name_positions_custom",
+                "feeder_rmu_name_positions",
                 "rmu_name_detection_mode",
                 "rmu_name_exclusions",
                 "device_rules",
@@ -4899,8 +4895,7 @@ class MainWindow(QMainWindow):
                     f"{db_write_notice}\n"
                     "The program will recheck current feeder-section occupancy in the database. If the database has insufficient sections and completion is enabled, "
                     "the missing sections will be created first, the database will be queried again, and Expected KeyID will then be recalculated.\n"
-                    "FeedLine write-back is limited to app, p_ReportType, state, voltype, and keyid. FACID, file-name, and manual feeder sources are independent. "
-                    "When file-name/manual mode resolves a target different from the current root facID, the root facID and cross-feeder FeedLine associations are changed only if the explicit override option is enabled.\n\n"
+                    "FeedLine write-back is limited to app, p_ReportType, state, voltype, and keyid. Feeder identity comes from the nearest associated device model; FACID, file name, and manual feeder-name inputs are not used.\n\n"
                     "Original G files and SSH server files will not be modified; only the Workspace/g_output safe copy is changed.\n\n"
                     "Proceed with model association?"
                 )
@@ -4921,8 +4916,7 @@ class MainWindow(QMainWindow):
                     f"{db_write_notice}\n"
                     "程序会重新确认当前数据库馈线段占用情况；如数据库数量不足且启用了补齐，"
                     "会先创建缺失馈线段并重新查询数据库，再计算 Expected KeyID。\n"
-                    "FeedLine 只回写 app、p_ReportType、state、voltype、keyid 这 5 个属性；FACID、文件名、人工输入三种馈线来源相互独立。"
-                    "当文件名/人工输入解析出的目标与当前根 facID 不同时，只有明确启用“允许覆盖现有 facID 和馈线段关联”后，才会覆盖根 facID 并重新关联跨馈线 FeedLine。\n\n"
+                    "FeedLine 只回写 app、p_ReportType、state、voltype、keyid 这 5 个属性；馈线归属以最近已关联设备模型为准，不使用文件名、人工输入或 G 根 facID 猜测。\n\n"
                     "原始 G 文件和 SSH 服务器文件都不会被修改，"
                     "只修改 Workspace/g_output 安全副本。\n\n"
                     "是否确认执行？"

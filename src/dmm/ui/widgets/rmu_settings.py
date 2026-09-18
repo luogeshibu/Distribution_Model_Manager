@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 
 from dmm.config.defaults import (
     DEFAULT_DEVICE_RULES,
-    DEFAULT_NAME_POSITIONS,
+    DEFAULT_RMU_NAME_POSITIONS,
     DEFAULT_RMU_NAME_DETECTION_MODE,
     DEFAULT_RMU_NAME_EXCLUSIONS,
 )
@@ -94,7 +94,7 @@ class RmuSettingsWidget(QWidget):
 
         info = QLabel(
             "RMU 环网柜只有在矩形框内同时包含 CBreakerDis、BusDis、ZhaiWaiJieDiDaoZha 时才识别。"
-            "开关设备名称固定使用环网柜内图上文字；麦加现场默认读取图框上方名称。"
+            "开关设备名称固定使用环网柜内图上文字；麦加现场默认读取图框右侧名称。"
             "允许多选名称方向，多选时只保留所选方向中距离最近的一个 Text。"
             "设备命名规则固定使用图上文字，不再读取三类设备 XML 的 p_NameString："
             "CBreakerDis 使用图上名称，接地刀闸使用开关名+D，BusDis 固定使用 BUS。"
@@ -137,12 +137,12 @@ class RmuSettingsWidget(QWidget):
 
         labels = {"top": "上方", "right": "右侧", "left": "左侧", "bottom": "下方"}
         self.pos_checks = {}
-        saved_pos = config.get("rmu_name_positions", DEFAULT_NAME_POSITIONS)
+        saved_pos = config.get("rmu_name_positions", DEFAULT_RMU_NAME_POSITIONS)
         if not any(bool(saved_pos.get(pos, False)) for pos in labels):
-            saved_pos = DEFAULT_NAME_POSITIONS
+            saved_pos = DEFAULT_RMU_NAME_POSITIONS
         for idx, pos in enumerate(("top", "right", "left", "bottom")):
             cb = QCheckBox(labels[pos])
-            cb.setChecked(bool(saved_pos.get(pos, DEFAULT_NAME_POSITIONS.get(pos, False))))
+            cb.setChecked(bool(saved_pos.get(pos, DEFAULT_RMU_NAME_POSITIONS.get(pos, False))))
             rg.addWidget(cb, 1 + idx // 2, idx % 2)
             self.pos_checks[pos] = cb
 
@@ -167,11 +167,13 @@ class RmuSettingsWidget(QWidget):
         rg.addWidget(fixed_source, 5, 1)
 
         note = QLabel(
-            "默认勾选上方；允许同时勾选多个方向。多选时程序只保留所选方向中距离最近的一个 Text，"
+            "麦加现场默认勾选右侧；允许同时勾选多个方向。多选时程序只保留所选方向中距离最近的一个 Text，"
             "开关名称不再读取 XML p_NameString。CBreakerDis 仅使用环网柜内"
             "图上文字；接地刀闸逻辑名称=配对开关名+D；BusDis 固定为 BUS。"
             "NariPd_Normal.pwbh.icn.g 仍按固定 CODE=EFI INDICATOR 关联，但其表号和域号也可在右侧直接调整。"
             "图上名称无法唯一识别，或与数据库 CODE 校验失败时，会明确告警对应环网柜。"
+            "每个环网柜只使用一个名称；数据库中必须存在且只能存在一条同名环网柜记录，"
+            "否则禁止自动关联。以上规则仅适用于环网柜，不改变馈线识别逻辑。"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#60756d;")
@@ -259,7 +261,7 @@ class RmuSettingsWidget(QWidget):
             self.domain_spins[tag].setValue(int(rule["domain"]))
         self.relay_table_spin.setValue(RMU_RELAY_SIGNAL_TABLE_ID)
         self.relay_domain_spin.setValue(RMU_RELAY_SIGNAL_DOMAIN)
-        for pos, value in DEFAULT_NAME_POSITIONS.items():
+        for pos, value in DEFAULT_RMU_NAME_POSITIONS.items():
             self.pos_checks[pos].setChecked(bool(value))
         default_index = self.name_detection_mode.findData(
             DEFAULT_RMU_NAME_DETECTION_MODE
@@ -329,6 +331,7 @@ class RmuSettingsWidget(QWidget):
 
         return {
             "rmu_name_positions": positions,
+            "rmu_name_positions_custom": positions != DEFAULT_RMU_NAME_POSITIONS,
             "rmu_name_detection_mode": detection_mode,
             "rmu_name_exclusions": exclusion_values,
             "breaker_name_source": "GRAPHICAL_TEXT",

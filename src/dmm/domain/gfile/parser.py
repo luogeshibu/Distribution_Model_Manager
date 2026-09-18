@@ -158,6 +158,7 @@ class GParser:
         max_distance: float = 120.0,
         overlap_tolerance: float = 20.0,
         excluded_rmu_name_strings: Iterable[str] | str | None = None,
+        exclude_numeric_decimal_rmu_names: bool = False,
     ):
         self.required_rmu_tags = set(required_rmu_tags or {
             "CBreakerDis", "ZhaiWaiJieDiDaoZha", "BusDis"
@@ -174,6 +175,12 @@ class GParser:
         }
         self.max_distance = float(max_distance)
         self.overlap_tolerance = float(overlap_tolerance)
+        # Coordinate-like labels such as ``21.384938`` are present beside
+        # Makkah RMU symbols.  This filter is opt-in so feeder and other
+        # parser users keep their existing lexical rules.
+        self.exclude_numeric_decimal_rmu_names = bool(
+            exclude_numeric_decimal_rmu_names
+        )
 
     def parse(self, path: str | Path) -> ParsedG:
         path = Path(path)
@@ -662,6 +669,12 @@ class GParser:
         # explicitly even when punctuation would already make them invalid.
         exclusion_key = re.sub(r"\s+", " ", value.strip()).casefold()
         if exclusion_key in self.excluded_rmu_name_strings:
+            return False
+
+        if (
+            self.exclude_numeric_decimal_rmu_names
+            and re.fullmatch(r"\d+(?:\.\d+)+", value.strip())
+        ):
             return False
 
         if not self.label_re.fullmatch(value):

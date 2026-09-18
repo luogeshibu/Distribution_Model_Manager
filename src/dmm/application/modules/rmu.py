@@ -17,7 +17,7 @@ from dmm.config.constants import (
 )
 from dmm.config.defaults import (
     DEFAULT_DEVICE_RULES,
-    DEFAULT_NAME_POSITIONS,
+    DEFAULT_RMU_NAME_POSITIONS,
     DEFAULT_RMU_NAME_DETECTION_MODE,
     DEFAULT_RMU_NAME_EXCLUSIONS,
     resolve_rmu_name_positions,
@@ -77,6 +77,7 @@ class RmuModelModule(ModelModule):
             excluded_rmu_name_strings=settings.get(
                 "rmu_name_exclusions", DEFAULT_RMU_NAME_EXCLUSIONS
             ),
+            exclude_numeric_decimal_rmu_names=True,
         )
         return RmuValidator(
             db,
@@ -92,10 +93,10 @@ class RmuModelModule(ModelModule):
                 "rmu_name_detection_mode",
                 DEFAULT_RMU_NAME_DETECTION_MODE,
             ),
-            settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS),
+            settings.get("rmu_name_positions", DEFAULT_RMU_NAME_POSITIONS),
         )
         if not positions:
-            raise ValueError("至少选择一个环网柜名称方向（默认是上方）。")
+            raise ValueError("至少选择一个环网柜名称方向（麦加默认是右侧）。")
         validator = self._new_validator(db, settings, log_callback)
         reports = []
         aggregate = {
@@ -259,7 +260,7 @@ class RmuModelModule(ModelModule):
                     or DEFAULT_RMU_NAME_DETECTION_MODE
                 ).upper(),
                 "rmu_name_positions": dict(
-                    settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS)
+                    settings.get("rmu_name_positions", DEFAULT_RMU_NAME_POSITIONS)
                 ),
                 "breaker_name_source": "GRAPHICAL_TEXT",
                 "device_rules": dict(settings.get("device_rules", {})),
@@ -304,7 +305,7 @@ class RmuModelModule(ModelModule):
                 or DEFAULT_RMU_NAME_DETECTION_MODE
             ).upper(),
             "rmu_name_positions": dict(
-                settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS)
+                settings.get("rmu_name_positions", DEFAULT_RMU_NAME_POSITIONS)
             ),
             "breaker_name_source": "GRAPHICAL_TEXT",
             "device_rules": dict(settings.get("device_rules", {})),

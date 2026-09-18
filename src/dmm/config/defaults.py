@@ -63,23 +63,32 @@ DEFAULT_NAME_POSITIONS = {
     "bottom": False,
 }
 
-# RMU name direction remains configurable.  The Makkah default is top, while
-# operators may enable multiple sides when a drawing family requires it.
+# Feeder topology keeps the existing top-side reference behavior. RMU uses a
+# separate site-specific default so this setting does not affect feeders.
+DEFAULT_RMU_NAME_POSITIONS = {
+    "top": False,
+    "right": True,
+    "left": False,
+    "bottom": False,
+}
+
+# RMU name direction remains configurable. Makkah drawings default to the
+# right-side label, while operators may enable multiple sides when needed.
 RMU_NAME_DIRECTIONS = ("top", "right", "left", "bottom")
 DEFAULT_RMU_NAME_DETECTION_MODE = "FIXED"
 
 
 def resolve_rmu_name_positions(mode="FIXED", configured_positions=None):
     """Return the configured RMU name directions in stable UI order."""
-    configured_positions = configured_positions or DEFAULT_NAME_POSITIONS
+    configured_positions = configured_positions or DEFAULT_RMU_NAME_POSITIONS
     selected = [
         position
         for position in RMU_NAME_DIRECTIONS
         if bool(configured_positions.get(position, False))
     ]
-    # Older Makkah workspace files may contain the previous all-false value;
-    # migrate that state to the current default instead of disabling naming.
-    return selected or ["top"]
+    # Older workspace files may contain an all-false value; migrate that state
+    # to the Makkah default instead of disabling RMU naming.
+    return selected or ["right"]
 
 DEFAULT_RMU_NAME_EXCLUSIONS = [
     "N.O.P",
@@ -121,7 +130,9 @@ DEFAULT_SETTINGS = {
     "last_folder_path": "",
     "last_run_dir": "",
     "db": DEFAULT_DB_CONFIG,
-    "rmu_name_positions": DEFAULT_NAME_POSITIONS,
+    "rmu_name_positions": DEFAULT_RMU_NAME_POSITIONS,
+    "rmu_name_positions_custom": False,
+    "feeder_rmu_name_positions": DEFAULT_NAME_POSITIONS,
     "rmu_name_detection_mode": DEFAULT_RMU_NAME_DETECTION_MODE,
     "rmu_name_exclusions": DEFAULT_RMU_NAME_EXCLUSIONS,
     "device_rules": {},

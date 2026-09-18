@@ -23,8 +23,8 @@ class FeederModelModule(ModelModule):
     display_name = "馈线模型"
     description = (
         "馈线模型校验、数据库缺失馈线段补齐及安全回写。"
-        "FACID、文件名、人工输入三种馈线来源相互独立；单文件与批量目录使用同一解析规则。"
-        "组合大图忽略根 facID，按单馈线 XML 指纹和连接拓扑审计 FeedLine 的 FEEDER_ID 一致性。"
+        "必须先完成环网柜、柱上开关或柱上变压器模型关联；"
+        "每条 FeedLine 按距离取最近的已关联设备作为馈线依据，组合大图按拓扑审计。"
     )
     SUPPORTED_OPERATIONS = (
         "VALIDATE",
@@ -39,7 +39,7 @@ class FeederModelModule(ModelModule):
                 "rmu_name_detection_mode",
                 DEFAULT_RMU_NAME_DETECTION_MODE,
             ),
-            settings.get("rmu_name_positions", DEFAULT_NAME_POSITIONS),
+            settings.get("feeder_rmu_name_positions", DEFAULT_NAME_POSITIONS),
         )
         return FeederValidator(
             db=db,
@@ -178,24 +178,27 @@ class FeederModelModule(ModelModule):
         return str(parsed.root.attrib.get("facID", "") or "").strip()
 
     def _build_single_file_fingerprint(self, db, g_file, profile, settings, log_callback):
-        """Create a trusted fingerprint from a resolved SINGLE_FEEDER drawing.
-
-        v4.1.38 uses the same selected feeder source for single-file and batch
-        processing.  FACID, FILENAME, and MANUAL therefore all work in a
-        directory; each file is resolved independently before its FeedLine XML
-        fingerprint is accepted.
-        """
-        feeder, error = self._resolve_file_feeder_result(
-            db, g_file, settings, log_callback
+        """Create a trusted fingerprint from nearest associated equipment."""
+        validator = self._validator(db, settings, log_callback)
+        automatic = validator.validate_file(
+            g_file,
+            drawing_mode=str(
+                settings.get("feeder_drawing_mode", "AUTO") or "AUTO"
+            ).upper(),
         )
-        if not feeder:
+        feeder_ids = sorted({
+            int_or_none(report.get("feeder_id"))
+            for report in automatic.get("feeder_regions", []) or []
+            if int_or_none(report.get("feeder_id")) is not None
+        })
+        if len(feeder_ids) != 1:
             log_callback(
-                f"[{Path(g_file).name}] 单馈线指纹跳过：{error or 'FEEDER_NOT_RESOLVED'}"
+                f"[{Path(g_file).name}] 单馈线指纹跳过："
+                "最近已关联设备未能唯一确定馈线"
             )
             return None
-        feeder_id = int_or_none(feeder.get("id"))
-        if feeder_id is None:
-            return None
+        feeder_id = feeder_ids[0]
+        feeder = db.get_feeder_info(feeder_id) or {}
         parsed = profile["parsed"]
         ids = {
             str(obj.xml_id)
@@ -211,7 +214,7 @@ class FeederModelModule(ModelModule):
             "feeder_name": str(feeder.get("display_name") or feeder.get("name") or feeder_id),
             "feedline_ids": ids,
             "feedline_count": len(ids),
-            "resolution_source": str(feeder.get("_resolution_source") or ""),
+            "resolution_source": "NEAREST_ASSOCIATED_DEVICE",
         }
 
     def _audit_current_feedline_owner(self, db, obj, settings, owner_cache):
@@ -1408,19 +1411,15 @@ class FeederModelModule(ModelModule):
             )
 
             if drawing_type == "MULTI_FEEDER_COMPOSITE":
-                region_reports = self._build_composite_regions(
-                    db, g_file, profile, fingerprints, settings, validator, log_callback
+                # Makkah ring diagrams contain multiple feeders in one G file.
+                # They use the same nearest-associated-device path as a single
+                # drawing; each validated region keeps its own feeder ID, while
+                # the validator coalesces disconnected fragments of one feeder
+                # before section allocation.
+                file_report = validator.validate_file(
+                    g_file,
+                    drawing_mode="MULTI",
                 )
-                file_report = {
-                    "drawing_type": drawing_type,
-                    "feeder_regions": region_reports,
-                    "status": (
-                        "FAIL" if any(r.get("status") == "FAIL" for r in region_reports)
-                        else "WARN" if any(r.get("status") == "WARN" for r in region_reports)
-                        else "PASS"
-                    ),
-                }
-                # Composite drawings are audit-only: never create 13503 rows here.
             elif drawing_type == "AMBIGUOUS":
                 file_report = self._unresolved_file_report(
                     g_file,
@@ -1429,45 +1428,18 @@ class FeederModelModule(ModelModule):
                 file_report["drawing_type"] = "AMBIGUOUS"
                 region_reports = file_report.get("feeder_regions") or [file_report]
             else:
-                # Single-file and batch/directory processing intentionally share
-                # exactly the same resolver.  In FILENAME mode every file parses
-                # its own station/token; FACID and MANUAL likewise respect the
-                # operator's explicit source selection.
-                feeder_record, feeder_error = self._resolve_file_feeder_result(
-                    db, g_file, settings, log_callback
+                # Feeder identity is now derived only from the nearest already
+                # associated RMU/switch/transformer model.  The old FACID,
+                # filename and manual feeder-name inputs are intentionally not
+                # consulted here.
+                file_report = validator.validate_file(
+                    g_file,
+                    drawing_mode=str(
+                        settings.get("feeder_drawing_mode", "AUTO")
+                        or "AUTO"
+                    ).upper(),
                 )
-                if feeder_record:
-                    resolution_source = str(
-                        feeder_record.get("_resolution_source")
-                        or "FACID"
-                    )
-                    resolution_evidence = str(
-                        feeder_record.get("_resolution_evidence")
-                        or ""
-                    )
-                    file_report = validator.validate_file_with_feeder_record(
-                        g_file,
-                        feeder_record,
-                        source=resolution_source,
-                    )
-                    # Feeder reports are now explicitly based only on
-                    # facID / filename / manual input. Keep those facts directly
-                    # on each feeder report so HTML/CSV never need RMU context.
-                    for _report in file_report.get("feeder_regions", []) or []:
-                        _report["feeder_resolution_source"] = resolution_source
-                        _report["feeder_resolution_evidence"] = resolution_evidence
-                        _report["station_name"] = feeder_record.get(
-                            "station_name", ""
-                        )
-                        _report["station_bv_id"] = feeder_record.get(
-                            "station_bv_id", ""
-                        )
-                else:
-                    file_report = self._unresolved_file_report(
-                        g_file,
-                        feeder_error or "FEEDER_NOT_RESOLVED",
-                    )
-            if drawing_type not in {"MULTI_FEEDER_COMPOSITE", "AMBIGUOUS"}:
+            if drawing_type != "AMBIGUOUS":
                 region_reports = file_report.get("feeder_regions") or [file_report]
                 enriched_reports=[]
                 for report in region_reports:
@@ -1767,7 +1739,7 @@ class FeederModelModule(ModelModule):
                     or DEFAULT_RMU_NAME_DETECTION_MODE
                 ).upper(),
                 "rmu_name_positions": dict(
-                    settings.get("rmu_name_positions", {})
+                    settings.get("feeder_rmu_name_positions", {})
                 ),
                 "feeder_table_id": int(
                     settings.get("feeder_table_id", 13500)
@@ -1830,7 +1802,7 @@ class FeederModelModule(ModelModule):
                 or DEFAULT_RMU_NAME_DETECTION_MODE
             ).upper(),
             "rmu_name_positions": dict(
-                settings.get("rmu_name_positions", {})
+                settings.get("feeder_rmu_name_positions", {})
             ),
             "feeder_table_id": int(settings.get("feeder_table_id", 13500)),
             "section_table_id": int(settings.get("section_table_id", 13503)),

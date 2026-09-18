@@ -8,9 +8,9 @@ from dmm.application.modules.transformer import TransformerModelModule
 def get_model_modules():
     modules = [
         RmuModelModule(),
-        FeederModelModule(),
         PoleSwitchModelModule(),
         TransformerModelModule(),
         MasterStationModelModule(),
+        FeederModelModule(),
     ]
     return {module.module_id: module for module in modules}

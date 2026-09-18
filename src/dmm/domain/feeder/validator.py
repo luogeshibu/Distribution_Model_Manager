@@ -84,16 +84,11 @@ def section_allocation_key(row: Dict[str, Any]):
 
 class FeederValidator:
     """
-    Single-feeder G-file validator.
+    Feeder G-file validator for single and multi-feeder ring drawings.
 
-    Current scope deliberately does NOT support multi-feeder overview drawings.
-
-    Feeder identity:
-      1) locate <Bus> objects;
-      2) find the nearest engineering Text around any Bus;
-      3) if no reliable Bus-near Text exists, extract a specific token from
-         the G filename;
-      4) normalize punctuation and resolve dms_feeder_device by NAME contains.
+    Feeder identity is taken from the nearest already-associated RMU,
+    pole-switch, or pole-transformer model.  A nearby unassociated device is
+    an explicit blocker rather than a reason to guess from text or filenames.
 
     FeedLine mapping:
       - already-linked FeedLine: only verify its current KeyID resolves to
@@ -415,6 +410,145 @@ class FeederValidator:
             "status": "FAIL",
             "severity": "ERROR",
             "reason": "",
+        }
+
+    @staticmethod
+    def _box_distance(first: Box, second: Box) -> float:
+        """Shortest distance between two axis-aligned G object boxes."""
+        dx = max(first.left - second.right, second.left - first.right, 0.0)
+        dy = max(first.top - second.bottom, second.top - first.bottom, 0.0)
+        return math.hypot(dx, dy)
+
+    def _model_reference_for_object(self, obj: GObject) -> Optional[Dict[str, Any]]:
+        """Resolve a linked RMU/switch/transformer object to its feeder.
+
+        FeedLine association is deliberately downstream of the other model
+        modules.  Only an already-written KeyID is accepted as evidence; a
+        nearby symbol without a resolvable model is therefore a hard warning.
+        """
+        raw_keyids = []
+        for key in ("keyid", "keyid1", "keyid2"):
+            value = norm(obj.attrs.get(key))
+            if value and value not in raw_keyids:
+                raw_keyids.append(value)
+        for raw_keyid in raw_keyids:
+            try:
+                verified = self.db.verify_keyid(int(raw_keyid))
+            except Exception:
+                continue
+            device_id = int_or_none(verified.get("device_id"))
+            table_id = int_or_none(verified.get("tab_no"))
+            if device_id is None or table_id not in {13502, 13505}:
+                continue
+            try:
+                device = self.db.get_device_by_id(table_id, device_id)
+            except Exception:
+                device = None
+            if not device and table_id == 13505:
+                try:
+                    device = self.db.get_transformer_device_by_id(
+                        table_id, device_id
+                    )
+                except Exception:
+                    device = None
+            if not device:
+                continue
+
+            feeder_id = int_or_none(device.get("feeder_id"))
+            combined_id = int_or_none(device.get("combined_id"))
+            if feeder_id is None and combined_id is not None:
+                try:
+                    rmu = self.db.get_rmu_by_id(combined_id) or {}
+                except Exception:
+                    rmu = {}
+                feeder_id = int_or_none(rmu.get("feeder_id"))
+            if feeder_id is None:
+                continue
+            return {
+                "keyid": raw_keyid,
+                "device_id": device_id,
+                "table_id": table_id,
+                "feeder_id": feeder_id,
+                "device_name": norm(device.get("name") or device.get("code")),
+                "device": device,
+            }
+        return None
+
+    def _nearest_feedline_reference(
+        self,
+        parsed: ParsedG,
+        feedline: GObject,
+        anchors: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Find the nearest physical device and its existing model, if any."""
+        candidates = []
+        rmu_member_ids = set()
+        for anchor in anchors:
+            frame_ref = anchor.get("frame")
+            frame = getattr(frame_ref, "frame", frame_ref)
+            if not frame:
+                continue
+            members = [
+                obj for obj in parsed.objects
+                if frame.box.center_contains(obj.box, tolerance=1.0)
+                and obj.tag in {
+                    "CBreakerDis", "ZhaiWaiJieDiDaoZha", "BusDis",
+                    "TransformerDis",
+                }
+            ]
+            member_refs = [
+                (obj, self._model_reference_for_object(obj))
+                for obj in members
+            ]
+            ref = next((item[1] for item in member_refs if item[1]), None)
+            candidate = {
+                "object": frame,
+                "type": "RMU环网柜",
+                "model": ref,
+                "distance": self._box_distance(feedline.box, frame.box),
+            }
+            candidates.append(candidate)
+            rmu_member_ids.update(obj.xml_id for obj in members)
+
+        for obj in parsed.objects:
+            if obj.tag not in {"CBreakerDis", "TransformerDis"}:
+                continue
+            if obj.xml_id in rmu_member_ids:
+                # The enclosing RMU frame is the physical candidate; keeping
+                # the inner object out prevents one cabinet from being counted
+                # twice at slightly different distances.
+                continue
+            candidates.append({
+                "object": obj,
+                "type": (
+                    "柱上变压器"
+                    if obj.tag == "TransformerDis"
+                    else "柱上开关"
+                ),
+                "model": self._model_reference_for_object(obj),
+                "distance": self._box_distance(feedline.box, obj.box),
+            })
+
+        if not candidates:
+            return {
+                "type": "",
+                "xml_id": "",
+                "distance": "",
+                "model": None,
+            }
+        selected = min(
+            candidates,
+            key=lambda item: (
+                float(item["distance"]),
+                item["object"].xml_index,
+            ),
+        )
+        model = selected.get("model")
+        return {
+            "type": selected["type"],
+            "xml_id": selected["object"].xml_id,
+            "distance": round(float(selected["distance"]), 3),
+            "model": model,
         }
 
 
@@ -1709,6 +1843,7 @@ class FeederValidator:
             max_distance=RMU_LABEL_SEARCH_MAX_DISTANCE,
             overlap_tolerance=RMU_LABEL_EDGE_TOLERANCE,
             excluded_rmu_name_strings=self.rmu_name_exclusions,
+            exclude_numeric_decimal_rmu_names=True,
         )
         validator = RmuValidator(
             self.db,
@@ -1938,10 +2073,14 @@ class FeederValidator:
             region["region_index"] = idx
         return result
 
-    def _coalesce_regions_by_confirmed_feeder(self, regions: List[Dict[str, Any]]):
+    def _coalesce_regions_by_confirmed_feeder(
+        self,
+        regions: List[Dict[str, Any]],
+        parsed: Optional[ParsedG] = None,
+    ):
         """
         Merge disconnected drawing fragments that are independently confirmed
-        by trusted RMUs to the SAME FEEDER_ID.
+        by trusted RMUs or nearest associated devices to the SAME FEEDER_ID.
 
         This guarantees one shared dms_section_device candidate pool per
         feeder, preventing the same SECxxx record from being allocated once in
@@ -1955,6 +2094,17 @@ class FeederValidator:
                 int(a["feeder_id"]) for a in trusted
                 if int_or_none(a.get("feeder_id")) is not None
             }
+            if parsed is not None:
+                for obj in region.get("feedlines", []) or []:
+                    nearby = self._nearest_feedline_reference(
+                        parsed,
+                        obj,
+                        region.get("rmu_anchors", []),
+                    )
+                    model = nearby.get("model") or {}
+                    nearby_id = int_or_none(model.get("feeder_id"))
+                    if nearby_id is not None:
+                        feeder_ids.add(nearby_id)
             if len(feeder_ids) == 1:
                 key = ("FEEDER", next(iter(feeder_ids)))
             else:
@@ -1997,7 +2147,21 @@ class FeederValidator:
         anchors = region.get("rmu_anchors", [])
         trusted = [a for a in anchors if a.get("trusted")]
         ignored = [a for a in anchors if not a.get("trusted")]
-        feeder_ids = sorted({int(a["feeder_id"]) for a in trusted if int_or_none(a.get("feeder_id")) is not None})
+        nearest_refs = {
+            obj.xml_id: self._nearest_feedline_reference(parsed, obj, anchors)
+            for obj in feedlines
+        }
+        nearby_feeder_ids = sorted({
+            int(ref["model"]["feeder_id"])
+            for ref in nearest_refs.values()
+            if ref.get("model")
+            and int_or_none(ref["model"].get("feeder_id")) is not None
+        })
+        feeder_ids = sorted({
+            int(a["feeder_id"])
+            for a in trusted
+            if int_or_none(a.get("feeder_id")) is not None
+        } | set(nearby_feeder_ids))
 
         report = {
             "report_type": "FEEDER",
@@ -2050,9 +2214,10 @@ class FeederValidator:
             report["summary"] = self._summary(report)
             return report
 
-        if not trusted:
+        if not trusted and not nearby_feeder_ids:
             return blocked(
-                "NO_TRUSTED_RMU_REFERENCE: 当前连接区域没有可信已关联环网柜，禁止自动关联馈线段"
+                "NO_NEARBY_ASSOCIATED_DEVICE_MODEL: 未关联附近设备模型，"
+                "馈线段无法创建模型或者关联模型"
             )
         if len(feeder_ids) > 1:
             detail = ", ".join(
@@ -2151,6 +2316,47 @@ class FeederValidator:
                 "region_assignment_method": report["region_assignment_method"],
                 "topology_component": report["region_index"],
             })
+            nearby = nearest_refs.get(obj.xml_id, {})
+            nearby_model = nearby.get("model") or {}
+            row.update({
+                "nearest_device_type": nearby.get("type", ""),
+                "nearest_device_xml_id": nearby.get("xml_id", ""),
+                "nearest_device_distance": nearby.get("distance", ""),
+                "nearest_device_model": (
+                    "YES" if nearby_model else "NO"
+                ),
+                "nearest_device_feeder_id": nearby_model.get("feeder_id", ""),
+                "nearest_device_name": nearby_model.get("device_name", ""),
+            })
+            if not nearby_model:
+                row.update({
+                    "status": "FAIL",
+                    "severity": "NEARBY_MODEL_MISSING",
+                    "association_ready": "NO",
+                    "writeback_needed": "NO",
+                    "reason": (
+                        "NEARBY_DEVICE_MODEL_NOT_ASSOCIATED: "
+                        f"最近设备={nearby.get('type') or '未找到'}；"
+                        "未关联附近设备模型，馈线段无法创建模型或者关联模型"
+                    ),
+                })
+                rows.append(row)
+                continue
+            nearby_feeder_id = int_or_none(nearby_model.get("feeder_id"))
+            if nearby_feeder_id is not None and nearby_feeder_id != feeder_id:
+                row.update({
+                    "status": "FAIL",
+                    "severity": "NEARBY_FEEDER_CONFLICT",
+                    "association_ready": "NO",
+                    "writeback_needed": "NO",
+                    "reason": (
+                        "NEARBY_DEVICE_FEEDER_CONFLICT: 最近已关联设备"
+                        f"属于FEEDER_ID={nearby_feeder_id}，"
+                        f"当前连接区域为FEEDER_ID={feeder_id}"
+                    ),
+                })
+                rows.append(row)
+                continue
             if not obj.keyid:
                 row["status"] = "WARN"
                 row["severity"] = "UNLINKED"
@@ -2417,6 +2623,7 @@ class FeederValidator:
             max_distance=RMU_LABEL_SEARCH_MAX_DISTANCE,
             overlap_tolerance=RMU_LABEL_EDGE_TOLERANCE,
             excluded_rmu_name_strings=self.rmu_name_exclusions,
+            exclude_numeric_decimal_rmu_names=True,
         )
         rmu_parsed = rmu_parser.parse(g_path)
         frames = rmu_parser.find_rmu_frames(rmu_parsed)
@@ -2472,7 +2679,7 @@ class FeederValidator:
             )
 
         regions = self._build_topology_regions(parsed, rmu_anchors)
-        regions = self._coalesce_regions_by_confirmed_feeder(regions)
+        regions = self._coalesce_regions_by_confirmed_feeder(regions, parsed)
         region_reports = [
             self._validate_rmu_topology_region(parsed, region)
             for region in regions
