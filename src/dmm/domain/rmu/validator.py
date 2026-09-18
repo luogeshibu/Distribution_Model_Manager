@@ -30,9 +30,88 @@ def int_or_none(v):
         return None
 
 
-def resolve_duplicate_name_records(records, entity_code):
-    """Judge duplicate database names using only their FEEDER_ID values."""
+def resolve_duplicate_name_records(
+    records,
+    entity_code,
+    source_feeder_id=None,
+):
+    """Resolve same-name rows with an optional drawing-level FEEDER_ID.
+
+    Jazan exports can contain the same RMU NAME on different feeders.  The
+    feeder is inferred once from a uniquely identified RMU in the same G file;
+    that value is then used to choose the concrete parent row before querying
+    child tables by COMBINED_ID.
+    """
     all_records = list(records or [])
+    requested_feeder = int_or_none(source_feeder_id)
+
+    if requested_feeder is not None:
+        matching_records = [
+            row
+            for row in all_records
+            if int_or_none(row.get("feeder_id")) == requested_feeder
+        ]
+        if len(matching_records) == 1:
+            return {
+                "records": matching_records,
+                "all_records": all_records,
+                "status": (
+                    "DUPLICATE_RESOLVED_BY_DIAGRAM_FEEDER"
+                    if len(all_records) > 1
+                    else "UNIQUE_NAME"
+                ),
+                "reason": (
+                    f"{entity_code}_DUPLICATE_NAME_RESOLVED_BY_DIAGRAM_FEEDER: "
+                    f"按本张G图推断的 FEEDER_ID={requested_feeder} 选择数据库记录。"
+                    if len(all_records) > 1
+                    else ""
+                ),
+                "feeder_ids": sorted({
+                    feeder_id
+                    for feeder_id in (
+                        int_or_none(row.get("feeder_id"))
+                        for row in all_records
+                    )
+                    if feeder_id is not None
+                }),
+            }
+        if len(matching_records) > 1:
+            return {
+                "records": matching_records,
+                "all_records": all_records,
+                "status": "DUPLICATE_SAME_FEEDER",
+                "reason": (
+                    f"{entity_code}_DUPLICATE_NAME_SAME_FEEDER: "
+                    f"按本张G图 FEEDER_ID={requested_feeder} 筛选后仍有 "
+                    f"{len(matching_records)} 条同名记录。"
+                ),
+                "feeder_ids": sorted({
+                    feeder_id
+                    for feeder_id in (
+                        int_or_none(row.get("feeder_id"))
+                        for row in all_records
+                    )
+                    if feeder_id is not None
+                }),
+            }
+        return {
+            "records": [],
+            "all_records": all_records,
+            "status": "DUPLICATE_DIAGRAM_FEEDER_NOT_FOUND",
+            "reason": (
+                f"{entity_code}_DUPLICATE_NAME_DIAGRAM_FEEDER_NOT_FOUND: "
+                f"本张G图推断的 FEEDER_ID={requested_feeder} 在同名数据库记录中不存在。"
+            ),
+            "feeder_ids": sorted({
+                feeder_id
+                for feeder_id in (
+                    int_or_none(row.get("feeder_id"))
+                    for row in all_records
+                )
+                if feeder_id is not None
+            }),
+        }
+
     if len(all_records) <= 1:
         return {
             "records": all_records,
@@ -130,6 +209,7 @@ class RmuValidator:
         frame: RmuFrame,
         positions: Sequence[str],
         preassigned_candidates=None,
+        source_feeder_id=None,
     ):
         frame_key = (frame.frame.xml_index, frame.frame.xml_id)
         if preassigned_candidates is None:
@@ -199,6 +279,7 @@ class RmuValidator:
                 resolution_cache[key] = resolve_duplicate_name_records(
                     raw_records,
                     "RMU",
+                    source_feeder_id=source_feeder_id,
                 )
             return resolution_cache[key]
 
@@ -215,6 +296,7 @@ class RmuValidator:
                 "xml_id": c.obj.xml_id,
                 "db_count": len(records),
                 "db_records": records,
+                "db_all_records": resolution["all_records"],
                 "db_all_count": len(resolution["all_records"]),
                 "db_feeder_ids": resolution["feeder_ids"],
                 "db_resolution": resolution["status"],
@@ -236,7 +318,10 @@ class RmuValidator:
                 "status": "PASS",
                 "reason": (
                     resolution["reason"]
-                    if resolution["status"] == "DUPLICATE_RESOLVED_BY_FEEDER"
+                    if resolution["status"] in {
+                        "DUPLICATE_RESOLVED_BY_FEEDER",
+                        "DUPLICATE_RESOLVED_BY_DIAGRAM_FEEDER",
+                    }
                     else (
                         "RMU_CONFIRMED_SINGLE_LABEL"
                         if len(ordered) == 1
@@ -247,6 +332,14 @@ class RmuValidator:
                         )
                     )
                 ),
+                "candidate_rows": candidate_rows,
+                "selected": selected_row,
+            }
+
+        if resolution.get("reason") and resolution.get("status") != "UNIQUE_NAME":
+            return {
+                "status": "FAIL",
+                "reason": resolution["reason"],
                 "candidate_rows": candidate_rows,
                 "selected": selected_row,
             }
@@ -1686,12 +1779,21 @@ class RmuValidator:
             "RMU_DUPLICATE_IN_DATABASE",
             "RMU_DUPLICATE_NAME_SAME_FEEDER",
             "RMU_DUPLICATE_NAME_FEEDER_UNRESOLVED",
+            "RMU_DUPLICATE_NAME_DIAGRAM_FEEDER_NOT_FOUND",
         }:
             detail = reason_text.split(":", 1)[1].strip() if ":" in reason_text else ""
             return (
                 f"{code}: "
                 f"已解析环网柜名称={name_ref or '-'}；{detail or '数据库存在多条无法唯一确定的同名记录'}；"
                 "环网柜必须唯一，禁止自动关联。"
+            )
+
+        if code == "RMU_DIAGRAM_FEEDER_NOT_RESOLVED":
+            return (
+                "RMU_DIAGRAM_FEEDER_NOT_RESOLVED: "
+                f"环网柜名称={name_ref or '-'}；"
+                "同名环网柜属于不同FEEDER_ID，但本张G图没有可唯一确定馈线的环网柜，"
+                "禁止自动选择COMBINED_ID。"
             )
 
         if code == "RMU_NOT_FOUND_IN_DATABASE":
@@ -1737,11 +1839,90 @@ class RmuValidator:
             )
         )
 
+        # Jazan rule: infer the feeder once from a uniquely identified RMU in
+        # this G file.  The G root facID is deliberately not used here.  A
+        # duplicate RMU NAME can then be resolved against this drawing-level
+        # FEEDER_ID before its child tables are queried by COMBINED_ID.
+        pre_resolved_names = {}
+        diagram_feeder_candidates = []
+        diagram_feeder_source = None
+        if not name_assignment_error:
+            for frame_index, frame in enumerate(frames, start=1):
+                try:
+                    resolved = self._resolve_rmu_name(
+                        parsed,
+                        frame,
+                        positions,
+                        preassigned_candidates=preassigned_name_candidates,
+                    )
+                except Exception as exc:
+                    resolved = {
+                        "status": "FAIL",
+                        "reason": (
+                            "RMU_NAME_RESOLUTION_ERROR: "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                        "candidate_rows": [],
+                        "selected": None,
+                    }
+                pre_resolved_names[frame.frame.xml_id] = resolved
+
+                selected = resolved.get("selected")
+                if resolved.get("status") != "PASS" or not selected:
+                    continue
+                all_records = list(
+                    selected.get("db_all_records")
+                    or selected.get("db_records")
+                    or []
+                )
+                # Only a single database parent row can independently prove
+                # the drawing feeder.  Duplicate-name rows are resolved in
+                # the second pass using this feeder.
+                if len(all_records) == 1:
+                    feeder_id = int_or_none(all_records[0].get("feeder_id"))
+                    if feeder_id is not None:
+                        diagram_feeder_candidates.append(feeder_id)
+                        if diagram_feeder_source is None:
+                            diagram_feeder_source = {
+                                "frame_index": frame_index,
+                                "frame_xml_id": frame.frame.xml_id,
+                                "rmu_name": selected.get("name", ""),
+                                "rmu_id": all_records[0].get("id", ""),
+                                "feeder_id": all_records[0].get("feeder_id", ""),
+                            }
+
+        diagram_feeder_ids = sorted(set(diagram_feeder_candidates))
+        diagram_feeder_id = (
+            diagram_feeder_ids[0]
+            if len(diagram_feeder_ids) == 1
+            else None
+        )
+        if diagram_feeder_id is not None:
+            diagram_feeder_resolution = "UNIQUE_RMU_IN_SAME_G_FILE"
+            self.log(
+                f"[{parsed.path.name}] 按同图唯一环网柜推断馈线："
+                f"FEEDER_ID={diagram_feeder_id}；"
+                "后续同名环网柜按该馈线筛选。"
+            )
+        elif len(diagram_feeder_ids) > 1:
+            diagram_feeder_resolution = "CONFLICTING_UNIQUE_RMU_FEEDERS"
+            self.log(
+                f"[{parsed.path.name}] 同图唯一环网柜推断出多个FEEDER_ID："
+                f"{','.join(str(x) for x in diagram_feeder_ids)}；"
+                "不使用G.facID，重名环网柜无法自动选定。"
+            )
+        else:
+            diagram_feeder_resolution = "NO_UNIQUE_RMU_FEEDER"
+
         report = {
             "g_file": str(parsed.path),
             "file_name": parsed.path.name,
             "breaker_name_source": self.breaker_name_source,
             "rmu_frame_count": len(frames),
+            "diagram_feeder_id": diagram_feeder_id or "",
+            "diagram_feeder_ids": diagram_feeder_ids,
+            "diagram_feeder_resolution": diagram_feeder_resolution,
+            "diagram_feeder_source": diagram_feeder_source or {},
             "rmu_results": [],
             "summary": {},
         }
@@ -1838,6 +2019,15 @@ class RmuValidator:
                 "rmu_severity": "",
                 "rmu_reason": "",
                 "rmu_db_count": 0,
+                "rmu_db_all_count": 0,
+                "rmu_feeder_id": "",
+                "diagram_feeder_id": diagram_feeder_id or "",
+                "diagram_feeder_source": (
+                    "YES"
+                    if diagram_feeder_source
+                    and frame.frame.xml_id == diagram_feeder_source.get("frame_xml_id")
+                    else "NO"
+                ),
                 "rmu_records": [],
                 "rmu_ids": [],
                 "device_rows": [],
@@ -1861,13 +2051,38 @@ class RmuValidator:
                     "selected": None,
                 }
             else:
+                resolved = pre_resolved_names.get(frame.frame.xml_id, {})
+                selected_before_feeder = resolved.get("selected")
+                all_records_before_feeder = list(
+                    (selected_before_feeder or {}).get("db_all_records")
+                    or (selected_before_feeder or {}).get("db_records")
+                    or []
+                )
+
                 try:
-                    resolved = self._resolve_rmu_name(
-                        parsed,
-                        frame,
-                        positions,
-                        preassigned_candidates=preassigned_name_candidates,
-                    )
+                    if diagram_feeder_id is not None:
+                        # Re-resolve the name with the feeder inferred from a
+                        # unique RMU elsewhere in this same G file.
+                        resolved = self._resolve_rmu_name(
+                            parsed,
+                            frame,
+                            positions,
+                            preassigned_candidates=preassigned_name_candidates,
+                            source_feeder_id=diagram_feeder_id,
+                        )
+                    elif len(all_records_before_feeder) > 1:
+                        # Different FEEDER_ID values are not themselves an
+                        # abnormal duplicate, but without a drawing feeder
+                        # there is no safe COMBINED_ID to use for write-back.
+                        resolved = dict(resolved)
+                        resolved["status"] = "FAIL"
+                        resolved["reason"] = (
+                            "RMU_DIAGRAM_FEEDER_NOT_RESOLVED: "
+                            "同名环网柜属于不同FEEDER_ID，但本张G图没有"
+                            "可唯一确定馈线的环网柜。"
+                        )
+                    # With one parent row, the pre-pass result is already
+                    # authoritative and does not require a second query.
                 except Exception as exc:
                     resolved = {
                         "status": "FAIL",
@@ -1905,12 +2120,20 @@ class RmuValidator:
                         + rmu_result["rmu_type_check_reason"]
                     )
                 rmu_result["rmu_db_count"] = display_candidate["db_count"]
+                rmu_result["rmu_db_all_count"] = display_candidate.get(
+                    "db_all_count",
+                    display_candidate["db_count"],
+                )
                 rmu_result["rmu_records"] = display_candidate["db_records"]
                 rmu_result["rmu_ids"] = [
                     int_or_none(rec.get("id"))
                     for rec in display_candidate["db_records"]
                     if int_or_none(rec.get("id")) is not None
                 ]
+                if display_candidate["db_records"]:
+                    rmu_result["rmu_feeder_id"] = (
+                        display_candidate["db_records"][0].get("feeder_id", "")
+                    )
 
             if (
                 rmu_result.get("rmu_type_check_reason")
@@ -2032,6 +2255,16 @@ class RmuValidator:
                     rmu_result["device_block_reasons"].append(
                         f"DEVICE_TABLE_QUERY_FAILED:{tag}"
                     )
+
+            self.log(
+                f"  环网柜设备查询：RMU_ID={rmu_id}；"
+                f"FEEDER_ID={rmu_result.get('rmu_feeder_id') or '-'}；"
+                + "; ".join(
+                    f"{tag}={info.get('table_name') or '-'}"
+                    f"/rows={info.get('count', 0)}"
+                    for tag, info in rmu_result["db_inventory"].items()
+                )
+            )
 
             elements = self.parser.find_target_objects_in_frame(
                 parsed, frame, self.device_rules.keys()

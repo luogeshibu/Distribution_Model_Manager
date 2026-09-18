@@ -205,6 +205,8 @@ class RmuModelModule(ModelModule):
                         "attributes": attrs,
                         "rmu_name": row.get("rmu_name", ""),
                         "rmu_id": row.get("rmu_id", ""),
+                        "rmu_feeder_id": rmu.get("rmu_feeder_id", ""),
+                        "diagram_feeder_id": rmu.get("diagram_feeder_id", ""),
                         "device_name": row.get("selected_device_name", ""),
                         "device_id": row.get("db_device_id", ""),
                         "expected_keyid": row.get("expected_keyid", ""),
@@ -402,6 +404,12 @@ class RmuModelModule(ModelModule):
                     or base_row.get("rmu_name")
                     or ""
                 ).strip()
+                rmu_feeder_id = int_or_none(
+                    change.get("rmu_feeder_id")
+                    or base_row.get("rmu_feeder_id")
+                    or change.get("diagram_feeder_id")
+                    or base_row.get("diagram_feeder_id")
+                )
                 tag = str(change.get("tag", "") or "")
                 logical_name = str(
                     base_row.get("logical_code")
@@ -416,13 +424,15 @@ class RmuModelModule(ModelModule):
                         f"已选设备={selected_by_rmu.get(rmu_name, 0)}"
                     )
 
-                if rmu_name not in rmu_cache:
+                rmu_cache_key = (rmu_name, rmu_feeder_id)
+                if rmu_cache_key not in rmu_cache:
                     raw_rmu_records = db.get_rmu_records(rmu_name)
-                    rmu_cache[rmu_name] = resolve_duplicate_name_records(
+                    rmu_cache[rmu_cache_key] = resolve_duplicate_name_records(
                         raw_rmu_records,
                         "RMU",
+                        source_feeder_id=rmu_feeder_id,
                     )
-                rmu_resolution = rmu_cache[rmu_name]
+                rmu_resolution = rmu_cache[rmu_cache_key]
                 rmu_records = rmu_resolution["records"]
                 log_callback(
                     f"复核环网柜 {rmu_name}："
