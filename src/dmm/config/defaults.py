@@ -63,7 +63,7 @@ DEFAULT_NAME_POSITIONS = {
     "bottom": False,
 }
 
-# RMU name direction remains configurable.  The Jeddah default is top, while
+# RMU name direction remains configurable.  The Madinah default is top, while
 # operators may enable multiple sides when a drawing family requires it.
 RMU_NAME_DIRECTIONS = ("top", "right", "left", "bottom")
 DEFAULT_RMU_NAME_DETECTION_MODE = "FIXED"
@@ -77,7 +77,7 @@ def resolve_rmu_name_positions(mode="FIXED", configured_positions=None):
         for position in RMU_NAME_DIRECTIONS
         if bool(configured_positions.get(position, False))
     ]
-    # Older Jeddah workspace files may contain the previous all-false value;
+    # Older Madinah workspace files may contain the previous all-false value;
     # migrate that state to the current default instead of disabling naming.
     return selected or ["top"]
 

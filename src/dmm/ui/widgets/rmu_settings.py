@@ -94,7 +94,7 @@ class RmuSettingsWidget(QWidget):
 
         info = QLabel(
             "RMU 环网柜只有在矩形框内同时包含 CBreakerDis、BusDis、ZhaiWaiJieDiDaoZha 时才识别。"
-            "开关设备名称固定使用环网柜内图上文字；吉达现场默认读取图框上方名称。"
+            "开关设备名称固定使用环网柜内图上文字；麦地那现场默认读取图框上方名称。"
             "允许多选名称方向，多选时只保留所选方向中距离最近的一个 Text。"
             "设备命名规则固定使用图上文字，不再读取三类设备 XML 的 p_NameString："
             "CBreakerDis 使用图上名称，接地刀闸使用开关名+D，BusDis 固定使用 BUS。"
