@@ -376,15 +376,16 @@ class PoleSwitchParser:
         nearest_only=False,
         device_filter=None,
     ):
-        """Find the nearest eligible Text independently for each device.
+        """Find and one-to-one assign the nearest eligible Text per device.
 
         This is shared by pole switches and TransformerDis. The scan is
         global across the G file so a device can find a label outside its
-        local XML block, but devices do not compete for a Text and the same
-        Text may be returned for more than one device. The caller supplies
-        the module scope so only the requested device family can participate.
-        No RMU reservation or connection-topology analysis is performed in
-        this fixed-mode name lookup.
+        local XML block. Text ownership is exclusive: one Text can belong to
+        only one device, and competing devices are resolved by physical
+        distance. The caller supplies the module scope so only the requested
+        device family can participate. No RMU reservation or
+        connection-topology analysis is performed in this fixed-mode name
+        lookup.
         """
 
         reserved_text_ids = set()
@@ -475,15 +476,36 @@ class PoleSwitchParser:
                 items.sort(key=lambda item: (item[0], item[1], item[2]))
             ranked[device.xml_index] = items
 
-        owners = defaultdict(list)
+        # Allocate Text objects one-to-one.  A Text that has already been
+        # assigned to one device must not be reused by another nearby device.
+        # Resolve the global competition by physical distance first, then by
+        # stable XML order so the result does not depend on parser iteration
+        # details.  A device whose nearest Text was claimed can still receive
+        # its next-nearest eligible Text later in this pass.
+        candidate_pairs = []
         for device in devices:
-            items = ranked.get(device.xml_index, [])
-            if not items:
+            for item in ranked.get(device.xml_index, []):
+                candidate_pairs.append((
+                    float(item[2]),
+                    item[3],
+                    device.xml_index,
+                    item,
+                ))
+        candidate_pairs.sort(key=lambda item: (item[0], item[1], item[2]))
+
+        owners = defaultdict(list)
+        assigned_devices = set()
+        assigned_text_ids = set()
+        for _distance, _text_order, device_xml_index, item in candidate_pairs:
+            if device_xml_index in assigned_devices:
                 continue
-            # Direct parsing: every device independently takes its nearest
-            # eligible Text. There is intentionally no shared assigned_texts
-            # set and no fallback to the second-nearest Text.
-            owners[device.xml_index].append(items[0])
+            text_obj = item[6]
+            text_id = text_obj.xml_index
+            if text_id in assigned_text_ids:
+                continue
+            owners[device_xml_index].append(item)
+            assigned_devices.add(device_xml_index)
+            assigned_text_ids.add(text_id)
         return owners
 
     def find_nearest_name(
