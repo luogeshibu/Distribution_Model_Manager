@@ -270,6 +270,23 @@ class PoleSwitchParser:
         return bool(str(obj.attrs.get("devref") or "").strip())
 
     @staticmethod
+    def _is_cross_module_nameable_device(obj: GObject, element_catalog=None) -> bool:
+        """Identify marked pole switches and pole transformers for Text locks.
+
+        The pole-switch and transformer modules run independently, but their
+        graphical names still follow one ownership rule within the same G
+        drawing.  Including both families in the allocation pool prevents a
+        Text claimed by one family from being reused by the other family.
+        """
+        devref = str(obj.attrs.get("devref") or "")
+        if obj.tag == "CBreakerDis":
+            return bool(_marked_pole_switch_family(devref, element_catalog))
+        if obj.tag == "TransformerDis":
+            record = resolve_element_record(devref, element_catalog)
+            return classification_is(record, "TRANSFORMER_OH")
+        return False
+
+    @staticmethod
     def _line_points(obj: GObject):
         raw = str(
             obj.attrs.get("d")
@@ -382,17 +399,22 @@ class PoleSwitchParser:
         global across the G file so a device can find a label outside its
         local XML block. Text ownership is exclusive: one Text can belong to
         only one device, and competing devices are resolved by physical
-        distance. The caller supplies the module scope so only the requested
-        device family can participate. No RMU reservation or
-        connection-topology analysis is performed in this fixed-mode name
-        lookup.
+        distance. The current module still returns only its own devices, while
+        marked pole switches and marked pole transformers share the ownership
+        pool. No RMU reservation or connection-topology analysis is performed
+        in this fixed-mode name lookup.
         """
 
         reserved_text_ids = set()
 
         devices = []
         for obj in parsed.objects:
-            if device_filter is not None and not device_filter(obj):
+            requested = device_filter is None or device_filter(obj)
+            shared_name_lock = self._is_cross_module_nameable_device(
+                obj,
+                element_catalog,
+            )
+            if not requested and not shared_name_lock:
                 continue
             if not self._is_nameable_device(obj):
                 continue
