@@ -703,10 +703,10 @@ class MainWindow(QMainWindow):
         self.nav = QListWidget()
         self.nav.setObjectName("navList")
 
-        for label in ("数据库", "模型工作区", "图元管理", "运行历史", "设置", "帮助"):
+        for label in ("模型工作区", "图元管理", "数据库", "运行历史", "帮助", "设置"):
             self.nav.addItem(QListWidgetItem(label))
 
-        self.nav.setCurrentRow(1)
+        self.nav.setCurrentRow(0)
         sidebar_layout.addWidget(self.nav)
         body_layout.addWidget(sidebar)
 
@@ -714,15 +714,15 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
 
-        self.pages.addWidget(self._build_database_page())
         self.pages.addWidget(self._build_workspace_page())
         self.element_management_page = self._build_element_management_page()
         self.pages.addWidget(self.element_management_page)
+        self.pages.addWidget(self._build_database_page())
         self.pages.addWidget(self._build_history_page())
-        self.pages.addWidget(self._build_settings_page())
         self.pages.addWidget(self._build_help_page())
+        self.pages.addWidget(self._build_settings_page())
 
-        self.pages.setCurrentIndex(1)
+        self.pages.setCurrentIndex(0)
         body_layout.addWidget(self.pages, 1)
 
     # ------------------------------------------------------------
@@ -1356,7 +1356,7 @@ class MainWindow(QMainWindow):
 
         database_btn = QPushButton("数据库设置")
         database_btn.setObjectName("secondary")
-        database_btn.clicked.connect(lambda: self.nav.setCurrentRow(0))
+        database_btn.clicked.connect(lambda: self.nav.setCurrentRow(2))
 
         for button in (
             self.validate_btn,
