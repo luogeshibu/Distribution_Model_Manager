@@ -238,7 +238,7 @@ class ElementManagementWidget(QWidget):
         subtitle = QLabel(
             "维护服务器图元文件与设备分类标记。进入页面只读取本地缓存，不会自动访问服务器；"
             "只有点击“手动读取/同步服务器图元”才会重新读取。模型识别按完整图元路径匹配，"
-            "原始服务器文件只读，不会被修改。"
+            "原始服务器文件只读，不会被修改。图元分类标记保存在当前用户缓存中，替换或删除程序目录后仍会保留。"
         )
         subtitle.setWordWrap(True)
         subtitle.setObjectName("pageSubtitle")
