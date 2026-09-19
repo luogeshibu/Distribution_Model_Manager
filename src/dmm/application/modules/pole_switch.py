@@ -489,6 +489,7 @@ class PoleSwitchParser:
                     float(item[2]),
                     item[3],
                     device.xml_index,
+                    item[-1],
                     item,
                 ))
         candidate_pairs.sort(key=lambda item: (item[0], item[1], item[2]))
@@ -496,14 +497,19 @@ class PoleSwitchParser:
         owners = defaultdict(list)
         assigned_devices = set()
         assigned_text_ids = set()
-        for _distance, _text_order, device_xml_index, item in candidate_pairs:
+        for (
+            _distance,
+            _text_order,
+            device_xml_index,
+            text_obj,
+            candidate,
+        ) in candidate_pairs:
             if device_xml_index in assigned_devices:
                 continue
-            text_obj = item[5]
             text_id = text_obj.xml_index
             if text_id in assigned_text_ids:
                 continue
-            owners[device_xml_index].append(item)
+            owners[device_xml_index].append(candidate)
             assigned_devices.add(device_xml_index)
             assigned_text_ids.add(text_id)
         return owners
