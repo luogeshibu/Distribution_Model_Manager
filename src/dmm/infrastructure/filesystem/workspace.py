@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import shutil
 import sys
+import os
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -42,6 +44,48 @@ WORKSPACE_ROOT = APP_ROOT / "workspace"
 CONFIG_PATH = WORKSPACE_ROOT / "config.json"
 RUNS_ROOT = WORKSPACE_ROOT / "runs"
 LOGS_ROOT = WORKSPACE_ROOT / "logs"
+
+
+def user_data_root() -> Path:
+    """Return a per-Windows-user location that survives app replacement."""
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or (
+            Path.home() / "AppData" / "Roaming"
+        )
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or (
+            Path.home() / ".config"
+        )
+    return Path(base) / "DistributionModelManager"
+
+
+USER_ELEMENT_CATALOG_PATH = user_data_root() / "element_catalog.json"
+
+
+def ensure_user_data():
+    USER_ELEMENT_CATALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def load_user_element_catalog() -> dict | None:
+    """Load user-level element marks, independent of the app directory."""
+    try:
+        payload = json.loads(
+            USER_ELEMENT_CATALOG_PATH.read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def save_user_element_catalog(catalog: dict) -> None:
+    """Persist only element marks outside the replaceable app directory."""
+    if not isinstance(catalog, dict):
+        return
+    ensure_user_data()
+    USER_ELEMENT_CATALOG_PATH.write_text(
+        json.dumps(catalog, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def ensure_workspace():
