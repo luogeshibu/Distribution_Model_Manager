@@ -499,7 +499,7 @@ class PoleSwitchParser:
         for _distance, _text_order, device_xml_index, item in candidate_pairs:
             if device_xml_index in assigned_devices:
                 continue
-            text_obj = item[6]
+            text_obj = item[5]
             text_id = text_obj.xml_index
             if text_id in assigned_text_ids:
                 continue
