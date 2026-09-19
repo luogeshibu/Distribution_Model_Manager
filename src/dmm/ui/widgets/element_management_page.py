@@ -13,10 +13,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
     QHeaderView,
@@ -348,39 +350,39 @@ class ElementManagementWidget(QWidget):
         self.download_button = QPushButton("下载所选图元")
         self.download_button.clicked.connect(self.download_selected_elements)
 
-        actions = QHBoxLayout()
-        for button in (
-            self.test_server_button,
-            self.save_server_button,
-            self.load_button,
-            self.download_button,
-        ):
-            actions.addWidget(button)
-        actions.addStretch()
-        source_grid.addLayout(actions, 5, 1, 1, 6)
-
         self.load_saved_button = QPushButton("载入本地标记")
         self.load_saved_button.clicked.connect(self._load_saved_records)
-        self.save_button = QPushButton("保存当前标记")
+        self.save_button = QPushButton("保存标记")
         self.save_button.clicked.connect(self.save_catalog)
         self.import_button = QPushButton("导入共享配置")
         self.import_button.clicked.connect(self.import_shared_catalog)
         self.export_button = QPushButton("导出共享配置")
         self.export_button.clicked.connect(self.export_shared_catalog)
-        mark_actions = QHBoxLayout()
-        for button in (
-            self.load_saved_button,
-            self.save_button,
-            self.import_button,
-            self.export_button,
-        ):
-            mark_actions.addWidget(button)
-        mark_actions.addStretch()
-        source_grid.addLayout(mark_actions, 6, 1, 1, 6)
+
+        self.more_actions_button = QToolButton()
+        self.more_actions_button.setText("更多操作")
+        self.more_actions_button.setPopupMode(QToolButton.InstantPopup)
+        more_menu = QMenu(self.more_actions_button)
+        more_menu.addAction(self.test_server_button.text(), self.test_server_connection)
+        more_menu.addAction(self.save_server_button.text(), self.save_server_settings)
+        more_menu.addSeparator()
+        more_menu.addAction(self.download_button.text(), self.download_selected_elements)
+        more_menu.addAction(self.load_saved_button.text(), self._load_saved_records)
+        more_menu.addSeparator()
+        more_menu.addAction(self.import_button.text(), self.import_shared_catalog)
+        more_menu.addAction(self.export_button.text(), self.export_shared_catalog)
+        self.more_actions_button.setMenu(more_menu)
+
+        actions = QHBoxLayout()
+        actions.addWidget(self.load_button)
+        actions.addWidget(self.save_button)
+        actions.addWidget(self.more_actions_button)
+        actions.addStretch()
+        source_grid.addLayout(actions, 5, 1, 1, 6)
 
         self.status_label = QLabel("尚未手动同步服务器图元；当前仅使用本地缓存。")
         self.status_label.setWordWrap(True)
-        source_grid.addWidget(self.status_label, 7, 1, 1, 6)
+        source_grid.addWidget(self.status_label, 6, 1, 1, 6)
         layout.addWidget(source_box)
 
         maintain_box = QGroupBox("标记搜索")
@@ -912,5 +914,22 @@ class ElementManagementWidget(QWidget):
         self.dirty = True
         self._render_rows()
         self.status_label.setText(
-            f"已导入 {imported} 条共享标记，尚未写入本地设置；请确认后点击“保存图元标记”。"
+            f"已导入 {imported} 条共享标记，等待确认保存到本机。"
         )
+        answer = QMessageBox.question(
+            self,
+            "保存共享图元标记",
+            f"已导入 {imported} 条图元标记，是否立即保存到本机？\n\n"
+            "保存后，模型校验才能使用这些标记。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Yes:
+            try:
+                self.save_catalog()
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "保存图元标记失败",
+                    f"共享配置已导入，但保存到本机失败：\n{exc}",
+                )
