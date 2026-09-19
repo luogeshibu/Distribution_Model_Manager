@@ -805,7 +805,27 @@ class ElementManagementWidget(QWidget):
         if self._rendering:
             return
         self.dirty = True
-        self.status_label.setText("有未保存的图元标记修改，请点击“保存图元标记”。")
+        answer = QMessageBox.question(
+            self,
+            "保存图元标记修改",
+            "检测到图元分类标记或备注发生变化，是否立即保存到本机？\n\n"
+            "保存后，后续模型校验会使用新的标记。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Yes:
+            try:
+                self.save_catalog()
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "保存图元标记失败",
+                    f"修改已保留在当前页面，但保存到本机失败：\n{exc}",
+                )
+        else:
+            self.status_label.setText(
+                "有未保存的图元标记修改；模型校验仍会使用上一次已保存的配置。"
+            )
 
     def save_catalog(self):
         self._sync_rows_from_table()
