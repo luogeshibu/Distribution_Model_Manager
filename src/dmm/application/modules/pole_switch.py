@@ -502,18 +502,22 @@ class PoleSwitchParser:
         # assigned to one device must not be reused by another nearby device.
         # Resolve the global competition by physical distance first, then by
         # stable XML order so the result does not depend on parser iteration
-        # details.  A device whose nearest Text was claimed can still receive
-        # its next-nearest eligible Text later in this pass.
+        # details.  Each device contributes only its nearest eligible Text;
+        # if that Text is already owned by another device, this device stays
+        # unnamed instead of falling back to a farther label.
         candidate_pairs = []
         for device in devices:
-            for item in ranked.get(device.xml_index, []):
-                candidate_pairs.append((
-                    float(item[2]),
-                    item[3],
-                    device.xml_index,
-                    item[-1],
-                    item,
-                ))
+            items = ranked.get(device.xml_index, [])
+            if not items:
+                continue
+            item = items[0]
+            candidate_pairs.append((
+                float(item[2]),
+                item[3],
+                device.xml_index,
+                item[-1],
+                item,
+            ))
         candidate_pairs.sort(key=lambda item: (item[0], item[1], item[2]))
 
         owners = defaultdict(list)
