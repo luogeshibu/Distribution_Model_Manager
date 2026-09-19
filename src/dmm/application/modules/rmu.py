@@ -28,14 +28,21 @@ from dmm.domain.rmu.validator import (
     KEYID_STEP,
     norm,
     int_or_none,
+    is_no_rmu_name,
     resolve_duplicate_name_records,
 )
 from dmm.infrastructure.gfile.writeback import GWriteBackService
+from dmm.application.modules.jazan_feeder import (
+    collect_non_rmu_feeder_candidates,
+)
 
 class RmuModelModule(ModelModule):
     module_id = "RMU"
     display_name = "RMU 环网柜模型"
-    description = "RMU 环网柜模型校验、候选选择及安全回写。"
+    description = (
+        "RMU 环网柜模型校验、候选选择及安全回写；"
+        "积攒现场重复名称按本图唯一设备确定的 FEEDER_ID 筛选。"
+    )
     SUPPORTED_OPERATIONS = ("VALIDATE", "PREVIEW_ASSOCIATION", "APPLY_ASSOCIATION")
 
     @staticmethod
@@ -120,11 +127,49 @@ class RmuModelModule(ModelModule):
                     percent = 5 + int(fraction * 90)
                     progress_callback(min(percent, 95), f"{g_file.name}：{message}")
 
+            external_feeder_ids = []
+            external_feeder_source = {}
+            try:
+                external_evidence = collect_non_rmu_feeder_candidates(
+                    db,
+                    g_file,
+                    settings,
+                    log_callback,
+                )
+                external_feeder_ids = external_evidence.get("feeder_ids", [])
+                evidence = external_evidence.get("evidence", [])
+                if evidence:
+                    external_feeder_source = dict(evidence[0])
+            except Exception as exc:
+                log_callback(
+                    f"[{g_file.name}] 非环网柜设备馈线证据扫描失败：{exc}"
+                )
+
             report = validator.validate_file(
                 g_file,
                 positions,
                 progress_callback=_file_progress,
+                external_feeder_ids=external_feeder_ids,
+                external_feeder_source=external_feeder_source,
             )
+            diagram_feeder_id = int_or_none(
+                report.get("diagram_feeder_id")
+            )
+            if diagram_feeder_id is not None:
+                try:
+                    feeder_info = db.get_feeder_info(diagram_feeder_id) or {}
+                    feeder_name = str(
+                        feeder_info.get("display_name")
+                        or feeder_info.get("name")
+                        or ""
+                    ).strip()
+                except Exception:
+                    feeder_name = ""
+                if feeder_name:
+                    report["diagram_feeder_name"] = feeder_name
+                    source = dict(report.get("diagram_feeder_source") or {})
+                    source["feeder_name"] = feeder_name
+                    report["diagram_feeder_source"] = source
             reports.append(report)
             for key in aggregate:
                 aggregate[key] += report["summary"].get(key, 0)
@@ -368,6 +413,7 @@ class RmuModelModule(ModelModule):
         runtime_rules = self._runtime_device_rules(settings)
         rmu_cache = {}
         device_cache = {}
+        no_target_owners = {}
         executable = defaultdict(list)
         execution_rows = []
 
@@ -416,6 +462,11 @@ class RmuModelModule(ModelModule):
                     or change.get("device_name")
                     or ""
                 ).strip()
+                no_placeholder = is_no_rmu_name(rmu_name)
+                assigned_rmu_id = int_or_none(
+                    change.get("rmu_id")
+                    or base_row.get("rmu_id")
+                )
 
                 if rmu_name not in started_rmus:
                     started_rmus.add(rmu_name)
@@ -424,16 +475,84 @@ class RmuModelModule(ModelModule):
                         f"已选设备={selected_by_rmu.get(rmu_name, 0)}"
                     )
 
-                rmu_cache_key = (rmu_name, rmu_feeder_id)
+                # Two graphical NO placeholders share the literal name
+                # "NO", so their assigned parent ID must participate in the
+                # execution cache key. Otherwise the second placeholder
+                # would incorrectly reuse the first one's database RMU.
+                rmu_cache_key = (
+                    rmu_name,
+                    rmu_feeder_id,
+                    assigned_rmu_id if no_placeholder else None,
+                )
                 if rmu_cache_key not in rmu_cache:
-                    raw_rmu_records = db.get_rmu_records(rmu_name)
-                    rmu_cache[rmu_cache_key] = resolve_duplicate_name_records(
-                        raw_rmu_records,
-                        "RMU",
-                        source_feeder_id=rmu_feeder_id,
-                    )
+                    if no_placeholder:
+                        if assigned_rmu_id is None:
+                            rmu_cache[rmu_cache_key] = {
+                                "records": [],
+                                "all_records": [],
+                                "status": "NO_PLACEHOLDER_ID_MISSING",
+                                "reason": (
+                                    "EXEC_NO_PLACEHOLDER_ID_MISSING: "
+                                    f"NO占位环网柜={rmu_name}没有已分配的数据库RMU_ID。"
+                                ),
+                            }
+                        else:
+                            assigned = db.get_rmu_by_id(assigned_rmu_id)
+                            assigned_feeder = int_or_none(
+                                (assigned or {}).get("feeder_id")
+                            )
+                            if assigned is not None and (
+                                rmu_feeder_id is None
+                                or assigned_feeder == rmu_feeder_id
+                            ):
+                                rmu_cache[rmu_cache_key] = {
+                                    "records": [assigned],
+                                    "all_records": [assigned],
+                                    "status": "NO_PLACEHOLDER_RECHECKED_BY_ID",
+                                    "reason": "",
+                                }
+                            else:
+                                rmu_cache[rmu_cache_key] = {
+                                    "records": [],
+                                    "all_records": [assigned] if assigned else [],
+                                    "status": "NO_PLACEHOLDER_TARGET_INVALID",
+                                    "reason": (
+                                        "EXEC_NO_PLACEHOLDER_TARGET_INVALID: "
+                                        f"NO占位环网柜={rmu_name}分配的数据库RMU_ID="
+                                        f"{assigned_rmu_id}不存在或不属于FEEDER_ID="
+                                        f"{rmu_feeder_id or '-'}。"
+                                    ),
+                                }
+                    else:
+                        raw_rmu_records = db.get_rmu_records(rmu_name)
+                        rmu_cache[rmu_cache_key] = resolve_duplicate_name_records(
+                            raw_rmu_records,
+                            "RMU",
+                            source_feeder_id=rmu_feeder_id,
+                        )
                 rmu_resolution = rmu_cache[rmu_cache_key]
                 rmu_records = rmu_resolution["records"]
+
+                if no_placeholder and len(rmu_records) == 1:
+                    assigned_id = int_or_none(rmu_records[0].get("id"))
+                    owner_key = (str(source_file), assigned_id)
+                    previous_frame = no_target_owners.get(owner_key)
+                    current_frame = str(
+                        change.get("frame_index")
+                        or base_row.get("frame_index")
+                        or ""
+                    )
+                    if previous_frame is not None and previous_frame != current_frame:
+                        make_fail(
+                            change,
+                            base_row,
+                            "EXEC_NO_PLACEHOLDER_TARGET_REUSED: "
+                            f"数据库RMU_ID={assigned_id}已经分配给同一G文件中的"
+                            f"另一个NO占位环网柜（序号={previous_frame}），"
+                            "禁止重复关联。",
+                        )
+                        continue
+                    no_target_owners.setdefault(owner_key, current_frame)
                 log_callback(
                     f"复核环网柜 {rmu_name}："
                     f"数据库记录数={len(rmu_resolution['all_records'])}；"
@@ -753,9 +872,20 @@ class RmuModelModule(ModelModule):
                 )
                 frame_index = change.get("frame_index", "")
                 rmu_key = (frame_index, rmu_name)
+                rmu_feeder_id = int_or_none(
+                    change.get("rmu_feeder_id")
+                    or change.get("diagram_feeder_id")
+                )
+                assigned_rmu_id = int_or_none(change.get("rmu_id"))
+                rmu_cache_key = (
+                    rmu_name,
+                    rmu_feeder_id,
+                    assigned_rmu_id if is_no_rmu_name(rmu_name) else None,
+                )
 
                 if rmu_key not in rmu_map:
-                    records = rmu_cache.get(rmu_name, [])
+                    resolution = rmu_cache.get(rmu_cache_key, {})
+                    records = resolution.get("records", [])
                     rmu_map[rmu_key] = {
                         "frame_index": frame_index,
                         "frame_xml_id": "",
@@ -774,6 +904,18 @@ class RmuModelModule(ModelModule):
                         "rmu_id": (
                             int_or_none(records[0].get("id"))
                             if len(records) == 1
+                            else ""
+                        ),
+                        "rmu_feeder_id": rmu_feeder_id or "",
+                        "diagram_feeder_id": change.get(
+                            "diagram_feeder_id", ""
+                        ),
+                        "no_placeholder": (
+                            "YES" if is_no_rmu_name(rmu_name) else "NO"
+                        ),
+                        "no_assignment_status": (
+                            "ASSIGNED"
+                            if is_no_rmu_name(rmu_name) and len(records) == 1
                             else ""
                         ),
                         "device_rows": [],

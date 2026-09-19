@@ -111,7 +111,9 @@ DEFAULT_SETTINGS = {
     # Text-to-device assignment.
     "pole_switch_name_numeric": False,
     "pole_switch_name_format": "ALPHANUMERIC_SPACE",
-    "pole_switch_name_colors": ["WHITE"],
+    # Jazan pole-switch names use several visible colors (including black,
+    # yellow and cyan); the module still excludes type labels separately.
+    "pole_switch_name_colors": ["OTHER"],
     "pole_switch_name_has_background": False,
     "transformer_name_numeric": True,
     "transformer_name_format": "NUMERIC",

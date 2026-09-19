@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
     QPushButton, QComboBox, QPlainTextEdit, QFrame, QStackedWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QListWidget, QListWidgetItem, QGroupBox, QTabWidget, QScrollArea, QSizePolicy,
-    QProgressBar, QSplitter, QDialog, QTextBrowser, QDialogButtonBox
+    QProgressBar, QSplitter, QDialog, QTextBrowser, QDialogButtonBox,
+    QToolButton,
 )
 
 from dmm.application.job_worker import JobWorker
@@ -703,10 +704,10 @@ class MainWindow(QMainWindow):
         self.nav = QListWidget()
         self.nav.setObjectName("navList")
 
-        for label in ("数据库", "模型工作区", "图元管理", "运行历史", "设置", "帮助"):
+        for label in ("模型工作区", "图元管理", "数据库", "运行历史", "帮助", "设置"):
             self.nav.addItem(QListWidgetItem(label))
 
-        self.nav.setCurrentRow(1)
+        self.nav.setCurrentRow(0)
         sidebar_layout.addWidget(self.nav)
         body_layout.addWidget(sidebar)
 
@@ -714,15 +715,15 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
 
-        self.pages.addWidget(self._build_database_page())
         self.pages.addWidget(self._build_workspace_page())
         self.element_management_page = self._build_element_management_page()
         self.pages.addWidget(self.element_management_page)
+        self.pages.addWidget(self._build_database_page())
         self.pages.addWidget(self._build_history_page())
-        self.pages.addWidget(self._build_settings_page())
         self.pages.addWidget(self._build_help_page())
+        self.pages.addWidget(self._build_settings_page())
 
-        self.pages.setCurrentIndex(1)
+        self.pages.setCurrentIndex(0)
         body_layout.addWidget(self.pages, 1)
 
     # ------------------------------------------------------------
@@ -765,9 +766,31 @@ class MainWindow(QMainWindow):
         for row, (key, label) in enumerate(fields):
             grid.addWidget(QLabel(label), row, 0)
             edit = QLineEdit(str(self.cfg["db"].get(key, "")))
+            field_layout = QHBoxLayout()
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            field_layout.setSpacing(6)
+            field_layout.addWidget(edit, 1)
             if key == "password":
                 edit.setEchoMode(QLineEdit.Password)
-            grid.addWidget(edit, row, 1)
+                eye_button = QToolButton()
+                eye_button.setText("👁")
+                eye_button.setCheckable(True)
+                eye_button.setAutoRaise(True)
+                eye_button.setFixedWidth(42)
+                eye_button.setToolTip("显示密码")
+                eye_button.setAccessibleName("显示或隐藏数据库密码")
+
+                def _toggle_password(visible, password_edit=edit, button=eye_button):
+                    password_edit.setEchoMode(
+                        QLineEdit.Normal if visible else QLineEdit.Password
+                    )
+                    button.setText("🙈" if visible else "👁")
+                    button.setToolTip("隐藏密码" if visible else "显示密码")
+
+                eye_button.toggled.connect(_toggle_password)
+                field_layout.addWidget(eye_button)
+                self.db_password_eye = eye_button
+            grid.addLayout(field_layout, row, 1)
             self.db_edits[key] = edit
 
         layout.addWidget(box)
@@ -1356,7 +1379,7 @@ class MainWindow(QMainWindow):
 
         database_btn = QPushButton("数据库设置")
         database_btn.setObjectName("secondary")
-        database_btn.clicked.connect(lambda: self.nav.setCurrentRow(0))
+        database_btn.clicked.connect(lambda: self.nav.setCurrentRow(2))
 
         for button in (
             self.validate_btn,

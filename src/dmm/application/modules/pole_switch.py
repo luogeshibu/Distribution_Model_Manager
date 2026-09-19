@@ -6,6 +6,9 @@ from collections import defaultdict, deque
 from pathlib import Path
 
 from dmm.application.modules.base import ModelModule
+from dmm.application.modules.jazan_feeder import (
+    resolve_drawing_feeder_context,
+)
 from dmm.config.constants import RMU_LABEL_EDGE_TOLERANCE, RMU_LABEL_PATTERN
 from dmm.domain.gfile.element_catalog import (
     classification_is,
@@ -30,6 +33,13 @@ POLE_SWITCH_TAG = "CBreakerDis"
 # in its devref attribute. Never search these keywords in key_name, graphical
 # text, p_NameString, or any other attribute.
 POLE_SWITCH_DEVREF_KEYWORDS = ("LBS", "SEC", "AR")
+
+# Text labels printed next to a Jazan pole switch can include the model/type
+# marker itself (for example SLBS or SREC).  These are not device names.  Keep
+# this list separate from POLE_SWITCH_DEVREF_KEYWORDS: the latter is the
+# authoritative element-catalog classification list and must not be widened
+# just because a nearby graphical label needs filtering.
+POLE_SWITCH_NAME_TYPE_MARKERS = ("LBS", "SEC", "AR", "REC")
 
 # The fixed-mode resolver scans the G file's Text objects for each marked
 # device. Devices do not compete for a label; the same nearest Text may be
@@ -85,6 +95,19 @@ _NON_DEVICE_TEXT_EXACT = {
     "KVA",
     "MVA",
 }
+
+
+def _module_name_settings(settings, prefix: str):
+    """Map persisted module settings to the parser's generic filter keys."""
+    result = dict(settings or {})
+    for generic, suffix in (
+        ("name_format", "name_format"),
+        ("name_colors", "name_colors"),
+        ("name_has_background", "name_has_background"),
+    ):
+        if generic not in result and f"{prefix}_{suffix}" in result:
+            result[generic] = result[f"{prefix}_{suffix}"]
+    return result
 
 
 def _marked_pole_switch_family(value: str, element_catalog=None) -> str:
@@ -168,6 +191,22 @@ class PoleSwitchParser:
         return re.sub(r"\s+", " ", str(obj.attrs.get("ts") or "")).strip()
 
     @staticmethod
+    def _is_excluded_pole_name_text(text: str) -> bool:
+        """Reject numeric coordinates and visible device-type labels.
+
+        Jazan drawings place labels such as ``SLBS`` and ``SSEC`` close to
+        the actual device name.  The leading ``S`` is the Smart marker, but
+        the embedded LBS/SEC/AR token still identifies a type, not a device
+        name.  Decimal coordinate labels such as ``42.326609`` are also
+        annotations rather than pole-switch names.
+        """
+        value = re.sub(r"\s+", " ", str(text or "").strip())
+        compact = re.sub(r"[^A-Z0-9]", "", value.upper())
+        if re.fullmatch(r"\d+(?:\.\d+)+", value):
+            return True
+        return any(marker in compact for marker in POLE_SWITCH_NAME_TYPE_MARKERS)
+
+    @staticmethod
     def _is_valid_name(text: str) -> bool:
         value = str(text or "").strip()
         if not value or not any(char.isalnum() for char in value):
@@ -179,6 +218,8 @@ class PoleSwitchParser:
         # Pure numeric labels in this drawing are transformer/line numbers,
         # not the pole-switch names requested by this module.
         if value.isdigit():
+            return False
+        if PoleSwitchParser._is_excluded_pole_name_text(value):
             return False
         return bool(POLE_SWITCH_NAME_RE.fullmatch(value))
 
@@ -355,7 +396,10 @@ class PoleSwitchParser:
         return unique
 
     @staticmethod
-    def _global_text_is_nameable(obj: GObject) -> bool:
+    def _global_text_is_nameable(
+        obj: GObject,
+        exclude_classification_names=False,
+    ) -> bool:
         """Accept visible Text labels without using DText or structural labels."""
         value = str(obj.attrs.get("ts") or "").strip()
         if obj.tag.lower() != "text" or not value or not any(char.isalnum() for char in value):
@@ -370,6 +414,10 @@ class PoleSwitchParser:
             return False
         if re.fullmatch(r"F[._-]?C", upper):
             return False
+        if exclude_classification_names and (
+            PoleSwitchParser._is_excluded_pole_name_text(normalized)
+        ):
+            return False
         return bool(GRAPHICAL_DEVICE_NAME_RE.fullmatch(normalized))
 
     def build_global_name_owners(
@@ -379,6 +427,7 @@ class PoleSwitchParser:
         name_settings=None,
         nearest_only=False,
         device_filter=None,
+        exclude_classification_names=False,
     ):
         """Find the nearest eligible Text independently for each device.
 
@@ -435,7 +484,10 @@ class PoleSwitchParser:
         for obj in parsed.objects:
             if obj.xml_index in reserved_text_ids:
                 continue
-            if not self._global_text_is_nameable(obj):
+            if not self._global_text_is_nameable(
+                obj,
+                exclude_classification_names=exclude_classification_names,
+            ):
                 continue
             if name_format_penalty(self._text_value(obj), name_format) != 0:
                 continue
@@ -548,11 +600,13 @@ class PoleSwitchParser:
         return "near"
 
     def discover(self, parsed: ParsedG, element_catalog=None, name_settings=None):
+        name_settings = _module_name_settings(name_settings, "pole_switch")
         global_name_owners = self.build_global_name_owners(
             parsed,
             element_catalog,
             name_settings,
             nearest_only=True,
+            exclude_classification_names=True,
             device_filter=lambda obj: (
                 obj.tag == "CBreakerDis"
                 and bool(
@@ -620,7 +674,8 @@ class PoleSwitchModelModule(ModelModule):
     display_name = "柱上开关模型"
     description = (
         "识别图元管理中标记为 LBS / AR / SEC 的柱上开关，"
-        "按整张 G 图中距离最近的 Text 直接解析名称，关联 13501 / 13502 并安全回写 KeyID。"
+        "按整张 G 图中距离最近的 Text 直接解析名称；本图馈线由唯一设备确定，"
+        "重复名称按 FEEDER_ID 筛选；关联 13501 / 13502 并安全回写 KeyID。"
     )
     SUPPORTED_OPERATIONS = (
         "VALIDATE",
@@ -635,7 +690,7 @@ class PoleSwitchModelModule(ModelModule):
                 "table_id": POLE_SWITCH_TABLE_ID,
                 "domain": POLE_SWITCH_DOMAIN,
                 "match_mode": "CBREAKERDIS_ELEMENT_MARK_NEAREST_TEXT",
-                "description": "柱上开关：CBreakerDis 且图元管理分类标记为 LBS/SEC/AR；每个设备独立取最近合规 Text；13501 ID -> 13502 combined_id",
+                "description": "柱上开关：CBreakerDis 且图元管理分类标记为 LBS/SEC/AR；每个设备独立取最近合规 Text；本图唯一设备确定 FEEDER_ID，重复名称按 FEEDER_ID 筛选；13501 ID -> 13502 combined_id",
             }
         }
 
@@ -715,11 +770,27 @@ class PoleSwitchModelModule(ModelModule):
             return
         row["current_model_status"] = "DECODED"
 
-    def _resolve_row(self, row, db):
+    def _resolve_row(
+        self,
+        row,
+        db,
+        feeder=None,
+        feeder_source="NO_UNIQUE_DEVICE_FEEDER",
+    ):
         name = str(row.get("graphical_name") or "").strip()
+        feeder_id = int_or_none((feeder or {}).get("id"))
         row.update({
             "logical_code": name,
             "selected_device_name": name,
+            "feeder_resolution_source": feeder_source,
+            "source_feeder_id": feeder_id or "",
+            "source_feeder_name": str(
+                (feeder or {}).get("display_name") or ""
+            ).strip(),
+            "feeder_id": feeder_id or "",
+            "feeder_name": str(
+                (feeder or {}).get("display_name") or ""
+            ).strip(),
             "table_id": POLE_SWITCH_TABLE_ID,
             "table_name": "dms_cb_device",
             "configured_domain": POLE_SWITCH_DOMAIN,
@@ -754,10 +825,14 @@ class PoleSwitchModelModule(ModelModule):
             })
             return row
 
-        raw_combined_records = db.get_combined_device_records(name)
+        raw_combined_records = db.get_combined_device_records(
+            name,
+            feeder_id=feeder_id,
+        )
         combined_resolution = resolve_duplicate_name_records(
             raw_combined_records,
             "POLE_SWITCH",
+            source_feeder_id=feeder_id,
         )
         combined_records = combined_resolution["records"]
         row["combined_db_match_count"] = len(combined_records)
@@ -927,10 +1002,37 @@ class PoleSwitchModelModule(ModelModule):
             (settings or {}).get("element_catalog", {}),
             settings or {},
         )
+        feeder_context = resolve_drawing_feeder_context(
+            db,
+            g_file,
+            settings or {},
+            log_callback,
+        )
+        feeder = feeder_context.get("feeder")
+        feeder_source = feeder_context.get(
+            "feeder_source",
+            "NO_UNIQUE_DEVICE_FEEDER",
+        )
         rows = []
         total = max(len(discovered), 1)
         for index, row in enumerate(discovered, start=1):
-            resolved = self._resolve_row(dict(row), db)
+            resolved = self._resolve_row(
+                dict(row),
+                db,
+                feeder,
+                feeder_source,
+            )
+            resolved.update({
+                "diagram_feeder_id": feeder_context.get(
+                    "diagram_feeder_id", ""
+                ),
+                "diagram_feeder_resolution": feeder_context.get(
+                    "diagram_feeder_resolution", ""
+                ),
+                "diagram_feeder_source": feeder_context.get(
+                    "diagram_feeder_source", {}
+                ),
+            })
             resolved["file_name"] = Path(g_file).name
             rows.append(resolved)
             if progress_callback:
@@ -945,6 +1047,13 @@ class PoleSwitchModelModule(ModelModule):
             "g_file": str(Path(g_file)),
             "file_name": Path(g_file).name,
             "report_type": "POLE_SWITCH",
+            "diagram_feeder_id": feeder_context.get("diagram_feeder_id", ""),
+            "diagram_feeder_resolution": feeder_context.get(
+                "diagram_feeder_resolution", ""
+            ),
+            "diagram_feeder_source": feeder_context.get(
+                "diagram_feeder_source", {}
+            ),
             "pole_switch_rows": rows,
             "summary": {
                 "pole_switch_count": len(rows),
@@ -1064,7 +1173,18 @@ class PoleSwitchModelModule(ModelModule):
         for source_file, changes in changes_by_file.items():
             for change in changes:
                 base = dict(change.get("validated_row", {}) or {})
-                current = self._resolve_row(dict(base), db)
+                current = self._resolve_row(
+                    dict(base),
+                    db,
+                    {
+                        "id": base.get("feeder_id"),
+                        "display_name": base.get("feeder_name"),
+                    },
+                    base.get(
+                        "feeder_resolution_source",
+                        "NO_UNIQUE_DEVICE_FEEDER",
+                    ),
+                )
                 if (
                     current.get("association_ready") != "YES"
                     or current.get("writeback_needed") != "YES"

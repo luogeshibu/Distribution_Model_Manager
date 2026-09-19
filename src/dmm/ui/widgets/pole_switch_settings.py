@@ -39,7 +39,7 @@ class PoleSwitchSettingsWidget(QGroupBox):
             "柱上开关只识别 CBreakerDis。设备型号只根据图元管理中对对应图元文件的 LBS、SEC、AR 分类标记判断，"
             "不再从 devref 或文件名猜测类型；设备名称在当前模块识别出的设备范围内，直接取整张 G 图中距离最近的 Text；"
             "不会使用 key_name 或 p_NameString 作为设备名称，也不会用它们代替 devref 判断型号。"
-            "下方名称格式、颜色和背景选项是 Text 的强制筛选条件，颜色分为白色和其他颜色两类，默认白色。"
+            "下方名称格式、颜色和背景选项是 Text 的强制筛选条件，积攒现场默认使用其他颜色。"
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -68,7 +68,7 @@ class PoleSwitchSettingsWidget(QGroupBox):
         self.color_combo = NoWheelComboBox()
         self.color_combo.addItem("白色", "WHITE")
         self.color_combo.addItem("其他颜色", "OTHER")
-        saved_colors = config.get("pole_switch_name_colors", ["WHITE"]) or []
+        saved_colors = config.get("pole_switch_name_colors", ["OTHER"]) or []
         saved_color = str(saved_colors[0] if isinstance(saved_colors, (list, tuple)) else saved_colors).strip().upper()
         if saved_color not in {"WHITE", "OTHER"}:
             saved_color = "OTHER"

@@ -177,6 +177,8 @@ POLE_FIELDS = [
     "file_name", "object_type", "xml_id", "device_model", "device_family",
     "devref", "graphical_name", "name_source", "name_distance",
     "name_direction", "name_xml_id", "inside_rmu",
+    "diagram_feeder_id", "diagram_feeder_resolution",
+    "feeder_resolution_source", "feeder_id", "feeder_name",
     "key_name", "current_keyid", "current_device_id", "current_table_id",
     "current_domain", "current_db_name", "current_db_code",
     "current_combined_id", "combined_name", "combined_db_code", "combined_db_name",
@@ -195,6 +197,10 @@ POLE_LABELS = {
     "devref": "devref", "graphical_name": "图上名称", "name_source": "名称来源",
     "name_distance": "名称距离", "name_direction": "名称方向", "name_xml_id": "名称XML ID",
     "inside_rmu": "是否在环网柜内", "key_name": "XML key_name",
+    "diagram_feeder_id": "本图馈线ID（由唯一设备确定）",
+    "diagram_feeder_resolution": "本图馈线确定方式",
+    "feeder_resolution_source": "馈线识别方式", "feeder_id": "目标馈线ID",
+    "feeder_name": "目标馈线名称",
     "current_keyid": "当前KeyID（来源：G文件）", "current_device_id": "当前设备ID（来源：数据库）",
     "current_table_id": "当前表号（KeyID反解/数据库定义）", "current_domain": "当前域号（KeyID反解/数据库定义）",
     "current_db_name": "当前模型设备NAME（来源：数据库）", "current_db_code": "当前模型设备CODE（来源：数据库）",
@@ -222,6 +228,10 @@ POLE_LABELS_EN = {
         "devref": "devref", "graphical_name": "Graphical Name", "name_source": "Name Source",
         "name_distance": "Name Distance", "name_direction": "Name Direction", "name_xml_id": "Name XML ID",
         "inside_rmu": "Inside RMU", "key_name": "XML key_name",
+        "diagram_feeder_id": "Drawing Feeder ID (Unique Device)",
+        "diagram_feeder_resolution": "Drawing Feeder Resolution",
+        "feeder_resolution_source": "Feeder Resolution Source", "feeder_id": "Target Feeder ID",
+        "feeder_name": "Target Feeder Name",
         "current_keyid": "Current KeyID (G File)", "current_device_id": "Current Device ID (Database)",
         "current_table_id": "Current Table ID (Decoded/DB Definition)", "current_domain": "Current Domain (Decoded/DB Definition)",
         "current_db_name": "Current Model NAME (Database)", "current_db_code": "Current Model CODE (Database)",
@@ -246,6 +256,9 @@ POLE_LABELS_EN = {
 TRANSFORMER_FIELDS = [
     "file_name", "object_type", "xml_id", "devref", "graphical_name",
     "name_source", "name_distance", "name_direction", "name_xml_id",
+    "diagram_feeder_id", "diagram_feeder_resolution", "no_placeholder",
+    "no_assignment_status", "no_assignment_source", "no_assignment_index",
+    "no_assignment_pool_count",
     "feeder_resolution_source", "feeder_id",
     "feeder_name", "current_keyid", "current_keyid1", "current_keyid2",
     "current_device_id", "current_table_id", "current_domain",
@@ -261,6 +274,13 @@ TRANSFORMER_LABELS = {
     "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID（来源：G文件）",
     "devref": "devref", "graphical_name": "图上名称", "name_source": "名称来源",
     "name_distance": "名称距离", "name_direction": "名称方向", "name_xml_id": "名称XML ID",
+    "diagram_feeder_id": "本图馈线ID（由唯一环网柜确定）",
+    "diagram_feeder_resolution": "本图馈线确定方式",
+    "no_placeholder": "是否NO占位变压器",
+    "no_assignment_status": "NO分配状态",
+    "no_assignment_source": "NO分配方式",
+    "no_assignment_index": "NO分配序号",
+    "no_assignment_pool_count": "同馈线NO-可用数量",
     "feeder_resolution_source": "馈线识别方式", "feeder_id": "目标馈线ID",
     "feeder_name": "目标馈线名称（来源：数据库）", "current_keyid": "当前KeyID（来源：G文件）",
     "current_keyid1": "当前keyid1", "current_keyid2": "当前keyid2",
@@ -282,6 +302,13 @@ TRANSFORMER_LABELS_EN = {
     "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID (G File)",
     "devref": "devref", "graphical_name": "Graphical Name", "name_source": "Name Source",
     "name_distance": "Name Distance", "name_direction": "Name Direction", "name_xml_id": "Name XML ID",
+    "diagram_feeder_id": "Drawing Feeder ID (Unique RMU)",
+    "diagram_feeder_resolution": "Drawing Feeder Resolution",
+    "no_placeholder": "NO Placeholder Transformer",
+    "no_assignment_status": "NO Assignment Status",
+    "no_assignment_source": "NO Assignment Source",
+    "no_assignment_index": "NO Assignment Index",
+    "no_assignment_pool_count": "Available NO- Rows in Feeder",
     "feeder_resolution_source": "Feeder Resolution Source", "feeder_id": "Target Feeder ID",
     "feeder_name": "Target Feeder Name (Database)", "current_keyid": "Current KeyID (G File)",
     "current_keyid1": "Current keyid1", "current_keyid2": "Current keyid2",
@@ -368,6 +395,8 @@ RMU_FIELDS = [
     "file_name", "frame_index", "frame_xml_id", "rmu_name",
     "graphical_duplicate", "graphical_duplicate_count",
     "graphical_duplicate_frame_indexes",
+    "no_placeholder", "no_assignment_status", "no_assignment_source",
+    "no_assignment_index", "no_assignment_pool_count",
     "rmu_type", "rmu_type_source", "rmu_type_text", "rmu_type_devref",
     "rmu_type_consistent", "rmu_type_check_status", "rmu_type_check_reason",
     "rmu_is_smart", "rmu_smart_marker_types",
@@ -444,6 +473,11 @@ RMU_LABELS = {
     "graphical_duplicate": "图上名称是否重复",
     "graphical_duplicate_count": "图上同名环网柜数量",
     "graphical_duplicate_frame_indexes": "图上同名环网柜序号",
+    "no_placeholder": "是否NO占位环网柜",
+    "no_assignment_status": "NO占位分配状态",
+    "no_assignment_source": "NO占位分配方式",
+    "no_assignment_index": "NO占位分配序号",
+    "no_assignment_pool_count": "NO占位可用数据库数量",
     "rmu_type": "环网柜类型",
     "rmu_type_source": "类型识别来源",
     "rmu_type_text": "图内文字类型",
@@ -533,6 +567,11 @@ RMU_LABELS_EN = {
     "file_name": "G File", "frame_index": "RMU Index (G File)", "frame_xml_id": "Frame XML ID (G File)", "rmu_name": "RMU Name (G Text)",
     "graphical_duplicate": "Graphical Name Duplicate", "graphical_duplicate_count": "Graphical Duplicate Count",
     "graphical_duplicate_frame_indexes": "Graphical Duplicate RMU Indexes",
+    "no_placeholder": "NO Placeholder RMU",
+    "no_assignment_status": "NO Placeholder Assignment Status",
+    "no_assignment_source": "NO Placeholder Assignment Source",
+    "no_assignment_index": "NO Placeholder Assignment Index",
+    "no_assignment_pool_count": "Available Database RMUs for NO",
     "rmu_type": "RMU Type", "rmu_type_source": "Type Source", "rmu_type_text": "Graphical Text Type",
     "rmu_type_devref": "devref Type", "rmu_type_consistent": "Type Cross-check", "rmu_type_check_status": "Type Check Status",
     "rmu_type_check_reason": "Type Cross-check Details", "rmu_is_smart": "Smart Type", "rmu_smart_marker_types": "Smart Markers",
@@ -742,6 +781,19 @@ def flatten_rmu_rows(reports):
                 "graphical_duplicate_count": rmu.get("graphical_duplicate_count", 0),
                 "graphical_duplicate_frame_indexes": rmu.get(
                     "graphical_duplicate_frame_indexes", ""
+                ),
+                "no_placeholder": rmu.get("no_placeholder", "NO"),
+                "no_assignment_status": rmu.get(
+                    "no_assignment_status", ""
+                ),
+                "no_assignment_source": rmu.get(
+                    "no_assignment_source", ""
+                ),
+                "no_assignment_index": rmu.get(
+                    "no_assignment_index", ""
+                ),
+                "no_assignment_pool_count": rmu.get(
+                    "no_assignment_pool_count", ""
                 ),
                 "rmu_type": rmu.get("rmu_type", "UNKNOWN"),
                 "rmu_type_source": rmu.get("rmu_type_source", ""),
@@ -1424,10 +1476,162 @@ def _table_html(
     )
 
 
+def _report_feeder_name(report):
+    """Get the human-readable feeder name carried by a module report."""
+    source = report.get("diagram_feeder_source")
+    if isinstance(source, dict):
+        name = source.get("feeder_name") or source.get("display_name")
+        if name:
+            return str(name).strip()
+    name = report.get("diagram_feeder_name") or report.get("feeder_name")
+    if name:
+        return str(name).strip()
+    for rows_key in ("pole_switch_rows", "transformer_rows"):
+        for row in report.get(rows_key, []) or []:
+            name = row.get("feeder_name") or row.get("source_feeder_name")
+            if name:
+                return str(name).strip()
+    return ""
+
+
+def _feeder_display_name(feeder_name, feeder_id):
+    """Keep the numeric ID while presenting the readable feeder identity."""
+    name = str(feeder_name or "").strip()
+    value = str(feeder_id or "").strip()
+    if name and value:
+        return f"{name}（FEEDER_ID={value}）"
+    return name or value
+
+
+def _readable_feeder_rows(rows, reports):
+    """Decorate HTML-only rows; CSV/API report values remain numeric."""
+    names_by_file = {
+        str(report.get("file_name", "")): _report_feeder_name(report)
+        for report in reports or []
+    }
+    readable = []
+    for row in rows:
+        item = dict(row)
+        feeder_name = (
+            item.get("feeder_name")
+            or item.get("source_feeder_name")
+            or names_by_file.get(str(item.get("file_name", "")), "")
+        )
+        for field in ("diagram_feeder_id", "rmu_feeder_id", "feeder_id"):
+            if item.get(field) not in (None, ""):
+                item[field] = _feeder_display_name(
+                    feeder_name,
+                    item.get(field),
+                )
+        readable.append(item)
+    return readable
+
+
+def _drawing_feeder_notice(reports, language="zh_CN"):
+    """Render the feeder-proof device at the very top of a device report."""
+    english = normalize_language(language) == "en_US"
+    entries = []
+    seen = set()
+    for report in reports or []:
+        source = report.get("diagram_feeder_source")
+        feeder_id = report.get("diagram_feeder_id", "")
+        if not isinstance(source, dict) or not source or not feeder_id:
+            continue
+        if source.get("error"):
+            continue
+        device_type = str(source.get("device_type", "")).upper()
+        type_label = {
+            "RMU": "环网柜" if not english else "RMU",
+            "POLE_SWITCH": "柱上开关" if not english else "Pole switch",
+            "TRANSFORMER": "柱上变压器" if not english else "Pole transformer",
+        }.get(device_type, source.get("device_type", "") or ("设备" if not english else "device"))
+        device_name = (
+            source.get("device_name")
+            or source.get("rmu_name")
+            or ""
+        )
+        feeder_name = (
+            source.get("feeder_name")
+            or _report_feeder_name(report)
+        )
+        xml_id = source.get("xml_id") or source.get("frame_xml_id") or ""
+        database_id = source.get("device_id") or source.get("rmu_id") or ""
+        key = (
+            str(report.get("file_name", "")),
+            str(feeder_id),
+            str(device_type),
+            str(device_name),
+            str(xml_id),
+            str(database_id),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append({
+            "file_name": report.get("file_name", ""),
+            "feeder_id": feeder_id,
+            "feeder_name": feeder_name,
+            "type_label": type_label,
+            "device_name": device_name,
+            "xml_id": xml_id,
+            "database_id": database_id,
+        })
+
+    if not entries:
+        if english:
+            return (
+                "<div style='background:#FFF1D6;border:2px solid #E6B86A;"
+                "border-radius:8px;padding:12px 15px;margin:0 0 18px 0;"
+                "line-height:1.7'><strong>Drawing feeder proof is unavailable</strong>"
+                "<br>There is no recorded unique device proving this G file's FEEDER_ID. "
+                "Duplicate-name devices must not be linked automatically.</div>"
+            )
+        return (
+            "<div style='background:#FFF1D6;border:2px solid #E6B86A;"
+            "border-radius:8px;padding:12px 15px;margin:0 0 18px 0;"
+            "line-height:1.7'><strong>本图馈线尚未确定</strong>"
+            "<br>报告中没有记录到可唯一确定本图 FEEDER_ID 的设备，"
+            "因此同名设备不能按馈线自动安全关联。</div>"
+        )
+
+    rows = []
+    for item in entries:
+        if english:
+            detail = (
+                f"G file <strong>{esc(item['file_name'])}</strong> uses "
+                f"{esc(item['type_label'])} <strong>{esc(item['device_name'])}</strong> "
+                f"(XML ID={esc(item['xml_id'])}, database ID={esc(item['database_id'])}) "
+                f"to determine <strong>{esc(_feeder_display_name(item['feeder_name'], item['feeder_id']))}</strong>."
+            )
+        else:
+            detail = (
+                f"G文件 <strong>{esc(item['file_name'])}</strong> 通过 "
+                f"{esc(item['type_label'])} <strong>{esc(item['device_name'])}</strong> "
+                f"（XML ID={esc(item['xml_id'])}，数据库ID={esc(item['database_id'])}）"
+                f"确定 <strong>{esc(_feeder_display_name(item['feeder_name'], item['feeder_id']))}</strong>。"
+            )
+        rows.append(f"<li>{detail}</li>")
+
+    title = "Drawing feeder proof (first unique device)" if english else "本图馈线确定依据（首个唯一设备）"
+    explanation = (
+        "The first unique device listed below establishes the drawing feeder; subsequent same-name queries are filtered by this FEEDER_ID."
+        if english
+        else
+        "下面列出的第一个同图名称唯一且数据库记录唯一的设备，用于确定本图馈线；后续遇到同名设备时，统一按这个 FEEDER_ID 筛选。"
+    )
+    return (
+        "<div style='background:#EAF8F2;border:2px solid #00A878;"
+        "border-radius:8px;padding:12px 15px;margin:0 0 18px 0;line-height:1.7'>"
+        f"<strong>{esc(title)}</strong><br>{explanation}<ul style='margin:6px 0 0 20px;padding:0'>"
+        + "".join(rows)
+        + "</ul></div>"
+    )
+
+
 # Compatibility marker for historical report-contract tests: <h2>环网柜汇总</h2>
 def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
     export_path = Path(export_path)
-    rmu_rows = flatten_rmu_rows(reports)
+    rmu_rows = _readable_feeder_rows(flatten_rmu_rows(reports), reports)
     device_rows = flatten_device_rows(reports)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     language = normalize_language(language)
@@ -1484,12 +1688,28 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"
         row for row in rmu_rows
         if str(row.get("diagram_feeder_source", "NO")).upper() == "YES"
     ]
+    external_source_rows = []
+    for report in reports:
+        source = report.get("diagram_feeder_source")
+        if not isinstance(source, dict) or not source:
+            continue
+        if str(source.get("device_type", "")).upper() == "RMU":
+            continue
+        external_source_rows.append({
+            "file_name": report.get("file_name", ""),
+            **source,
+            "diagram_feeder_id": report.get("diagram_feeder_id", ""),
+        })
     duplicate_groups = {}
     for row in rmu_rows:
         if str(row.get("graphical_duplicate", "NO")).upper() != "YES":
             continue
         key = (str(row.get("file_name", "")), str(row.get("rmu_name", "")))
         duplicate_groups.setdefault(key, []).append(row)
+    no_placeholder_rows = [
+        row for row in rmu_rows
+        if str(row.get("no_placeholder", "NO")).upper() == "YES"
+    ]
 
     if english:
         if source_rows:
@@ -1510,8 +1730,26 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"
                 "<th>Frame XML ID</th><th>RMU ID</th><th>FEEDER_ID</th>"
                 f"</tr></thead><tbody>{source_body}</tbody></table>"
             )
+        elif external_source_rows:
+            source_body = "".join(
+                "<tr>"
+                f"<td>{esc(row.get('file_name', ''))}</td>"
+                f"<td>{esc(row.get('device_type', ''))}</td>"
+                f"<td>{esc(row.get('device_name', ''))}</td>"
+                f"<td>{esc(row.get('xml_id', ''))}</td>"
+                f"<td>{esc(row.get('device_id', ''))}</td>"
+                f"<td>{esc(row.get('diagram_feeder_id') or row.get('feeder_id', ''))}</td>"
+                "</tr>"
+                for row in external_source_rows
+            )
+            source_focus = (
+                "<table class='focus-table'><thead><tr>"
+                "<th>G File</th><th>Source Device Type</th><th>Source Name</th>"
+                "<th>XML ID</th><th>Database ID</th><th>FEEDER_ID</th>"
+                f"</tr></thead><tbody>{source_body}</tbody></table>"
+            )
         else:
-            source_focus = "<div class='focus-alert'>No unique RMU feeder source was found.</div>"
+            source_focus = "<div class='focus-alert'>No unique device feeder source was found.</div>"
         if duplicate_groups:
             duplicate_body = "".join(
                 "<tr>"
@@ -1529,8 +1767,9 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"
         else:
             duplicate_focus = "<div class='focus-ok'>No graphical RMU name duplicates were found.</div>"
         focus_title = "Key Findings"
-        source_title = "Drawing feeder source RMU"
+        source_title = "Drawing feeder source device"
         duplicate_title = "Graphical duplicate RMU names"
+        no_title = "Jazan NO placeholder allocation"
     else:
         if source_rows:
             source_body = "".join(
@@ -1550,8 +1789,26 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"
                 "<th>矩形框XML ID</th><th>环网柜ID</th><th>FEEDER_ID</th>"
                 f"</tr></thead><tbody>{source_body}</tbody></table>"
             )
+        elif external_source_rows:
+            source_body = "".join(
+                "<tr>"
+                f"<td>{esc(row.get('file_name', ''))}</td>"
+                f"<td>{esc(row.get('device_type', ''))}</td>"
+                f"<td>{esc(row.get('device_name', ''))}</td>"
+                f"<td>{esc(row.get('xml_id', ''))}</td>"
+                f"<td>{esc(row.get('device_id', ''))}</td>"
+                f"<td>{esc(row.get('diagram_feeder_id') or row.get('feeder_id', ''))}</td>"
+                "</tr>"
+                for row in external_source_rows
+            )
+            source_focus = (
+                "<table class='focus-table'><thead><tr>"
+                "<th>G文件</th><th>来源设备类型</th><th>来源名称</th>"
+                "<th>XML ID</th><th>数据库ID</th><th>FEEDER_ID</th>"
+                f"</tr></thead><tbody>{source_body}</tbody></table>"
+            )
         else:
-            source_focus = "<div class='focus-alert'>本图没有找到可唯一确定馈线的环网柜。</div>"
+            source_focus = "<div class='focus-alert'>本图没有找到可唯一确定馈线的设备。</div>"
         if duplicate_groups:
             duplicate_body = "".join(
                 "<tr>"
@@ -1569,8 +1826,43 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"
         else:
             duplicate_focus = "<div class='focus-ok'>未发现图形上重复的环网柜名称。</div>"
         focus_title = "重点结论"
-        source_title = "本图馈线推断来源环网柜"
+        source_title = "本图馈线推断来源设备"
         duplicate_title = "图形上重复的环网柜名称"
+        no_title = "Jazan NO占位环网柜分配"
+
+    if no_placeholder_rows:
+        no_body = "".join(
+            "<tr>"
+            f"<td>{esc(row.get('file_name', ''))}</td>"
+            f"<td>{esc(row.get('rmu_name', ''))}</td>"
+            f"<td>{esc(row.get('frame_index', ''))}</td>"
+            f"<td>{esc(row.get('no_assignment_status', ''))}</td>"
+            f"<td>{esc(row.get('rmu_id', ''))}</td>"
+            f"<td>{esc(row.get('rmu_feeder_id', '') or row.get('diagram_feeder_id', ''))}</td>"
+            f"<td>{esc(row.get('no_assignment_pool_count', ''))}</td>"
+            "</tr>"
+            for row in no_placeholder_rows
+        )
+        no_focus = (
+            "<table class='focus-table'><thead><tr>"
+            + (
+                "<th>G File</th><th>NO Name</th><th>Index</th>"
+                "<th>Assignment</th><th>Assigned RMU ID</th>"
+                "<th>FEEDER_ID</th><th>Available DB RMUs</th>"
+                if english
+                else
+                "<th>G文件</th><th>NO名称</th><th>序号</th>"
+                "<th>分配状态</th><th>数据库环网柜ID</th>"
+                "<th>FEEDER_ID</th><th>可用数据库环网柜数</th>"
+            )
+            + f"</tr></thead><tbody>{no_body}</tbody></table>"
+        )
+    else:
+        no_focus = (
+            "<div class='focus-ok'>No Jazan NO placeholder RMUs were found.</div>"
+            if english
+            else "<div class='focus-ok'>未发现 Jazan NO 占位环网柜。</div>"
+        )
 
     source_note = (
         "字段来源说明：矩形框 XML ID、图元 XML ID、当前 G 文件 KeyID 来自 G 文件；"
@@ -1588,6 +1880,7 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"
         f"<tr><td>{esc(tag)}</td><td>{esc(rule['table_id'])}</td><td>{esc(rule['domain'])}</td></tr>"
         for tag, rule in domain_rules.items()
     )
+    feeder_notice = _drawing_feeder_notice(reports, language)
 
     rmu_table = _table_html(
         rmu_rows,
@@ -1673,10 +1966,12 @@ thead .select-col{{z-index:7;background:var(--green-dark)!important;color:white}
   <div class="meta">{("Software: " + esc(APP_NAME_EN) + "  Version: " + esc(APP_VERSION) + "  Exported: " + esc(now)) if english else ("软件：" + esc(APP_NAME) + "　版本：" + esc(APP_VERSION) + "　导出时间：" + esc(now))}</div>
 </header>
 <main>
+  {feeder_notice}
   <div class="card focus-card">
     <h2>{esc(focus_title)}</h2>
     <div class="focus-section"><h3>{esc(source_title)}</h3>{source_focus}</div>
     <div class="focus-section"><h3>{esc(duplicate_title)}</h3>{duplicate_focus}</div>
+    <div class="focus-section"><h3>{esc(no_title)}</h3>{no_focus}</div>
   </div>
 
   <div class="card">
@@ -1984,20 +2279,23 @@ def _export_pole_html_bundle(reports, export_path, domain_rules, language="zh_CN
     export_path = Path(export_path)
     language = normalize_language(language)
     english = language == "en_US"
-    rows = flatten_pole_rows(reports)
+    rows = _readable_feeder_rows(flatten_pole_rows(reports), reports)
     labels = POLE_LABELS_EN if english else POLE_LABELS
     title = "Pole Switch Model Report" if english else "柱上开关模型报告"
     intro = (
         "Only CBreakerDis objects whose element file is marked LBS, SEC, or AR in Element Management are included. "
-        "Each device independently resolves its name from the nearest eligible Text; RMU and connection topology are not analyzed."
+        "Each device independently resolves its name from the nearest eligible Text. "
+        "The drawing feeder is proven by a unique RMU, pole switch, or transformer in the same G file; duplicate names are filtered by FEEDER_ID."
         if english
         else
         "本报告只展示 CBreakerDis 且对应图元文件在图元管理中标记为 LBS/SEC/AR 的柱上开关，"
         "每个设备独立取最近合规 Text；Text.ts 中的换行名称会合并为空格后保留，"
         "kV、A、V 等单位文字不作为名称，"
+        "本图馈线由同图名称唯一且数据库唯一的环网柜、柱上开关或柱上变压器确定，重复名称按 FEEDER_ID 筛选，"
         "并输出数据库链路和 KeyID 校验结果。"
     )
     domain_rows = "<tr><td>CBreakerDis</td><td>13502</td><td>40</td></tr>"
+    feeder_notice = _drawing_feeder_notice(reports, language)
     table = _table_html(
         rows,
         POLE_FIELDS,
@@ -2036,6 +2334,7 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
 <body>
 <header><h1>{esc(title)}</h1><div>{esc(APP_NAME if not english else APP_NAME_EN)}　v{esc(APP_VERSION)}</div></header>
 <main>
+{feeder_notice}
 <div class="card"><h2>{'Association Rules' if english else '关联规则'}</h2>
 <p>{esc(intro)}</p><p><strong>{'Field sources:' if english else '字段来源：'}</strong>{'G file name, object type, XML ID, text name, and current KeyID come from the G file; target device ID, CODE, NAME, table ID, and Domain come from the database or its table definition.' if english else 'G文件名、图元类型、XML ID、图上名称和当前KeyID来自G文件；目标设备ID、CODE、NAME、表号和域号来自数据库或数据库定义。'}</p><table><thead><tr><th>{'G Object Type' if english else 'G图元类型'}</th><th>{'Table ID (Database Definition)' if english else '表号（数据库定义）'}</th><th>{'Domain (Database Definition)' if english else '域号（数据库定义）'}</th></tr></thead><tbody>{domain_rows}</tbody></table></div>
 <div class="card"><h2>{'Status Legend' if english else '状态颜色说明'}</h2>
@@ -2058,20 +2357,24 @@ def _export_transformer_html_bundle(reports, export_path, domain_rules, language
     export_path = Path(export_path)
     language = normalize_language(language)
     english = language == "en_US"
-    rows = flatten_transformer_rows(reports)
+    rows = _readable_feeder_rows(flatten_transformer_rows(reports), reports)
     labels = TRANSFORMER_LABELS_EN if english else TRANSFORMER_LABELS
     title = "Pole Transformer Model Report" if english else "柱上变压器模型报告"
     intro = (
         "Only TransformerDis objects marked Transformer_OH in Element Management are included. "
         "Each device independently resolves its name from the nearest eligible Text. "
-        "The feeder uses G-root facID, with a unique facName fallback; connection topology is not analyzed."
+        "The drawing feeder is proven by a unique RMU, pole switch, or transformer in the same G file. "
+        "Graphical NO placeholders are allocated one by one from NO- database names under that feeder, without reuse."
         if english
         else
         "本报告只展示图元管理中标记为 Transformer_OH 的 TransformerDis 图元。"
         "每个设备独立取整张 G 图中最近的合规 Text 直接解析，"
-        "馈线使用 G 根 facID，查不到时仅使用唯一 facName 兜底，不分析连接拓扑。"
+        "本张图的馈线由同图名称唯一且数据库唯一的环网柜、柱上开关或柱上变压器确定；"
+        "图上 NO 占位变压器只从该馈线下 NAME 以 NO- 开头的数据库记录中逐个分配，"
+        "同一数据库变压器禁止重复使用。"
     )
     domain_rows = "<tr><td>TransformerDis</td><td>13505</td><td>1</td></tr>"
+    feeder_notice = _drawing_feeder_notice(reports, language)
     table = _table_html(
         rows,
         TRANSFORMER_FIELDS,
@@ -2110,6 +2413,7 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
 <body>
 <header><h1>{esc(title)}</h1><div>{esc(APP_NAME if not english else APP_NAME_EN)}　v{esc(APP_VERSION)}</div></header>
 <main>
+{feeder_notice}
 <div class="card"><h2>{'Association Rules' if english else '关联规则'}</h2>
 <p>{esc(intro)}</p><p><strong>{'Field sources:' if english else '字段来源：'}</strong>{'G file name, object type, XML ID, text name, and current KeyID come from the G file; target device ID, CODE, NAME, table ID, and Domain come from the database or its table definition.' if english else 'G文件名、图元类型、XML ID、图上名称和当前KeyID来自G文件；目标设备ID、CODE、NAME、表号和域号来自数据库或数据库定义。'}</p><table><thead><tr><th>{'G Object Type' if english else 'G图元类型'}</th><th>{'Table ID (Database Definition)' if english else '表号（数据库定义）'}</th><th>{'Domain (Database Definition)' if english else '域号（数据库定义）'}</th></tr></thead><tbody>{domain_rows}</tbody></table></div>
 <div class="card"><h2>{'Status Legend' if english else '状态颜色说明'}</h2>

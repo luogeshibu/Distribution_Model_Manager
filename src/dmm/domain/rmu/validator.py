@@ -30,6 +30,18 @@ def int_or_none(v):
         return None
 
 
+def is_no_rmu_name(value) -> bool:
+    """Return whether a graphical RMU name is a Jazan NO placeholder.
+
+    ``NO`` and names beginning with ``NO-`` are placeholders which are
+    resolved from the drawing feeder and an unused database RMU.  ``NOP`` is
+    deliberately not included: it is the Normally Open Point status label
+    and is filtered by the parser before RMU name resolution.
+    """
+    key = norm(value).casefold()
+    return key == "no" or key.startswith("no-")
+
+
 def resolve_duplicate_name_records(
     records,
     entity_code,
@@ -1794,12 +1806,19 @@ class RmuValidator:
             "RMU_DUPLICATE_NAME_FEEDER_UNRESOLVED",
             "RMU_DUPLICATE_NAME_DIAGRAM_FEEDER_NOT_FOUND",
             "RMU_GRAPHICAL_NAME_DUPLICATE",
+            "RMU_NO_PLACEHOLDER_FEEDER_NOT_RESOLVED",
+            "RMU_NO_PLACEHOLDER_NO_UNUSED_DB_RECORD",
+            "RMU_NO_PLACEHOLDER_QUERY_FAILED",
         }:
             detail = reason_text.split(":", 1)[1].strip() if ":" in reason_text else ""
             return (
                 f"{code}: "
                 f"已解析环网柜名称={name_ref or '-'}；{detail or '数据库存在多条无法唯一确定的同名记录'}；"
-                "环网柜图上名称必须唯一，禁止自动关联。"
+                + (
+                    "NO占位环网柜没有可用的唯一数据库目标，禁止自动关联。"
+                    if code.startswith("RMU_NO_PLACEHOLDER_")
+                    else "环网柜图上名称必须唯一，禁止自动关联。"
+                )
             )
 
         if code == "RMU_DIAGRAM_FEEDER_NOT_RESOLVED":
@@ -1823,7 +1842,91 @@ class RmuValidator:
             "环网柜身份无法可靠确定，禁止该RMU及柜内设备自动关联。"
         )
 
-    def validate_file(self, g_path: str | Path, positions: Sequence[str], progress_callback=None) -> Dict[str, Any]:
+    @staticmethod
+    def _no_placeholder_resolution(
+        choice,
+        record,
+        feeder_id,
+        pool_count=0,
+        assignment_index=0,
+        matched_by_name=False,
+        error_code="",
+    ):
+        """Build the normal resolver shape for a Jazan NO placeholder."""
+        name = norm(choice.get("name"))
+        selected_records = [record] if record else []
+        candidate = {
+            "name": name,
+            "directions": "",
+            "best_score": "",
+            "distance": "",
+            "color": "",
+            "is_green": "NO",
+            "xml_id": choice.get("frame_xml_id", ""),
+            "db_count": len(selected_records),
+            "db_records": selected_records,
+            "db_all_records": selected_records,
+            "db_all_count": len(selected_records),
+            "db_feeder_ids": [feeder_id] if feeder_id is not None else [],
+            "db_resolution": "NO_PLACEHOLDER_FEEDER_POOL",
+            "selected_by_rule": "YES",
+            "selection_reason": "JAZAN_NO_PLACEHOLDER_FEEDER_POOL",
+            "no_placeholder": "YES",
+            "no_assignment_source": (
+                "EXACT_DATABASE_NAME_IN_FEEDER_POOL"
+                if matched_by_name
+                else "UNUSED_DATABASE_RMU_IN_FEEDER_POOL"
+            ),
+            "no_assignment_index": assignment_index,
+            "no_assignment_pool_count": pool_count,
+        }
+
+        if record:
+            record_id = record.get("id", "")
+            reason = (
+                "RMU_NO_PLACEHOLDER_ASSIGNED: "
+                f"图上名称={name}；按同图 FEEDER_ID={feeder_id} 从未占用的"
+                f"数据库环网柜中分配 RMU_ID={record_id}；"
+                f"本图NO占位环网柜分配序号={assignment_index}；"
+                f"可用数据库环网柜数={pool_count}；"
+                "同一个数据库环网柜不会重复分配。"
+            )
+            return {
+                "status": "PASS",
+                "reason": reason,
+                "candidate_rows": [candidate],
+                "selected": candidate,
+            }
+
+        if error_code:
+            reason = error_code
+        elif feeder_id is None:
+            reason = (
+                "RMU_NO_PLACEHOLDER_FEEDER_NOT_RESOLVED: "
+                f"图上名称={name}；本张G图没有可唯一确定的FEEDER_ID，"
+                "无法从同馈线数据库环网柜中分配目标。"
+            )
+        else:
+            reason = (
+                "RMU_NO_PLACEHOLDER_NO_UNUSED_DB_RECORD: "
+                f"图上名称={name}；同图FEEDER_ID={feeder_id}下没有未占用的"
+                "数据库环网柜可分配；不能重复使用已经分配给其它图形环网柜的记录。"
+            )
+        return {
+            "status": "FAIL",
+            "reason": reason,
+            "candidate_rows": [candidate],
+            "selected": candidate,
+        }
+
+    def validate_file(
+        self,
+        g_path: str | Path,
+        positions: Sequence[str],
+        progress_callback=None,
+        external_feeder_ids=None,
+        external_feeder_source=None,
+    ) -> Dict[str, Any]:
         parsed = self.parser.parse(g_path)
         frames = self.parser.find_rmu_frames(parsed)
         name_assignment_error = ""
@@ -1908,7 +2011,13 @@ class RmuValidator:
                     if graphical_choice
                     else []
                 )
-                if duplicate_items:
+                # Ordinary repeated graphical names remain an immediate
+                # warning.  NO / NO-* is the Jazan placeholder exception:
+                # several placeholders are allowed and compete for distinct
+                # unused database RMUs on the drawing feeder.
+                if duplicate_items and not is_no_rmu_name(
+                    graphical_choice["name"]
+                ):
                     duplicate_name = graphical_choice["name"]
                     duplicate_indexes = ",".join(
                         str(item["frame_index"]) for item in duplicate_items
@@ -1921,6 +2030,16 @@ class RmuValidator:
                             f"{len(duplicate_items)} 次（环网柜序号：{duplicate_indexes}）；"
                             "按Jazan规则直接告警，不查询该名称的数据库记录。"
                         ),
+                        "candidate_rows": [],
+                        "selected": None,
+                    }
+                    continue
+                if graphical_choice and is_no_rmu_name(
+                    graphical_choice["name"]
+                ):
+                    pre_resolved_names[frame.frame.xml_id] = {
+                        "status": "PENDING_NO_PLACEHOLDER",
+                        "reason": "",
                         "candidate_rows": [],
                         "selected": None,
                     }
@@ -1961,12 +2080,25 @@ class RmuValidator:
                         diagram_feeder_candidates.append(feeder_id)
                         if diagram_feeder_source is None:
                             diagram_feeder_source = {
+                                "device_type": "RMU",
                                 "frame_index": frame_index,
                                 "frame_xml_id": frame.frame.xml_id,
                                 "rmu_name": selected.get("name", ""),
                                 "rmu_id": all_records[0].get("id", ""),
                                 "feeder_id": all_records[0].get("feeder_id", ""),
                             }
+
+        external_ids = sorted({
+            feeder_id
+            for feeder_id in (
+                int_or_none(value) for value in (external_feeder_ids or [])
+            )
+            if feeder_id is not None
+        })
+        if external_ids:
+            diagram_feeder_candidates.extend(external_ids)
+            if diagram_feeder_source is None and external_feeder_source:
+                diagram_feeder_source = dict(external_feeder_source)
 
         diagram_feeder_ids = sorted(set(diagram_feeder_candidates))
         diagram_feeder_id = (
@@ -1975,11 +2107,16 @@ class RmuValidator:
             else None
         )
         if diagram_feeder_id is not None:
-            diagram_feeder_resolution = "UNIQUE_RMU_IN_SAME_G_FILE"
+            diagram_feeder_resolution = (
+                "UNIQUE_RMU_IN_SAME_G_FILE"
+                if diagram_feeder_source
+                and diagram_feeder_source.get("device_type") == "RMU"
+                else "UNIQUE_DEVICE_IN_SAME_G_FILE"
+            )
             self.log(
-                f"[{parsed.path.name}] 按同图唯一环网柜推断馈线："
+                f"[{parsed.path.name}] 按同图唯一设备推断馈线："
                 f"FEEDER_ID={diagram_feeder_id}；"
-                "后续同名环网柜按该馈线筛选。"
+                "后续同名设备按该馈线筛选。"
             )
         elif len(diagram_feeder_ids) > 1:
             diagram_feeder_resolution = "CONFLICTING_UNIQUE_RMU_FEEDERS"
@@ -1990,6 +2127,161 @@ class RmuValidator:
             )
         else:
             diagram_feeder_resolution = "NO_UNIQUE_RMU_FEEDER"
+
+        # Resolve ordinary duplicate database names against the feeder before
+        # allocating NO placeholders.  Their concrete RMU IDs are reserved so
+        # the placeholder pool cannot reuse an RMU already represented by a
+        # normal graphical name in this drawing.
+        if diagram_feeder_id is not None and not name_assignment_error:
+            for frame in frames:
+                choice = graphical_name_choices.get(frame.frame.xml_id)
+                if not choice or is_no_rmu_name(choice.get("name")):
+                    continue
+                duplicate_items = graphical_duplicate_groups.get(
+                    choice["name"].casefold(), []
+                )
+                if duplicate_items:
+                    continue
+                resolved_before = pre_resolved_names.get(
+                    frame.frame.xml_id, {}
+                )
+                selected_before = resolved_before.get("selected") or {}
+                all_before = list(
+                    selected_before.get("db_all_records")
+                    or selected_before.get("db_records")
+                    or []
+                )
+                if len(all_before) <= 1:
+                    continue
+                try:
+                    pre_resolved_names[frame.frame.xml_id] = (
+                        self._resolve_rmu_name(
+                            parsed,
+                            frame,
+                            positions,
+                            preassigned_candidates=preassigned_name_candidates,
+                            source_feeder_id=diagram_feeder_id,
+                        )
+                    )
+                except Exception as exc:
+                    pre_resolved_names[frame.frame.xml_id] = {
+                        "status": "FAIL",
+                        "reason": (
+                            "RMU_NAME_RESOLUTION_ERROR: "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                        "candidate_rows": [],
+                        "selected": None,
+                    }
+
+        reserved_rmu_ids = set()
+        for resolved in pre_resolved_names.values():
+            if resolved.get("status") != "PASS":
+                continue
+            selected = resolved.get("selected") or {}
+            records = selected.get("db_records") or []
+            if len(records) == 1:
+                record_id = int_or_none(records[0].get("id"))
+                if record_id is not None:
+                    reserved_rmu_ids.add(record_id)
+
+        # Jazan placeholder allocation.  A NO / NO-* graphical label is not
+        # looked up as an ordinary RMU NAME.  Instead, all database parent
+        # rows belonging to the feeder inferred from another RMU form a pool.
+        # Exact database-name matches win; otherwise the remaining rows are
+        # assigned deterministically in database-id/name order.  Each row is
+        # removed from the pool immediately, so two graphical placeholders can
+        # never receive the same combined-device ID.
+        no_placeholder_frames = [
+            (frame, graphical_name_choices.get(frame.frame.xml_id))
+            for frame in frames
+            if graphical_name_choices.get(frame.frame.xml_id)
+            and is_no_rmu_name(
+                graphical_name_choices[frame.frame.xml_id].get("name")
+            )
+        ]
+        if no_placeholder_frames:
+            if diagram_feeder_id is None:
+                for frame, choice in no_placeholder_frames:
+                    pre_resolved_names[frame.frame.xml_id] = (
+                        self._no_placeholder_resolution(
+                            choice,
+                            None,
+                            None,
+                        )
+                    )
+            else:
+                try:
+                    pool_loader = getattr(
+                        self.db,
+                        "get_rmu_records_by_feeder_id",
+                        None,
+                    )
+                    if not callable(pool_loader):
+                        raise AttributeError(
+                            "数据库客户端未实现按FEEDER_ID读取环网柜记录"
+                        )
+                    pool = list(pool_loader(diagram_feeder_id) or [])
+                    available = [
+                        row for row in pool
+                        if int_or_none(row.get("id")) is not None
+                        and int_or_none(row.get("id")) not in reserved_rmu_ids
+                    ]
+                    available.sort(
+                        key=lambda row: (
+                            norm(row.get("name")).casefold(),
+                            int_or_none(row.get("id"))
+                            if int_or_none(row.get("id")) is not None
+                            else 2**63 - 1,
+                        )
+                    )
+                    pool_count = len(available)
+                    for assignment_index, (frame, choice) in enumerate(
+                        no_placeholder_frames,
+                        start=1,
+                    ):
+                        selected_record = None
+                        matched_by_name = False
+                        choice_name = norm(choice.get("name"))
+                        for row in available:
+                            if norm(row.get("name")).casefold() == choice_name.casefold():
+                                selected_record = row
+                                matched_by_name = True
+                                break
+                        if selected_record is None and available:
+                            selected_record = available[0]
+                        if selected_record is not None:
+                            available.remove(selected_record)
+                            selected_id = int_or_none(
+                                selected_record.get("id")
+                            )
+                            if selected_id is not None:
+                                reserved_rmu_ids.add(selected_id)
+                        pre_resolved_names[frame.frame.xml_id] = (
+                            self._no_placeholder_resolution(
+                                choice,
+                                selected_record,
+                                diagram_feeder_id,
+                                pool_count=pool_count,
+                                assignment_index=assignment_index,
+                                matched_by_name=matched_by_name,
+                            )
+                        )
+                except Exception as exc:
+                    error_code = (
+                        "RMU_NO_PLACEHOLDER_QUERY_FAILED: "
+                        f"按FEEDER_ID={diagram_feeder_id}读取NO占位环网柜池失败："
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    for frame, choice in no_placeholder_frames:
+                        pre_resolved_names[frame.frame.xml_id] = (
+                            self._no_placeholder_resolution(
+                                choice,
+                                None,
+                                diagram_feeder_id,
+                                error_code=error_code,
+                            )
+                        )
 
         report = {
             "g_file": str(parsed.path),
@@ -2100,13 +2392,25 @@ class RmuValidator:
                 "rmu_db_all_count": 0,
                 "rmu_feeder_id": "",
                 "diagram_feeder_id": diagram_feeder_id or "",
+                "rmu_id": "",
                 "graphical_duplicate": (
                     "YES"
                     if graphical_choice
+                    and not is_no_rmu_name(graphical_choice["name"])
                     and graphical_choice["name"].casefold()
                     in graphical_duplicate_groups
                     else "NO"
                 ),
+                "no_placeholder": (
+                    "YES"
+                    if graphical_choice
+                    and is_no_rmu_name(graphical_choice["name"])
+                    else "NO"
+                ),
+                "no_assignment_status": "",
+                "no_assignment_source": "",
+                "no_assignment_index": "",
+                "no_assignment_pool_count": "",
                 "graphical_duplicate_count": (
                     len(
                         graphical_duplicate_groups.get(
@@ -2114,6 +2418,7 @@ class RmuValidator:
                         )
                     )
                     if graphical_choice
+                    and not is_no_rmu_name(graphical_choice["name"])
                     else 0
                 ),
                 "graphical_duplicate_frame_indexes": ",".join(
@@ -2123,6 +2428,7 @@ class RmuValidator:
                             graphical_choice["name"].casefold(), []
                         )
                         if graphical_choice
+                        and not is_no_rmu_name(graphical_choice["name"])
                         else []
                     )
                 ),
@@ -2169,9 +2475,13 @@ class RmuValidator:
                     is_graphical_duplicate = (
                         rmu_result.get("graphical_duplicate") == "YES"
                     )
-                    if is_graphical_duplicate:
+                    is_no_placeholder = (
+                        rmu_result.get("no_placeholder") == "YES"
+                    )
+                    if is_graphical_duplicate or is_no_placeholder:
                         # The graphical duplicate warning is authoritative;
-                        # do not query RMU or child-device tables.
+                        # a NO placeholder assignment is also authoritative;
+                        # do not re-query the placeholder by its literal name.
                         pass
                     elif diagram_feeder_id is not None:
                         # Re-resolve the name with the feeder inferred from a
@@ -2247,6 +2557,25 @@ class RmuValidator:
                     rmu_result["rmu_feeder_id"] = (
                         display_candidate["db_records"][0].get("feeder_id", "")
                     )
+                rmu_result["no_assignment_status"] = (
+                    "ASSIGNED"
+                    if display_candidate.get("no_placeholder") == "YES"
+                    and display_candidate["db_records"]
+                    else (
+                        "NOT_ASSIGNED"
+                        if display_candidate.get("no_placeholder") == "YES"
+                        else ""
+                    )
+                )
+                rmu_result["no_assignment_source"] = display_candidate.get(
+                    "no_assignment_source", ""
+                )
+                rmu_result["no_assignment_index"] = display_candidate.get(
+                    "no_assignment_index", ""
+                )
+                rmu_result["no_assignment_pool_count"] = display_candidate.get(
+                    "no_assignment_pool_count", ""
+                )
 
             if (
                 rmu_result.get("rmu_type_check_reason")
@@ -2286,6 +2615,10 @@ class RmuValidator:
                     resolved["reason"],
                     skip_db_lookup=(
                         rmu_result.get("graphical_duplicate") == "YES"
+                        or (
+                            rmu_result.get("no_placeholder") == "YES"
+                            and resolved.get("status") != "PASS"
+                        )
                     ),
                 )
                 self._validate_nonunique_rmu_existing_links(rmu_result)

@@ -164,7 +164,38 @@ class OracleClient:
             {"rmu_name": lookup_name},
         )
 
-    def get_combined_device_records(self, device_name: str) -> List[Dict[str, Any]]:
+    def get_rmu_records_by_feeder_id(
+        self,
+        feeder_id: Any,
+    ) -> List[Dict[str, Any]]:
+        """Return all combined-device/RMU rows owned by one FEEDER_ID.
+
+        Jazan drawings may use ``NO`` or ``NO-...`` as a placeholder rather
+        than the database RMU NAME.  The caller uses this feeder-scoped pool
+        to allocate each database parent to at most one graphical placeholder.
+        """
+        if feeder_id in (None, ""):
+            return []
+        table_name = self.get_table_name(13501)
+        rows = self._query(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE feeder_id = :feeder_id
+            ORDER BY id
+            """,
+            {"feeder_id": int(feeder_id)},
+        )
+        for row in rows:
+            row["_table_id"] = 13501
+            row["_table_name"] = table_name
+        return rows
+
+    def get_combined_device_records(
+        self,
+        device_name: str,
+        feeder_id: Any = None,
+    ) -> List[Dict[str, Any]]:
         """Resolve a standalone device name in dms_combined_device (13501).
 
         Pole-switch drawings use the visible device name as the business
@@ -178,13 +209,18 @@ class OracleClient:
         if not lookup_name:
             return []
         table_name = self.get_table_name(13501)
+        feeder_clause = ""
+        binds = {"device_name": lookup_name}
+        if feeder_id not in (None, ""):
+            feeder_clause = " AND feeder_id = :feeder_id"
+            binds["feeder_id"] = int(feeder_id)
         rows = self._query(
             f"""
             SELECT *
             FROM {table_name}
-            WHERE TRIM(name) = :device_name
+            WHERE TRIM(name) = :device_name{feeder_clause}
             """,
-            {"device_name": lookup_name},
+            binds,
         )
         matched_field = "NAME"
         if not rows:
@@ -192,9 +228,9 @@ class OracleClient:
                 f"""
                 SELECT *
                 FROM {table_name}
-                WHERE TRIM(code) = :device_name
+                WHERE TRIM(code) = :device_name{feeder_clause}
                 """,
-                {"device_name": lookup_name},
+                binds,
             )
             matched_field = "CODE"
         for row in rows:
@@ -442,6 +478,34 @@ class OracleClient:
             ORDER BY id
             """,
             binds,
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
+
+    def get_transformer_devices_by_feeder_id(
+        self,
+        feeder_id: Any,
+        table_id: int = 13505,
+    ) -> List[Dict[str, Any]]:
+        """List all transformer rows belonging to one feeder.
+
+        Jazan uses graphical ``NO`` as a placeholder.  The transformer
+        module filters this feeder-scoped result to database names beginning
+        with ``NO-`` and allocates each row at most once.
+        """
+        if feeder_id in (None, ""):
+            return []
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT id, code, name, feeder_id
+            FROM {table_name}
+            WHERE feeder_id = :feeder_id
+            ORDER BY id
+            """,
+            {"feeder_id": int(feeder_id)},
         )
         for row in rows:
             row["_table_id"] = int(table_id)

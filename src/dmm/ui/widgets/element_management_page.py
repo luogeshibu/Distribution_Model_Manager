@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
@@ -10,12 +10,15 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
     QHeaderView,
@@ -205,6 +208,70 @@ class ElementDefinitionWorker(QThread):
                 client.close()
 
 
+class ElementDownloadWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        ssh_config: dict,
+        remote_directory: str,
+        rows: list[dict],
+        destination: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.ssh_config = dict(ssh_config or {})
+        self.remote_directory = str(remote_directory or "").strip()
+        self.rows = list(rows or [])
+        self.destination = Path(destination)
+
+    @staticmethod
+    def _relative_parts(row: dict) -> tuple[str, ...]:
+        value = str(row.get("file_key") or row.get("file_name") or "").strip()
+        parts = tuple(
+            part
+            for part in PurePosixPath(value.replace("\\", "/")).parts
+            if part not in ("", ".", "..")
+        )
+        return parts or (PurePosixPath(value).name or "element.g",)
+
+    def run(self):
+        success = 0
+        failed = []
+        try:
+            self.destination.mkdir(parents=True, exist_ok=True)
+            with ReadOnlySshClient(
+                self.ssh_config.get("host", ""),
+                self.ssh_config.get("port", 22),
+                self.ssh_config.get("username", ""),
+                self.ssh_config.get("password", ""),
+            ) as client:
+                for row in self.rows:
+                    parts = self._relative_parts(row)
+                    relative = PurePosixPath(*parts)
+                    remote_path = str(
+                        PurePosixPath(self.remote_directory) / relative
+                    )
+                    local_path = self.destination.joinpath(*parts)
+                    try:
+                        client.stat_file(remote_path)
+                        local_path.parent.mkdir(parents=True, exist_ok=True)
+                        client.download_file(remote_path, str(local_path))
+                        success += 1
+                    except Exception as exc:
+                        failed.append((str(relative), str(exc)))
+            self.completed.emit(
+                {
+                    "success": success,
+                    "failed": failed,
+                    "destination": str(self.destination),
+                }
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class ElementManagementWidget(QWidget):
     """Read-only server inspection plus local maintenance of element marks."""
 
@@ -222,6 +289,7 @@ class ElementManagementWidget(QWidget):
         self.config = config
         self.rows: list[dict] = []
         self.worker: ElementDefinitionWorker | None = None
+        self.download_worker: ElementDownloadWorker | None = None
         self._rendering = False
         self.dirty = False
         self._build_ui()
@@ -237,7 +305,7 @@ class ElementManagementWidget(QWidget):
         layout.addWidget(title)
         subtitle = QLabel(
             "维护服务器图元文件与设备分类标记。进入页面只读取本地缓存，不会自动访问服务器；"
-            "只有点击“手动读取/同步服务器图元”才会重新读取。模型识别按完整图元路径匹配，"
+            "只有点击“刷新图元列表”才会重新读取。可勾选图元下载到本地，模型识别按完整图元路径匹配，"
             "原始服务器文件只读，不会被修改。"
         )
         subtitle.setWordWrap(True)
@@ -246,40 +314,75 @@ class ElementManagementWidget(QWidget):
 
         source_box = QGroupBox("图元定义来源")
         source_grid = QGridLayout(source_box)
-        source_grid.addWidget(QLabel("图元定义来源目录"), 0, 0)
         ssh_config = dict(self.config.get("ssh", {}) or {})
-        self.directory_edit = QLineEdit(
-            str(
+        self.server_edits = {}
+        server_fields = [
+            ("host", "IP / 主机", ssh_config.get("host", "172.16.21.27")),
+            ("port", "端口", ssh_config.get("port", 22)),
+            ("username", "用户名", ssh_config.get("username", "up8000")),
+            ("password", "密码", ssh_config.get("password", "up8000")),
+            (
+                "element_directory",
+                "远程目录",
                 ssh_config.get(
                     "element_directory",
                     "/home/up8000/data/graph/element",
-                )
-            )
-        )
-        self.directory_edit.setPlaceholderText(
-            "/home/up8000/data/graph/element"
-        )
-        source_grid.addWidget(self.directory_edit, 0, 1)
+                ),
+            ),
+        ]
+        for row_index, (key, label, value) in enumerate(server_fields):
+            source_grid.addWidget(QLabel(label), row_index, 0)
+            edit = QLineEdit(str(value))
+            if key == "password":
+                edit.setEchoMode(QLineEdit.Password)
+            if key == "element_directory":
+                edit.setPlaceholderText("/home/up8000/data/graph/element")
+                self.directory_edit = edit
+            self.server_edits[key] = edit
+            source_grid.addWidget(edit, row_index, 1, 1, 6)
 
-        self.load_button = QPushButton("手动读取/同步服务器图元")
+        self.test_server_button = QPushButton("测试 SSH 连接")
+        self.test_server_button.clicked.connect(self.test_server_connection)
+        self.save_server_button = QPushButton("保存 SSH 配置")
+        self.save_server_button.clicked.connect(self.save_server_settings)
+        self.load_button = QPushButton("刷新图元列表")
         self.load_button.clicked.connect(self.load_remote_definitions)
-        source_grid.addWidget(self.load_button, 0, 2)
+        self.download_button = QPushButton("下载所选图元")
+        self.download_button.clicked.connect(self.download_selected_elements)
+
         self.load_saved_button = QPushButton("载入本地标记")
         self.load_saved_button.clicked.connect(self._load_saved_records)
-        source_grid.addWidget(self.load_saved_button, 0, 3)
-        self.save_button = QPushButton("保存当前标记")
+        self.save_button = QPushButton("保存标记")
         self.save_button.clicked.connect(self.save_catalog)
-        source_grid.addWidget(self.save_button, 0, 4)
         self.import_button = QPushButton("导入共享配置")
         self.import_button.clicked.connect(self.import_shared_catalog)
-        source_grid.addWidget(self.import_button, 0, 5)
         self.export_button = QPushButton("导出共享配置")
         self.export_button.clicked.connect(self.export_shared_catalog)
-        source_grid.addWidget(self.export_button, 0, 6)
+
+        self.more_actions_button = QToolButton()
+        self.more_actions_button.setText("更多操作")
+        self.more_actions_button.setPopupMode(QToolButton.InstantPopup)
+        more_menu = QMenu(self.more_actions_button)
+        more_menu.addAction(self.test_server_button.text(), self.test_server_connection)
+        more_menu.addAction(self.save_server_button.text(), self.save_server_settings)
+        more_menu.addSeparator()
+        more_menu.addAction(self.download_button.text(), self.download_selected_elements)
+        more_menu.addAction(self.load_saved_button.text(), self._load_saved_records)
+        more_menu.addSeparator()
+        more_menu.addAction(self.import_button.text(), self.import_shared_catalog)
+        more_menu.addAction(self.export_button.text(), self.export_shared_catalog)
+        self.more_actions_button.setMenu(more_menu)
+
+        actions = QHBoxLayout()
+        actions.addWidget(self.load_button)
+        actions.addWidget(self.save_button)
+        actions.addWidget(self.more_actions_button)
+        actions.addStretch()
+        source_grid.addLayout(actions, 5, 1, 1, 6)
 
         self.status_label = QLabel("尚未手动同步服务器图元；当前仅使用本地缓存。")
         self.status_label.setWordWrap(True)
-        source_grid.addWidget(self.status_label, 1, 1, 1, 6)
+        source_grid.addWidget(self.status_label, 6, 1, 1, 6)
         layout.addWidget(source_box)
 
         maintain_box = QGroupBox("标记搜索")
@@ -329,6 +432,92 @@ class ElementManagementWidget(QWidget):
         self.table.itemChanged.connect(self._on_table_changed)
         layout.addWidget(self.table, 1)
 
+    def _current_element_ssh_config(self) -> dict:
+        """Read and validate the SSH settings shown on this page."""
+        values = {
+            key: edit.text().strip()
+            for key, edit in self.server_edits.items()
+        }
+        try:
+            values["port"] = int(values.get("port") or 22)
+        except Exception as exc:
+            raise ValueError("SSH 端口必须是整数。") from exc
+        if not 1 <= values["port"] <= 65535:
+            raise ValueError("SSH 端口必须在 1~65535 之间。")
+        if not values.get("host"):
+            raise ValueError("SSH IP / 主机不能为空。")
+        if not values.get("username"):
+            raise ValueError("SSH 用户名不能为空。")
+        if not values.get("element_directory"):
+            raise ValueError("远程图元目录不能为空。")
+
+        config = dict(self.config.get("ssh", {}) or {})
+        config.update(
+            {
+                "host": values["host"],
+                "port": values["port"],
+                "username": values["username"],
+                "password": values.get("password", ""),
+                "element_directory": values["element_directory"],
+            }
+        )
+        return config
+
+    def _save_element_ssh_config(self, config: dict):
+        saved = dict(self.config.get("ssh", {}) or {})
+        saved.update(config)
+        self.config["ssh"] = saved
+        save_settings(self.config)
+
+    def test_server_connection(self):
+        try:
+            config = self._current_element_ssh_config()
+            self.status_label.setText("正在测试图元服务器 SSH/SFTP 只读连接……")
+            with ReadOnlySshClient(
+                config["host"],
+                config["port"],
+                config["username"],
+                config["password"],
+            ) as client:
+                client.test_connection()
+            self._save_element_ssh_config(config)
+            self.status_label.setText(
+                "图元服务器 SSH/SFTP 连接正常；远程图元文件为只读。"
+            )
+        except Exception as exc:
+            self.status_label.setText(f"图元服务器连接失败：{exc}")
+            QMessageBox.warning(self, "图元服务器连接失败", str(exc))
+
+    def save_server_settings(self):
+        try:
+            config = self._current_element_ssh_config()
+            self._save_element_ssh_config(config)
+            self.status_label.setText(
+                "图元服务器 SSH 配置已保存；下次启动将自动恢复。"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "保存图元服务器配置失败", str(exc))
+
+    def _refresh_server_info(self):
+        """Refresh the SSH fields after the shared SSH settings change."""
+        config = dict(self.config.get("ssh", {}) or {})
+        defaults = {
+            "host": "172.16.21.27",
+            "port": 22,
+            "username": "up8000",
+            "password": "up8000",
+            "element_directory": "/home/up8000/data/graph/element",
+        }
+        for key, default in defaults.items():
+            edit = self.server_edits.get(key)
+            if edit is not None:
+                edit.setText(str(config.get(key, default)))
+
+    def refresh_server_info(self):
+        """Refresh the endpoint fields after SSH settings are changed."""
+        if hasattr(self, "server_edits"):
+            self._refresh_server_info()
+
     def _catalog(self) -> dict:
         catalog = self.config.get("element_catalog", {})
         return catalog if isinstance(catalog, dict) else {}
@@ -355,13 +544,14 @@ class ElementManagementWidget(QWidget):
             )
             if answer != QMessageBox.Yes:
                 return
-        directory = self.directory_edit.text().strip()
-        if not directory:
-            QMessageBox.warning(self, "读取图元定义", "服务器图元目录不能为空。")
+        try:
+            ssh_config = self._current_element_ssh_config()
+        except Exception as exc:
+            QMessageBox.warning(self, "读取图元定义", str(exc))
             return
-        ssh_config = dict(self.config.get("ssh", {}) or {})
+        directory = ssh_config["element_directory"]
         self.load_button.setEnabled(False)
-        self.status_label.setText("正在手动读取服务器图元文件列表，请稍候……")
+        self.status_label.setText("正在读取服务器图元文件列表，请稍候……")
         worker = ElementDefinitionWorker(ssh_config, directory, self)
         self.worker = worker
         worker.loaded.connect(self._on_remote_loaded)
@@ -372,6 +562,76 @@ class ElementManagementWidget(QWidget):
 
     def _clear_worker(self):
         self.worker = None
+
+    def _selected_element_rows(self) -> list[dict]:
+        selected = []
+        for index in self.table.selectionModel().selectedRows():
+            row_index = index.row()
+            if 0 <= row_index < len(self.rows):
+                selected.append(self.rows[row_index])
+        return selected
+
+    def download_selected_elements(self):
+        if self.download_worker is not None and self.download_worker.isRunning():
+            return
+        rows = self._selected_element_rows()
+        if not rows:
+            QMessageBox.information(
+                self,
+                "下载所选图元",
+                "请先在下方表格中选择至少一个图元文件。",
+            )
+            return
+        try:
+            config = self._current_element_ssh_config()
+        except Exception as exc:
+            QMessageBox.warning(self, "下载图元", str(exc))
+            return
+
+        start_path = str(self.config.get("last_folder_path") or Path.home())
+        destination = QFileDialog.getExistingDirectory(
+            self,
+            "选择图元下载目录",
+            start_path,
+        )
+        if not destination:
+            return
+
+        self.download_button.setEnabled(False)
+        self.status_label.setText(f"正在下载 {len(rows)} 个图元文件，请稍候……")
+        worker = ElementDownloadWorker(
+            config,
+            config["element_directory"],
+            rows,
+            destination,
+            self,
+        )
+        self.download_worker = worker
+        worker.completed.connect(self._on_element_download_completed)
+        worker.failed.connect(self._on_element_download_failed)
+        worker.finished.connect(lambda: self.download_button.setEnabled(True))
+        worker.finished.connect(self._clear_download_worker)
+        worker.start()
+
+    def _clear_download_worker(self):
+        self.download_worker = None
+
+    def _on_element_download_completed(self, result: dict):
+        success = int(result.get("success", 0))
+        failed = list(result.get("failed", []) or [])
+        destination = result.get("destination", "")
+        message = f"成功下载 {success} 个，失败 {len(failed)} 个。\n保存目录：{destination}"
+        if failed:
+            details = "\n".join(f"- {name}: {error}" for name, error in failed[:8])
+            message += f"\n\n失败详情：\n{details}"
+        self.config["last_folder_path"] = str(destination)
+        save_settings(self.config)
+        self.status_label.setText(message.replace("\n", "<br>"))
+        QMessageBox.information(self, "图元下载完成", message)
+
+    def _on_element_download_failed(self, message: str):
+        self.status_label.setText(f"图元下载失败：{message}")
+        QMessageBox.warning(self, "图元下载失败", message)
 
     def _on_remote_failed(self, message: str):
         self.status_label.setText(f"读取失败：{message}")
@@ -545,7 +805,27 @@ class ElementManagementWidget(QWidget):
         if self._rendering:
             return
         self.dirty = True
-        self.status_label.setText("有未保存的图元标记修改，请点击“保存图元标记”。")
+        answer = QMessageBox.question(
+            self,
+            "保存图元标记修改",
+            "检测到图元分类标记或备注发生变化，是否立即保存到本机？\n\n"
+            "保存后，后续模型校验会使用新的标记。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Yes:
+            try:
+                self.save_catalog()
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "保存图元标记失败",
+                    f"修改已保留在当前页面，但保存到本机失败：\n{exc}",
+                )
+        else:
+            self.status_label.setText(
+                "有未保存的图元标记修改；模型校验仍会使用上一次已保存的配置。"
+            )
 
     def save_catalog(self):
         self._sync_rows_from_table()
@@ -654,5 +934,22 @@ class ElementManagementWidget(QWidget):
         self.dirty = True
         self._render_rows()
         self.status_label.setText(
-            f"已导入 {imported} 条共享标记，尚未写入本地设置；请确认后点击“保存图元标记”。"
+            f"已导入 {imported} 条共享标记，等待确认保存到本机。"
         )
+        answer = QMessageBox.question(
+            self,
+            "保存共享图元标记",
+            f"已导入 {imported} 条图元标记，是否立即保存到本机？\n\n"
+            "保存后，模型校验才能使用这些标记。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Yes:
+            try:
+                self.save_catalog()
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "保存图元标记失败",
+                    f"共享配置已导入，但保存到本机失败：\n{exc}",
+                )

@@ -5,6 +5,9 @@ from collections import defaultdict
 from pathlib import Path
 
 from dmm.application.modules.base import ModelModule
+from dmm.application.modules.jazan_feeder import (
+    resolve_drawing_feeder_context,
+)
 from dmm.domain.gfile.parser import GParser, GObject, ParsedG
 from dmm.domain.gfile.element_catalog import (
     classification_is,
@@ -12,6 +15,7 @@ from dmm.domain.gfile.element_catalog import (
 )
 from dmm.domain.rmu.validator import (
     int_or_none,
+    is_no_rmu_name,
     norm,
     resolve_duplicate_name_records,
 )
@@ -19,6 +23,7 @@ from dmm.infrastructure.gfile.writeback import GWriteBackService
 from dmm.application.modules.pole_switch import (
     POLE_SWITCH_NAME_RE,
     PoleSwitchParser,
+    _module_name_settings,
 )
 
 
@@ -26,6 +31,16 @@ TRANSFORMER_TABLE_ID = 13505
 TRANSFORMER_DOMAIN = 1
 TRANSFORMER_TAG = "TransformerDis"
 TRANSFORMER_SOURCE_TAG = "CBreaker"
+
+
+def _is_no_transformer_name(value: str) -> bool:
+    """Return whether a graphical name is a Jazan NO placeholder."""
+    return is_no_rmu_name(value)
+
+
+def _is_database_no_transformer_name(value: str) -> bool:
+    """Database NO pool members must use the explicit ``NO-`` prefix."""
+    return norm(value).upper().startswith("NO-")
 
 
 class TransformerParser(PoleSwitchParser):
@@ -130,6 +145,7 @@ class TransformerParser(PoleSwitchParser):
         return result, all_source_keyids
 
     def discover(self, parsed: ParsedG, element_catalog=None, name_settings=None):
+        name_settings = _module_name_settings(name_settings, "transformer")
         global_name_owners = self.build_global_name_owners(
             parsed,
             element_catalog,
@@ -204,7 +220,9 @@ class TransformerModelModule(ModelModule):
     display_name = "柱上变压器模型"
     description = (
         "只识别图元管理中标记为 Transformer_OH 的图元；被标记图元直接视为柱上变压器，"
-        "每个设备独立取最近合规 Text；数据库同名记录按 FEEDER_ID 判定是否重复，"
+        "每个设备独立取最近合规 Text；本图馈线由同图唯一环网柜确定；"
+        "图上 NO 占位名称从同馈线 NAME 以 NO- 开头的记录中逐个分配且不重复，"
+        "数据库同名记录按 FEEDER_ID 判定是否重复，"
         "按 13505 / dms_tr_device 计算双 KeyID 并安全回写。"
     )
     SUPPORTED_OPERATIONS = (
@@ -223,6 +241,7 @@ class TransformerModelModule(ModelModule):
                 "description": (
                     "仅使用图元管理标记 Transformer_OH 的图元，直接视为柱上变压器；"
                     "每个变压器直接解析整张 G 图中最近的 Text，不依赖现场图元文件名；"
+                    "本图馈线由同图唯一环网柜确定；NO 占位从同馈线 NO- 记录逐个分配且不重复；"
                     "数据库同名记录仅按 FEEDER_ID 判定；目标表为 13505，Domain=1"
                 ),
             }
@@ -294,7 +313,15 @@ class TransformerModelModule(ModelModule):
             return
         row["current_model_status"] = "DECODED"
 
-    def _resolve_row(self, row, db, feeder, feeder_source):
+    def _resolve_row(
+        self,
+        row,
+        db,
+        feeder,
+        feeder_source,
+        assigned_device=None,
+        no_assignment=None,
+    ):
         name = str(row.get("graphical_name") or "").strip()
         feeder_id = int_or_none((feeder or {}).get("id"))
         row.update({
@@ -319,7 +346,14 @@ class TransformerModelModule(ModelModule):
             "association_action": "",
             "writeback_needed": "NO",
             "association_ready": "NO",
+            "no_placeholder": "YES" if _is_no_transformer_name(name) else "NO",
+            "no_assignment_status": "",
+            "no_assignment_source": "",
+            "no_assignment_index": "",
+            "no_assignment_pool_count": "",
         })
+        if no_assignment:
+            row.update(no_assignment)
         self._current_link_fields(row, db)
 
         if not name:
@@ -328,15 +362,43 @@ class TransformerModelModule(ModelModule):
                 "TRANSFORMER_NAME_NOT_FOUND: 未找到 Transformer_OH 图元对应的最近 Text。",
             )
 
-        raw_records = db.get_transformer_devices_by_name(
-            name,
-            table_id=TRANSFORMER_TABLE_ID,
-        )
-        resolution = resolve_duplicate_name_records(
-            raw_records,
-            "TRANSFORMER",
-        )
-        records = resolution["records"]
+        if _is_no_transformer_name(name):
+            if feeder_id is None:
+                return self._fail(
+                    row,
+                    "TRANSFORMER_NO_PLACEHOLDER_FEEDER_NOT_RESOLVED: "
+                    f"图上名称={name}；本张G图没有可唯一确定的FEEDER_ID，"
+                    "无法从同馈线 NO- 变压器中分配目标。",
+                )
+            device = dict(assigned_device or {})
+            assigned_id = int_or_none(device.get("id"))
+            assigned_feeder = int_or_none(device.get("feeder_id"))
+            if assigned_id is None or assigned_feeder != feeder_id:
+                return self._fail(
+                    row,
+                    "TRANSFORMER_NO_PLACEHOLDER_NO_UNUSED_DB_RECORD: "
+                    f"图上名称={name}；FEEDER_ID={feeder_id}下没有可用的"
+                    "NO-开头数据库变压器，或目标已被其它NO占用。",
+                )
+            records = [device]
+            resolution = {
+                "all_records": [device],
+                "feeder_ids": [feeder_id],
+                "status": "NO_PLACEHOLDER_FEEDER_POOL",
+                "reason": "",
+            }
+        else:
+            raw_records = db.get_transformer_devices_by_name(
+                name,
+                feeder_id=feeder_id,
+                table_id=TRANSFORMER_TABLE_ID,
+            )
+            resolution = resolve_duplicate_name_records(
+                raw_records,
+                "TRANSFORMER",
+                source_feeder_id=feeder_id,
+            )
+            records = resolution["records"]
         row["db_match_count"] = len(records)
         row["db_all_match_count"] = len(resolution["all_records"])
         row["db_feeder_ids"] = resolution["feeder_ids"]
@@ -422,6 +484,154 @@ class TransformerModelModule(ModelModule):
         })
         return row
 
+    def _infer_drawing_feeder(self, db, g_file, settings, log_callback):
+        return resolve_drawing_feeder_context(
+            db,
+            g_file,
+            settings,
+            log_callback,
+        )
+
+    def _resolve_discovered_rows(
+        self,
+        db,
+        g_file,
+        discovered,
+        settings,
+        log_callback,
+    ):
+        feeder_context = self._infer_drawing_feeder(
+            db,
+            g_file,
+            settings,
+            log_callback,
+        )
+        feeder = feeder_context.get("feeder")
+        feeder_source = feeder_context.get("feeder_source", "NO_UNIQUE_RMU_FEEDER")
+        feeder_id = int_or_none((feeder or {}).get("id"))
+        base_fields = {
+            "diagram_feeder_id": feeder_context.get("diagram_feeder_id", ""),
+            "diagram_feeder_resolution": feeder_context.get(
+                "diagram_feeder_resolution", ""
+            ),
+            "diagram_feeder_source": feeder_context.get(
+                "diagram_feeder_source", {}
+            ),
+        }
+
+        resolved_by_xml = {}
+        reserved_device_ids = set()
+        normal_rows = [
+            row for row in discovered
+            if not _is_no_transformer_name(row.get("graphical_name"))
+        ]
+        no_rows = [
+            row for row in discovered
+            if _is_no_transformer_name(row.get("graphical_name"))
+        ]
+
+        # Resolve named transformers first so the NO pool cannot take a
+        # database row already represented by a normal graphical name.
+        for row in normal_rows:
+            resolved = self._resolve_row(
+                dict(row),
+                db,
+                feeder,
+                feeder_source,
+            )
+            resolved.update(base_fields)
+            resolved["file_name"] = Path(g_file).name
+            resolved_by_xml[str(row.get("xml_id"))] = resolved
+            device_id = int_or_none(resolved.get("db_device_id"))
+            if device_id is not None:
+                reserved_device_ids.add(device_id)
+
+        no_pool = []
+        pool_error = ""
+        if no_rows and feeder_id is not None:
+            try:
+                pool_loader = getattr(
+                    db,
+                    "get_transformer_devices_by_feeder_id",
+                    None,
+                )
+                if not callable(pool_loader):
+                    raise AttributeError(
+                        "数据库客户端未实现按FEEDER_ID读取柱上变压器记录"
+                    )
+                no_pool = [
+                    row for row in (pool_loader(feeder_id) or [])
+                    if _is_database_no_transformer_name(row.get("name"))
+                    and int_or_none(row.get("id")) not in reserved_device_ids
+                ]
+                no_pool.sort(
+                    key=lambda row: (
+                        norm(row.get("name")).casefold(),
+                        int_or_none(row.get("id"))
+                        if int_or_none(row.get("id")) is not None
+                        else 2**63 - 1,
+                    )
+                )
+            except Exception as exc:
+                pool_error = (
+                    "TRANSFORMER_NO_PLACEHOLDER_QUERY_FAILED: "
+                    f"按FEEDER_ID={feeder_id}读取NO-变压器池失败：{exc}"
+                )
+
+        pool_count = len(no_pool)
+        for assignment_index, row in enumerate(no_rows, start=1):
+            name = str(row.get("graphical_name") or "").strip()
+            selected = None
+            matched_by_name = False
+            if not pool_error:
+                for candidate in no_pool:
+                    if norm(candidate.get("name")).casefold() == name.casefold():
+                        selected = candidate
+                        matched_by_name = True
+                        break
+                if selected is None and no_pool:
+                    selected = no_pool[0]
+                if selected is not None:
+                    no_pool.remove(selected)
+                    reserved_device_ids.add(int_or_none(selected.get("id")))
+
+            assignment = {
+                "no_assignment_status": "ASSIGNED" if selected else "UNASSIGNED",
+                "no_assignment_source": (
+                    "EXACT_DATABASE_NAME_IN_FEEDER_POOL"
+                    if matched_by_name
+                    else "UNUSED_DATABASE_NO_PREFIX_IN_FEEDER_POOL"
+                    if selected
+                    else "FEEDER_NO_PREFIX_POOL"
+                ),
+                "no_assignment_index": assignment_index,
+                "no_assignment_pool_count": pool_count,
+            }
+            if pool_error:
+                assignment["no_assignment_source"] = "QUERY_FAILED"
+            resolved = self._resolve_row(
+                dict(row),
+                db,
+                feeder,
+                feeder_source,
+                assigned_device=selected,
+                no_assignment=assignment,
+            )
+            if pool_error:
+                resolved = self._fail(resolved, pool_error)
+            resolved.update(base_fields)
+            resolved["file_name"] = Path(g_file).name
+            resolved_by_xml[str(row.get("xml_id"))] = resolved
+
+        return [
+            resolved_by_xml.get(str(row.get("xml_id")))
+            or self._fail(
+                dict(row),
+                "TRANSFORMER_INTERNAL_RESOLUTION_MISSING",
+            )
+            for row in discovered
+        ], feeder_context
+
     def _analyze_file(self, db, g_file, settings=None, log_callback=None, progress_callback=None):
         parsed = GParser().parse(g_file)
         discovered, context = TransformerParser().discover(
@@ -429,15 +639,16 @@ class TransformerModelModule(ModelModule):
             (settings or {}).get("element_catalog", {}),
             settings or {},
         )
+        resolved_rows, feeder_context = self._resolve_discovered_rows(
+            db,
+            g_file,
+            discovered,
+            settings or {},
+            log_callback,
+        )
         rows = []
         total = max(len(discovered), 1)
-        for index, row in enumerate(discovered, start=1):
-            row_context = dict(context)
-            row_source_keyids = list(row.get("source_cbreaker_keyids") or [])
-            if row_source_keyids:
-                row_context["source_cbreaker_keyids"] = row_source_keyids
-            resolved = self._resolve_row(dict(row), db, None, "DATABASE_NAME")
-            resolved["file_name"] = Path(g_file).name
+        for index, resolved in enumerate(resolved_rows, start=1):
             rows.append(resolved)
             if progress_callback:
                 progress_callback(
@@ -450,12 +661,20 @@ class TransformerModelModule(ModelModule):
                 f"[{Path(g_file).name}] 柱上变压器识别完成："
                 f"TransformerDis={len(discovered)}；"
                 f"主网CBreaker={context.get('source_cbreaker_count', 0)}；"
+                f"图纸FEEDER_ID={feeder_context.get('diagram_feeder_id') or '-'}；"
                 f"数据库可关联={sum(1 for row in rows if row.get('association_ready') == 'YES')}"
             )
         return {
             "g_file": str(Path(g_file)),
             "file_name": Path(g_file).name,
             "report_type": "TRANSFORMER",
+            "diagram_feeder_id": feeder_context.get("diagram_feeder_id", ""),
+            "diagram_feeder_resolution": feeder_context.get(
+                "diagram_feeder_resolution", ""
+            ),
+            "diagram_feeder_source": feeder_context.get(
+                "diagram_feeder_source", {}
+            ),
             "transformer_rows": rows,
             "summary": {
                 "transformer_count": len(rows),
@@ -464,6 +683,11 @@ class TransformerModelModule(ModelModule):
                 "transformer_unlinked": sum(1 for row in rows if row.get("status") == "UNLINKED"),
                 "transformer_relink": sum(1 for row in rows if row.get("status") == "RELINK"),
                 "association_ready_count": sum(1 for row in rows if row.get("association_ready") == "YES"),
+                "no_placeholder_count": sum(1 for row in rows if row.get("no_placeholder") == "YES"),
+                "no_placeholder_assigned_count": sum(
+                    1 for row in rows
+                    if row.get("no_assignment_status") == "ASSIGNED"
+                ),
             },
         }
 
@@ -546,6 +770,7 @@ class TransformerModelModule(ModelModule):
         changes_by_file = preview_data.get("changes_by_file", {})
         execution_rows = []
         executable = defaultdict(list)
+        no_target_owners = {}
         selected_count = sum(len(items) for items in changes_by_file.values())
         source_map = {str(Path(item).resolve()): Path(item) for item in files}
         for source_file, fingerprint in (preview_data.get("file_fingerprints", {}) or {}).items():
@@ -557,6 +782,31 @@ class TransformerModelModule(ModelModule):
         for source_file, changes in changes_by_file.items():
             for change in changes:
                 base = dict(change.get("validated_row", {}) or {})
+                name = str(base.get("graphical_name") or "").strip()
+                assigned_device = None
+                if _is_no_transformer_name(name):
+                    assigned_id = int_or_none(base.get("db_device_id"))
+                    owner_key = (str(Path(source_file).resolve()), assigned_id)
+                    previous_xml_id = no_target_owners.get(owner_key)
+                    if assigned_id is not None and previous_xml_id is not None:
+                        current = self._fail(
+                            dict(base),
+                            "EXEC_TRANSFORMER_NO_PLACEHOLDER_TARGET_REUSED: "
+                            f"数据库变压器ID={assigned_id}已经分配给同一G文件的"
+                            f"另一个NO占位变压器（XML ID={previous_xml_id}），"
+                            "禁止重复关联。",
+                        )
+                        current["_execution_result"] = "SKIPPED"
+                        execution_rows.append((change, current))
+                        continue
+                    if assigned_id is not None:
+                        assigned_device = db.get_transformer_device_by_id(
+                            TRANSFORMER_TABLE_ID,
+                            assigned_id,
+                        )
+                        no_target_owners[owner_key] = str(
+                            base.get("xml_id") or ""
+                        )
                 current = self._resolve_row(
                     dict(base),
                     db,
@@ -564,7 +814,21 @@ class TransformerModelModule(ModelModule):
                         "id": base.get("feeder_id"),
                         "display_name": base.get("feeder_name"),
                     },
-                    base.get("feeder_resolution_source", "DATABASE_NAME"),
+                    base.get(
+                        "feeder_resolution_source",
+                        "NO_UNIQUE_RMU_FEEDER",
+                    ),
+                    assigned_device=assigned_device,
+                    no_assignment={
+                        key: base.get(key, "")
+                        for key in (
+                            "no_placeholder",
+                            "no_assignment_status",
+                            "no_assignment_source",
+                            "no_assignment_index",
+                            "no_assignment_pool_count",
+                        )
+                    },
                 )
                 if current.get("association_ready") != "YES" or current.get("writeback_needed") != "YES":
                     current["_execution_result"] = "SKIPPED"
