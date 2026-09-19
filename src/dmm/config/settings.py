@@ -4,7 +4,12 @@ import copy
 import json
 
 from dmm.config.defaults import DEFAULT_SETTINGS
-from dmm.infrastructure.filesystem.workspace import CONFIG_PATH, ensure_workspace
+from dmm.infrastructure.filesystem.workspace import (
+    CONFIG_PATH,
+    ensure_workspace,
+    load_user_element_catalog,
+    save_user_element_catalog,
+)
 
 
 def load_settings() -> dict:
@@ -27,6 +32,24 @@ def load_settings() -> dict:
             settings["rmu_name_positions"].update(value)
         else:
             settings[key] = value
+
+    # Element classifications are user preferences, not application files.
+    # Prefer the user-level cache so replacing/deleting the program directory
+    # does not erase the last saved catalog.  Migrate an older workspace-only
+    # catalog the first time it is found.
+    saved_catalog = settings.get("element_catalog")
+    user_catalog = load_user_element_catalog()
+    if isinstance(user_catalog, dict) and isinstance(
+        user_catalog.get("records"), list
+    ):
+        settings["element_catalog"] = user_catalog
+    elif isinstance(saved_catalog, dict) and isinstance(
+        saved_catalog.get("records"), list
+    ) and saved_catalog.get("records"):
+        try:
+            save_user_element_catalog(saved_catalog)
+        except OSError:
+            pass
 
     # The project has a fixed default Oracle password.
     # If an older workspace config saved an empty password, fall back to default.
@@ -61,3 +84,11 @@ def save_settings(settings: dict) -> None:
         json.dumps(settings, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    catalog = settings.get("element_catalog")
+    if isinstance(catalog, dict) and isinstance(catalog.get("records"), list):
+        try:
+            save_user_element_catalog(catalog)
+        except OSError:
+            # The workspace copy remains available if the user profile is
+            # temporarily read-only or unavailable.
+            pass
