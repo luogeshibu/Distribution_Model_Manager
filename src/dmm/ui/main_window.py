@@ -1634,9 +1634,9 @@ class MainWindow(QMainWindow):
             return """
             <h2>配网主站设备关联帮助</h2>
             <h3>1. 强制识别</h3>
-            <p>只扫描 Bus、CBreaker、Disconnector、GroundDisconnector 图元，不分析拓扑，也不从无关文字猜测设备。</p>
+            <p>只扫描 CBreaker、Disconnector、GroundDisconnector 图元；Bus 不在本模块处理，不分析拓扑，也不从无关文字猜测设备。</p>
             <h3>2. 数据库匹配</h3>
-            <p>每个对象先以最近的 CBreaker 为锚点，再查找该断路器最近的 RMU 矩形框；只检查这个 RMU 框内部设备或保护信号的已有 KeyID，然后直接查询 13501 dms_combined_device，使用 RMU 的 FEEDER_ID 反查厂站和馈线。没有 RMU、框内没有有效关联，或 RMU 没有唯一 FEEDER_ID 时，直接报错“该图环网柜请手动关联”。不会扫描整张图，也不分析拓扑。确认上下文后，从图元 key_name 提取 CODE 并按配置表精确查询。默认 CBreaker → 407 / breaker、Disconnector → 408 / disconnector、GroundDisconnector → 409 / grounddisconnector，域号均为 40。Bus 表号待现场确认，默认不执行关联。</p>
+            <p>首先按图内唯一设备证据确定一个 FEEDER_ID：优先使用环网柜，其次柱上开关，再其次柱上变压器；同一优先级出现多个不同 FEEDER_ID 时直接阻断，并在报告中列出来源和证据。确认馈线后，按 BAY_ID 查询并强制校验目标记录属于该 FEEDER_ID。默认 CBreaker → 407 / breaker / 域 40、Disconnector → 408 / disconnector / 域 30、GroundDisconnector → 409 / grounddisconnector / 域 30。没有唯一馈线时不执行关联。</p>
             <h3>3. 安全回写</h3>
             <p>沿用现有关联回写规则，只修改 Workspace 安全副本中的目标属性，不删除原有 XML 属性，原始 G 文件不修改。</p>
             """

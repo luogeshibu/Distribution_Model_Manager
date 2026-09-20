@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from dmm.infrastructure.gfile.writeback import GWriteBackService
+from dmm.infrastructure.gfile.writeback import GWriteBackError
 from dmm.i18n import translate_runtime_text
 
 
@@ -97,3 +100,44 @@ def test_bulk_writeback_emits_live_progress_and_english_translation(tmp_path):
     for line in logs:
         translated = translate_runtime_text(line, "en_US")
         assert not any("\u4e00" <= ch <= "\u9fff" for ch in translated), translated
+
+
+def test_writeback_only_updates_existing_approved_attributes(tmp_path):
+    path = tmp_path / "strict.g"
+    original = '<G><CBreaker id="10" keyid="0" state="0"/></G>\n'
+    path.write_text(original, encoding="utf-8")
+
+    GWriteBackService().apply_attribute_changes(
+        path,
+        [
+            {
+                "tag": "CBreaker",
+                "xml_id": "10",
+                "attributes": {"app": "6500000", "keyid": "100"},
+            }
+        ],
+        create_backup=False,
+        only_existing_attributes=True,
+        allowed_attributes={"app", "keyid"},
+    )
+    text = path.read_text(encoding="utf-8")
+    assert 'keyid="100"' in text
+    assert 'app="6500000"' not in text
+
+    original = text
+    with pytest.raises(GWriteBackError, match="不在许可列表中"):
+        GWriteBackService().apply_attribute_changes(
+            path,
+            [
+                {
+                    "tag": "CBreaker",
+                    "xml_id": "10",
+                    "attributes": {"luogeshibu": "1"},
+                }
+            ],
+            create_backup=False,
+            only_existing_attributes=True,
+            allowed_attributes={"app", "keyid"},
+        )
+
+    assert path.read_text(encoding="utf-8") == original

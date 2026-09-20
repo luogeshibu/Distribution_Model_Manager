@@ -158,6 +158,8 @@ FEEDLINE_LABELS = {
 
 DEVICE_FIELDS = [
     "rmu_name", "rmu_id",
+    "feeder_resolution_source", "feeder_resolution_evidence", "feeder_id", "station_name",
+    "feeder_code", "feeder_graph_name", "feeder_name", "feeder_path",
     "object_type", "xml_id", "logical_code", "graphical_name",
     "selected_name_source", "selected_device_name", "paired_breaker_name",
     "table_id", "table_name", "configured_domain", "match_mode",
@@ -177,12 +179,14 @@ POLE_FIELDS = [
     "file_name", "object_type", "xml_id", "device_model", "device_family",
     "devref", "graphical_name", "name_source", "name_distance",
     "name_direction", "name_xml_id", "inside_rmu",
+    "feeder_resolution_source", "feeder_resolution_evidence", "feeder_id", "station_name",
+    "feeder_code", "feeder_graph_name", "feeder_name", "feeder_path",
     "key_name", "current_keyid", "current_device_id", "current_table_id",
     "current_domain", "current_db_name", "current_db_code",
     "current_combined_id", "combined_name", "combined_db_code", "combined_db_name",
-    "combined_match_field", "combined_db_match_count", "db_combined_id",
+    "combined_db_feeder_id", "combined_match_field", "combined_db_match_count", "db_combined_id",
     "cb_parent_match_count", "cb_db_match_count", "db_device_id", "db_code",
-    "db_name", "db_cb_combined_id", "db_bv_id", "table_id", "table_name",
+    "db_name", "db_cb_combined_id", "db_bv_id", "db_feeder_id", "table_id", "table_name",
     "configured_domain", "expected_keyid", "expected_keyid_verified",
     "model_linked", "model_link_correct", "model_link_status",
     "association_action", "association_ready", "writeback_needed",
@@ -200,18 +204,26 @@ POLE_LABELS = {
     "current_db_name": "当前模型设备NAME（来源：数据库）", "current_db_code": "当前模型设备CODE（来源：数据库）",
     "current_combined_id": "当前模型combined_id", "combined_name": "图上名称/查询值",
     "combined_db_code": "13501 CODE（来源：数据库）", "combined_db_name": "13501 NAME（来源：数据库）",
+    "combined_db_feeder_id": "13501馈线ID（来源：数据库）",
     "combined_match_field": "13501匹配字段",
     "combined_db_match_count": "13501匹配数", "db_combined_id": "13501 ID（来源：数据库）",
     "cb_parent_match_count": "13502父设备记录数",
     "cb_db_match_count": "13502目标匹配数", "db_device_id": "目标设备ID（来源：数据库）",
     "db_code": "目标设备CODE（来源：数据库）", "db_name": "目标设备NAME（来源：数据库）",
     "db_cb_combined_id": "目标combined_id（来源：数据库）", "db_bv_id": "目标BV_ID（来源：数据库）",
+    "db_feeder_id": "目标13502馈线ID（来源：数据库）",
     "table_id": "目标表号（来源：数据库定义）", "table_name": "目标数据库表（来源：数据库）",
     "configured_domain": "目标域号（来源：数据库定义）", "expected_keyid": "期望KeyID（程序计算）",
     "expected_keyid_verified": "期望KeyID校验（数据库）", "model_linked": "是否已关联",
     "model_link_correct": "当前模型是否正确", "model_link_status": "当前模型状态",
     "association_action": "处理建议", "association_ready": "可进入关联流程",
     "writeback_needed": "是否需要回写", "status": "状态", "severity": "状态类型",
+    "station_name": "厂站名称（来源：数据库）", "feeder_code": "馈线CODE（来源：数据库）",
+    "feeder_graph_name": "馈线图名（来源：数据库）", "feeder_path": "厂站 / 馈线定位（数据库）",
+    "feeder_resolution_source": "图级馈线识别方式",
+    "feeder_resolution_evidence": "图级馈线判定依据",
+    "feeder_id": "图级馈线ID（来源：数据库）",
+    "feeder_name": "图级馈线名称（来源：数据库）",
     "reason": "说明",
 }
 
@@ -227,18 +239,26 @@ POLE_LABELS_EN = {
         "current_db_name": "Current Model NAME (Database)", "current_db_code": "Current Model CODE (Database)",
         "current_combined_id": "Current Model combined_id", "combined_name": "Graphical Name / Lookup",
         "combined_db_code": "13501 CODE (Database)", "combined_db_name": "13501 NAME (Database)",
+        "combined_db_feeder_id": "13501 Feeder ID (Database)",
         "combined_match_field": "13501 Match Field",
         "combined_db_match_count": "13501 Match Count", "db_combined_id": "13501 ID (Database)",
         "cb_parent_match_count": "13502 Parent Record Count",
         "cb_db_match_count": "13502 Target Match Count", "db_device_id": "Target Device ID (Database)",
         "db_code": "Target Device CODE (Database)", "db_name": "Target Device NAME (Database)",
         "db_cb_combined_id": "Target combined_id (Database)", "db_bv_id": "Target BV_ID (Database)",
+        "db_feeder_id": "Target 13502 Feeder ID (Database)",
         "table_id": "Target Table ID (Database Definition)", "table_name": "Target Database Table (Database)",
         "configured_domain": "Target Domain (Database Definition)", "expected_keyid": "Expected KeyID (Calculated)",
         "expected_keyid_verified": "Expected KeyID Check (Database)", "model_linked": "Model Linked",
         "model_link_correct": "Current Model Correct", "model_link_status": "Current Model Status",
         "association_action": "Recommended Action", "association_ready": "Ready for Association",
         "writeback_needed": "Write-back Needed", "status": "Status", "severity": "Status Type",
+        "station_name": "Station Name (Database)", "feeder_code": "Feeder CODE (Database)",
+        "feeder_graph_name": "Feeder Graph Name (Database)", "feeder_path": "Station / Feeder Path (Database)",
+        "feeder_resolution_source": "Graph Feeder Resolution Source",
+        "feeder_resolution_evidence": "Graph Feeder Evidence",
+        "feeder_id": "Graph Feeder ID (Database)",
+        "feeder_name": "Graph Feeder Name (Database)",
         "reason": "Details",
     }.items()
 }
@@ -246,8 +266,10 @@ POLE_LABELS_EN = {
 TRANSFORMER_FIELDS = [
     "file_name", "object_type", "xml_id", "devref", "graphical_name",
     "name_source", "name_distance", "name_direction", "name_xml_id",
-    "feeder_resolution_source", "feeder_id",
-    "feeder_name", "current_keyid", "current_keyid1", "current_keyid2",
+    "feeder_resolution_source", "feeder_resolution_evidence", "feeder_id",
+    "station_name", "feeder_code", "feeder_graph_name", "feeder_db_name", "feeder_name", "feeder_path",
+    "bay_id", "bay_code", "bay_name", "location_label",
+    "current_keyid", "current_keyid1", "current_keyid2",
     "current_device_id", "current_table_id", "current_domain",
     "current_db_name", "current_db_code", "current_feeder_id",
     "db_match_count", "db_device_id", "db_code", "db_name", "db_feeder_id",
@@ -261,7 +283,9 @@ TRANSFORMER_LABELS = {
     "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID（来源：G文件）",
     "devref": "devref", "graphical_name": "图上名称", "name_source": "名称来源",
     "name_distance": "名称距离", "name_direction": "名称方向", "name_xml_id": "名称XML ID",
-    "feeder_resolution_source": "馈线识别方式", "feeder_id": "目标馈线ID",
+    "feeder_resolution_source": "馈线识别方式", "feeder_resolution_evidence": "馈线判定依据", "feeder_id": "目标馈线ID",
+    "station_name": "厂站名称（来源：数据库）", "feeder_code": "馈线CODE（来源：数据库）",
+    "feeder_graph_name": "馈线图名（来源：数据库）", "feeder_path": "厂站 / 馈线定位（数据库）",
     "feeder_name": "目标馈线名称（来源：数据库）", "current_keyid": "当前KeyID（来源：G文件）",
     "current_keyid1": "当前keyid1", "current_keyid2": "当前keyid2",
     "current_device_id": "当前设备ID（来源：数据库）", "current_table_id": "当前表号（KeyID反解/数据库定义）",
@@ -282,7 +306,9 @@ TRANSFORMER_LABELS_EN = {
     "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID (G File)",
     "devref": "devref", "graphical_name": "Graphical Name", "name_source": "Name Source",
     "name_distance": "Name Distance", "name_direction": "Name Direction", "name_xml_id": "Name XML ID",
-    "feeder_resolution_source": "Feeder Resolution Source", "feeder_id": "Target Feeder ID",
+    "feeder_resolution_source": "Feeder Resolution Source", "feeder_resolution_evidence": "Feeder Evidence", "feeder_id": "Target Feeder ID",
+    "station_name": "Station Name (Database)", "feeder_code": "Feeder CODE (Database)",
+    "feeder_graph_name": "Feeder Graph Name (Database)", "feeder_path": "Station / Feeder Path (Database)",
     "feeder_name": "Target Feeder Name (Database)", "current_keyid": "Current KeyID (G File)",
     "current_keyid1": "Current keyid1", "current_keyid2": "Current keyid2",
     "current_device_id": "Current Device ID (Database)", "current_table_id": "Current Table ID (Decoded/DB Definition)",
@@ -301,6 +327,9 @@ TRANSFORMER_LABELS_EN = {
 
 MASTER_STATION_FIELDS = [
     "file_name", "object_type", "xml_id", "key_name", "logical_code",
+    "feeder_resolution_source", "feeder_anchor", "feeder_id", "station_id",
+    "station_name", "feeder_code", "feeder_graph_name", "feeder_db_name", "feeder_name", "feeder_path",
+    "bay_id", "bay_code", "bay_name", "location_label",
     "context_source", "context_station_id", "context_station_name",
     "context_feeder_id", "context_feeder_code", "context_feeder_name", "context_bay_id",
     "context_rmu_frame_xml_id", "context_rmu_id", "context_rmu_name",
@@ -315,7 +344,15 @@ MASTER_STATION_FIELDS = [
 
 MASTER_STATION_LABELS = {
     "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID（来源：G文件）",
-    "key_name": "XML key_name（来源：G文件）", "logical_code": "解析出的CODE（来源：G文件）",
+    "key_name": "XML key_name（来源：G文件，仅展示）", "logical_code": "CODE解析（不使用）",
+    "feeder_resolution_source": "图级馈线识别方式",
+    "feeder_anchor": "本次判定依据设备/环网柜",
+    "feeder_id": "图级馈线ID（来源：数据库）", "station_id": "厂站ID（来源：数据库）",
+    "station_name": "厂站名称（来源：数据库）", "feeder_code": "馈线CODE（来源：数据库）",
+    "feeder_graph_name": "馈线图名（来源：数据库）", "feeder_name": "图级馈线名称（来源：数据库）",
+    "feeder_db_name": "馈线NAME（来源：数据库）", "feeder_path": "厂站 / 馈线定位（数据库）",
+    "bay_id": "间隔BAY ID（来源：数据库）", "bay_code": "间隔BAY CODE（来源：数据库）",
+    "bay_name": "间隔BAY NAME（来源：数据库）", "location_label": "完整厂站 / 馈线 / 间隔定位",
     "context_source": "馈线上下文来源（KeyID/数据库）", "context_station_id": "厂站ID（数据库）",
     "context_station_name": "厂站名称（数据库）", "context_feeder_id": "馈线ID（数据库）",
     "context_feeder_code": "馈线CODE（数据库）", "context_feeder_name": "馈线名称（数据库）",
@@ -328,7 +365,7 @@ MASTER_STATION_LABELS = {
     "current_keyid": "当前KeyID（来源：G文件）", "current_device_id": "当前设备ID（KeyID反解）",
     "current_table_id": "当前表号（KeyID反解）", "current_domain": "当前域号（KeyID反解）",
     "table_id": "目标表号（配置/数据库定义）", "table_name": "目标数据库表（数据库）",
-    "configured_domain": "目标域号（配置/数据库定义）", "db_match_count": "CODE匹配数（数据库）",
+    "configured_domain": "目标域号（配置/数据库定义）", "db_match_count": "BAY_ID候选数（数据库）",
     "db_device_id": "目标设备ID（数据库）", "db_code": "目标CODE（数据库）",
     "db_name": "目标NAME（数据库）", "db_bv_id": "目标BV_ID（数据库）",
     "expected_keyid": "期望KeyID（程序计算）", "expected_keyid_verified": "期望KeyID校验（数据库）",
@@ -340,7 +377,15 @@ MASTER_STATION_LABELS = {
 MASTER_STATION_LABELS_EN = {
     key: value for key, value in {
         "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID (G File)",
-        "key_name": "XML key_name (G File)", "logical_code": "Parsed CODE (G File)",
+        "key_name": "XML key_name (G File, display only)", "logical_code": "CODE Parsing (Unused)",
+        "feeder_resolution_source": "Graph Feeder Resolution Source",
+        "feeder_anchor": "Feeder Anchor Device/RMU",
+        "feeder_id": "Graph Feeder ID (Database)", "station_id": "Station ID (Database)",
+        "station_name": "Station Name (Database)", "feeder_code": "Feeder CODE (Database)",
+        "feeder_graph_name": "Feeder Graph Name (Database)", "feeder_name": "Graph Feeder Name (Database)",
+        "feeder_db_name": "Feeder NAME (Database)", "feeder_path": "Station / Feeder Path (Database)",
+        "bay_id": "Bay ID (Database)", "bay_code": "Bay CODE (Database)",
+        "bay_name": "Bay NAME (Database)", "location_label": "Full Station / Feeder / Bay Location",
         "context_source": "Feeder Context Source (KeyID/Database)", "context_station_id": "Station ID (Database)",
         "context_station_name": "Station Name (Database)", "context_feeder_id": "Feeder ID (Database)",
         "context_feeder_code": "Feeder CODE (Database)", "context_feeder_name": "Feeder Name (Database)",
@@ -353,7 +398,7 @@ MASTER_STATION_LABELS_EN = {
         "current_keyid": "Current KeyID (G File)", "current_device_id": "Current Device ID (Decoded)",
         "current_table_id": "Current Table ID (Decoded)", "current_domain": "Current Domain (Decoded)",
         "table_id": "Target Table ID (Config/DB Definition)", "table_name": "Target DB Table (Database)",
-        "configured_domain": "Target Domain (Config/DB Definition)", "db_match_count": "CODE Match Count (Database)",
+        "configured_domain": "Target Domain (Config/DB Definition)", "db_match_count": "BAY_ID Candidate Count (Database)",
         "db_device_id": "Target Device ID (Database)", "db_code": "Target CODE (Database)",
         "db_name": "Target NAME (Database)", "db_bv_id": "Target BV_ID (Database)",
         "expected_keyid": "Expected KeyID (Calculated)", "expected_keyid_verified": "Expected KeyID Check (Database)",
@@ -366,6 +411,8 @@ MASTER_STATION_LABELS_EN = {
 
 RMU_FIELDS = [
     "file_name", "frame_index", "frame_xml_id", "rmu_name",
+    "feeder_resolution_source", "feeder_resolution_evidence", "feeder_id", "station_name",
+    "feeder_code", "feeder_graph_name", "feeder_name", "feeder_path",
     "rmu_type", "rmu_type_source", "rmu_type_text", "rmu_type_devref",
     "rmu_type_consistent", "rmu_type_check_status", "rmu_type_check_reason",
     "rmu_is_smart", "rmu_smart_marker_types",
@@ -392,6 +439,14 @@ DEVICE_LABELS = {
     "rmu_is_smart": "是否智能",
     "rmu_smart_marker_types": "智能标识",
     "rmu_id": "环网柜ID（来源：数据库）",
+    "feeder_resolution_source": "图级馈线识别方式",
+    "feeder_resolution_evidence": "图级馈线判定依据",
+    "feeder_id": "图级馈线ID（来源：数据库）",
+    "station_name": "厂站名称（来源：数据库）",
+    "feeder_code": "馈线CODE（来源：数据库）",
+    "feeder_graph_name": "馈线图名（来源：数据库）",
+    "feeder_name": "图级馈线名称（来源：数据库）",
+    "feeder_path": "厂站 / 馈线定位（数据库）",
     "object_type": "G图元类型",
     "xml_id": "图元XML ID（来源：G文件）",
     "logical_code": "逻辑CODE（图上规则）",
@@ -438,6 +493,10 @@ RMU_LABELS = {
     "frame_index": "环网柜序号",
     "frame_xml_id": "矩形框XML ID（来源：G文件）",
     "rmu_name": "环网柜名称（来源：G文件图上文字）",
+    "feeder_resolution_source": "图级馈线识别方式",
+    "feeder_resolution_evidence": "图级馈线判定依据",
+    "feeder_id": "图级馈线ID（来源：数据库）",
+    "feeder_name": "图级馈线名称（来源：数据库）",
     "rmu_type": "环网柜类型",
     "rmu_type_source": "类型识别来源",
     "rmu_type_text": "图内文字类型",
@@ -503,6 +562,8 @@ DEVICE_LABELS_EN = {
     "rmu_type_text": "Graphical Text Type", "rmu_type_devref": "devref Type", "rmu_type_consistent": "Type Cross-check",
     "rmu_type_check_status": "Type Check Status", "rmu_type_check_reason": "Type Cross-check Details",
     "rmu_is_smart": "Smart Type", "rmu_smart_marker_types": "Smart Markers", "rmu_id": "RMU ID (Database)",
+    "feeder_resolution_source": "Graph Feeder Resolution Source", "feeder_resolution_evidence": "Graph Feeder Evidence",
+    "feeder_id": "Graph Feeder ID (Database)", "feeder_name": "Graph Feeder Name (Database)",
     "object_type": "G Object Type", "xml_id": "XML ID (G File)", "logical_code": "Logical CODE (Graph Rule)",
     "graphical_name": "Graphical Name", "selected_name_source": "Device Name Source", "selected_device_name": "Final Device Name",
     "paired_breaker_name": "Paired Breaker Name", "table_id": "Table ID (Database Definition)", "table_name": "Database Table",
@@ -521,6 +582,8 @@ DEVICE_LABELS_EN = {
 
 RMU_LABELS_EN = {
     "file_name": "G File", "frame_index": "RMU Index (G File)", "frame_xml_id": "Frame XML ID (G File)", "rmu_name": "RMU Name (G Text)",
+    "feeder_resolution_source": "Graph Feeder Resolution Source", "feeder_resolution_evidence": "Graph Feeder Evidence",
+    "feeder_id": "Graph Feeder ID (Database)", "feeder_name": "Graph Feeder Name (Database)",
     "rmu_type": "RMU Type", "rmu_type_source": "Type Source", "rmu_type_text": "Graphical Text Type",
     "rmu_type_devref": "devref Type", "rmu_type_consistent": "Type Cross-check", "rmu_type_check_status": "Type Check Status",
     "rmu_type_check_reason": "Type Cross-check Details", "rmu_is_smart": "Smart Type", "rmu_smart_marker_types": "Smart Markers",
@@ -723,6 +786,14 @@ def flatten_rmu_rows(reports):
                 "frame_index": rmu.get("frame_index", ""),
                 "frame_xml_id": rmu.get("frame_xml_id", ""),
                 "rmu_name": rmu.get("rmu_name", ""),
+                "feeder_resolution_source": rmu.get(
+                    "feeder_resolution_source", report.get("feeder_resolution_source", "")
+                ),
+                "feeder_resolution_evidence": rmu.get(
+                    "feeder_resolution_evidence", report.get("feeder_resolution_evidence", "")
+                ),
+                "feeder_id": rmu.get("feeder_id", report.get("feeder_id", "")),
+                "feeder_name": rmu.get("feeder_name", report.get("feeder_name", "")),
                 "rmu_type": rmu.get("rmu_type", "UNKNOWN"),
                 "rmu_type_source": rmu.get("rmu_type_source", ""),
                 "rmu_type_text": rmu.get("rmu_type_text", ""),
@@ -1927,12 +1998,12 @@ def _export_transformer_html_bundle(reports, export_path, domain_rules, language
     intro = (
         "Only TransformerDis objects marked Transformer_OH in Element Management are included. "
         "Each device independently resolves its name from the nearest eligible Text. "
-        "The feeder uses G-root facID, with a unique facName fallback; connection topology is not analyzed."
+        "The feeder is resolved from one unique in-drawing RMU or transformer database source; connection topology is not analyzed."
         if english
         else
         "本报告只展示图元管理中标记为 Transformer_OH 的 TransformerDis 图元。"
         "每个设备独立取整张 G 图中最近的合规 Text 直接解析，"
-        "馈线使用 G 根 facID，查不到时仅使用唯一 facName 兜底，不分析连接拓扑。"
+        "馈线优先使用图内唯一环网柜，其次使用唯一柱上变压器数据库记录，不分析连接拓扑。"
     )
     domain_rows = "<tr><td>TransformerDis</td><td>13505</td><td>1</td></tr>"
     table = _table_html(
@@ -1999,19 +2070,20 @@ def _export_master_station_html_bundle(reports, export_path, domain_rules, langu
     labels = MASTER_STATION_LABELS_EN if english else MASTER_STATION_LABELS
     title = "Master Station Device Association Report" if english else "配网主站设备关联报告"
     intro = (
-        "Only the configured Bus, CBreaker, Disconnector, and GroundDisconnector G objects are processed. "
-        "The CODE is extracted from key_name and matched exactly against the configured database table; topology is not analyzed."
+        "Only the configured CBreaker, Disconnector, and GroundDisconnector G objects are processed. "
+        "Bus is intentionally excluded as an association target. The target device is resolved by BAY_ID from the database context; G-file CODE/NAME is not parsed. "
+        "When multiple disconnectors share one BAY_ID, the two Bus-side objects are ordered left-to-right, followed by the remaining object."
         if english else
-        "本报告只处理配置中的 Bus、CBreaker、Disconnector、GroundDisconnector 图元。"
-        "程序从 G 文件 key_name 提取 CODE，按配置表号精确查询数据库，不分析拓扑。"
+        "本报告只处理配置中的 CBreaker、Disconnector、GroundDisconnector 图元，Bus 不作为关联对象，仅用于多个隔离开关的 Bus 侧定位。"
+        "主站设备不再解析 G 文件 CODE/NAME，直接使用关联上下文中的 BAY_ID 查询数据库；多个隔离开关时，按 Bus 侧从左到右匹配前两个，剩余对象匹配剩余记录。"
     )
     source_note = (
-        "字段来源说明：G 文件名、图元类型、XML ID、key_name、CODE 和当前 KeyID 来自 G 文件；"
-        "目标设备 ID、CODE、NAME、BV_ID 来自数据库；目标表号和域号来自本模块配置/数据库定义；"
+        "字段来源说明：G 文件名、图元类型、XML ID、key_name 和当前 KeyID 来自 G 文件；"
+        "BAY_ID、目标设备 ID、CODE、NAME、BV_ID 来自数据库；目标表号和域号来自本模块配置/数据库定义；"
         "期望 KeyID 由程序按设备 ID + 域号计算并通过数据库函数校验。回写只修改 G 图元中已有属性。"
         if not english else
-        "Field sources: file name, object type, XML ID, key_name, CODE, and current KeyID come from the G file; "
-        "target ID, CODE, NAME, and BV_ID come from the database; table/domain come from module configuration/database definition; "
+        "Field sources: file name, object type, XML ID, key_name, and current KeyID come from the G file; "
+        "BAY_ID, target ID, CODE, NAME, and BV_ID come from the database; table/domain come from module configuration/database definition; "
         "Expected KeyID is calculated and verified by the database. Write-back changes existing G attributes only."
     )
     domain_rows = "".join(
@@ -2025,8 +2097,24 @@ def _export_master_station_html_bundle(reports, export_path, domain_rules, langu
         "status",
         selectable=True,
         table_id="master-station-table",
-        filter_placeholder=("Enter CODE, G object type, or XML ID" if english else "输入 CODE、图元类型或 XML ID"),
+        filter_placeholder=("Enter BAY_ID, object type, or XML ID" if english else "输入 BAY_ID、图元类型或 XML ID"),
         language=language,
+    )
+    context = (reports[0].get("association_context", {}) if reports else {}) or {}
+    feeder_context_title = "图级厂站 / 馈线判定" if not english else "Graph Station / Feeder Resolution"
+    feeder_context_rows = "".join(
+        f"<tr><th>{esc(label)}</th><td>{esc(value or '-')}</td></tr>"
+        for label, value in (
+            (("判定依据" if not english else "Anchor"), context.get("feeder_anchor", "") or "未找到唯一判定设备"),
+            (("馈线定位" if not english else "Feeder Location"), context.get("location_label", "") or context.get("feeder_path", "")),
+            (("FEEDER_ID" if not english else "FEEDER_ID"), context.get("feeder_id", "")),
+            (("BAY_ID" if not english else "BAY_ID"), context.get("bay_id", "")),
+            (("处理结果" if not english else "Result"), context.get("message", "")),
+        )
+    )
+    feeder_context_card = (
+        f"<div class=\"card\"><h2>{esc(feeder_context_title)}</h2>"
+        f"<table class=\"context-table\"><tbody>{feeder_context_rows}</tbody></table></div>"
     )
     text = f"""<!doctype html>
 <html lang="{'en' if english else 'zh-CN'}"><head><meta charset="utf-8">
@@ -2037,6 +2125,7 @@ header{{background:#006B52;color:white;padding:24px 32px;border-bottom:5px solid
 main{{padding:24px 30px}} .card{{background:white;border:1px solid #D3E3DC;border-radius:10px;padding:16px;margin-bottom:18px}}
 table{{border-collapse:collapse;width:100%;font-size:12px}} th{{background:#006B52;color:white;position:sticky;top:0}}
 th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowrap}}
+.context-table{{width:min(1100px,100%);font-size:13px}} .context-table th{{width:190px;position:static;background:#EAF8F2;color:#17372E}}
 .scroll{{overflow:auto;max-height:700px}} .pass{{background:#EAF8F2}} .warn{{background:#FFF8DE}}
 .relink{{background:#FFE8CC}} .fail{{background:#FFF0F0}} .blocked{{background:#EAF3FF}}
 .table-filter{{display:flex;align-items:center;gap:10px;margin:10px 0 12px;flex-wrap:wrap}}
@@ -2044,6 +2133,7 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
 </style></head><body><header><h1>{esc(title)}</h1><div>{esc(APP_NAME if not english else APP_NAME_EN)}　v{esc(APP_VERSION)}</div></header>
 <main><div class="card"><h2>{'Association Rules' if english else '关联规则'}</h2><p>{esc(intro)}</p><p><strong>{'Field sources:' if english else '字段来源：'}</strong>{esc(source_note)}</p>
 <table><thead><tr><th>{'G Object Type' if english else 'G图元类型'}</th><th>{'Table ID' if english else '表号'}</th><th>{'Domain' if english else '域号'}</th><th>{'Database Table' if english else '数据库表'}</th></tr></thead><tbody>{domain_rows}</tbody></table></div>
+{feeder_context_card}
 <div class="card"><h2>{'Master Station Device Details' if english else '配网主站设备明细'}</h2>{table}</div></main></body></html>"""
     export_path.write_text(text, encoding="utf-8")
     return export_path

@@ -24,6 +24,11 @@ from dmm.config.defaults import (
 )
 from dmm.domain.gfile.parser import GParser
 from dmm.domain.rmu.validator import RmuValidator, KEYID_STEP, norm, int_or_none
+from dmm.application.modules.feeder_context import (
+    add_feeder_fields,
+    candidate_from_record,
+    resolve_graph_feeder,
+)
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 
 class RmuModelModule(ModelModule):
@@ -31,6 +36,100 @@ class RmuModelModule(ModelModule):
     display_name = "RMU 环网柜模型"
     description = "RMU 环网柜模型校验、候选选择及安全回写。"
     SUPPORTED_OPERATIONS = ("VALIDATE", "PREVIEW_ASSOCIATION", "APPLY_ASSOCIATION")
+
+    @staticmethod
+    def _apply_graph_feeder_context(db, reports):
+        """Require every RMU/device in a drawing to share one feeder."""
+        candidates = []
+        for report in reports:
+            for rmu in report.get("rmu_results", []) or []:
+                records = rmu.get("rmu_records", []) or []
+                candidates.append(
+                    candidate_from_record(
+                        db,
+                        records[0] if len(records) == 1 else {},
+                        kind="RMU",
+                        identity=(
+                            f"{records[0].get('id')}@FRAME_"
+                            f"{rmu.get('frame_xml_id') or rmu.get('frame_index') or '-'}"
+                            if len(records) == 1
+                            else rmu.get("frame_xml_id") or rmu.get("xml_id")
+                        ),
+                        name=rmu.get("rmu_name", ""),
+                        source=f"RMU_NAME:{rmu.get('rmu_name') or '-'}",
+                    )
+                )
+        resolution = resolve_graph_feeder(db, candidates)
+        for report in reports:
+            report.update({
+                "feeder_resolution_source": resolution.get("feeder_source", "UNRESOLVED"),
+                "feeder_resolution_evidence": resolution.get("feeder_evidence", ""),
+                "feeder_id": resolution.get("feeder_id", ""),
+                "station_id": (resolution.get("feeder") or {}).get("st_id", ""),
+                "station_name": str((resolution.get("feeder") or {}).get("station_name") or "").strip(),
+                "feeder_code": str((resolution.get("feeder") or {}).get("code") or "").strip(),
+                "feeder_graph_name": str((resolution.get("feeder") or {}).get("graph_name") or "").strip(),
+                "feeder_name": str(
+                    (resolution.get("feeder") or {}).get("display_name")
+                    or (resolution.get("feeder") or {}).get("name")
+                    or ""
+                ).strip(),
+                "feeder_path": " / ".join(
+                    value for value in (
+                        str((resolution.get("feeder") or {}).get("station_name") or "").strip(),
+                        str((resolution.get("feeder") or {}).get("code") or "").strip(),
+                    ) if value
+                ),
+                "feeder_context_ready": "YES" if resolution.get("ready") else "NO",
+                "feeder_context_message": resolution.get("reason") or "图级 FEEDER_ID 已唯一确认。",
+            })
+            for rmu in report.get("rmu_results", []) or []:
+                rmu_feeder = ""
+                records = rmu.get("rmu_records", []) or []
+                if len(records) == 1:
+                    rmu_feeder = records[0].get("feeder_id", "")
+                rmu["feeder_resolution_source"] = resolution.get("feeder_source", "UNRESOLVED")
+                rmu["feeder_resolution_evidence"] = resolution.get("feeder_evidence", "")
+                rmu["feeder_id"] = resolution.get("feeder_id", "")
+                rmu["feeder_name"] = report.get("feeder_name", "")
+                for row in rmu.get("device_rows", []) or []:
+                    add_feeder_fields(row, resolution)
+                    if not resolution.get("ready"):
+                        row["status"] = "FAIL"
+                        row["severity"] = "ERROR"
+                        row["association_ready"] = "NO"
+                        row["writeback_needed"] = "NO"
+                        row["reason"] = resolution.get("reason") or "GRAPH_FEEDER_NOT_RESOLVED"
+                    elif rmu_feeder not in (None, "") and int_or_none(rmu_feeder) != int_or_none(resolution.get("feeder_id")):
+                        row["status"] = "FAIL"
+                        row["severity"] = "ERROR"
+                        row["association_ready"] = "NO"
+                        row["writeback_needed"] = "NO"
+                        row["reason"] = (
+                            "RMU_FEEDER_MISMATCH: 环网柜不属于图级 FEEDER_ID="
+                            f"{resolution.get('feeder_id')}。"
+                        )
+                if not resolution.get("ready"):
+                    rmu["association_eligible"] = False
+                    rmu.setdefault("association_block_reasons", []).append(
+                        resolution.get("reason") or "GRAPH_FEEDER_NOT_RESOLVED"
+                    )
+                elif rmu_feeder not in (None, "") and int_or_none(rmu_feeder) != int_or_none(resolution.get("feeder_id")):
+                    rmu["association_eligible"] = False
+                    rmu.setdefault("association_block_reasons", []).append(
+                        "RMU_FEEDER_MISMATCH: 环网柜馈线与图级 FEEDER_ID 不一致"
+                    )
+            report_summary = report.get("summary", {}) or {}
+            report_summary["feeder_context_ready"] = (
+                "YES" if resolution.get("ready") else "NO"
+            )
+            report_summary["rmu_association_eligible"] = sum(
+                1
+                for item in report.get("rmu_results", []) or []
+                if item.get("association_eligible")
+            )
+            report["summary"] = report_summary
+        return resolution
 
     @staticmethod
     def _runtime_device_rules(settings):
@@ -122,6 +221,10 @@ class RmuModelModule(ModelModule):
             reports.append(report)
             for key in aggregate:
                 aggregate[key] += report["summary"].get(key, 0)
+        feeder_resolution = self._apply_graph_feeder_context(db, reports)
+        aggregate["feeder_context_ready"] = (
+            "YES" if feeder_resolution.get("ready") else "NO"
+        )
         return reports, aggregate, self._runtime_device_rules(settings)
 
     @staticmethod

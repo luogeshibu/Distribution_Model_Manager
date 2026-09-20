@@ -148,7 +148,16 @@ class GWriteBackService:
             "after": {k: str(v) for k, v in dict(attributes or {}).items()},
         }
 
-    def apply_attribute_changes(self, g_path, changes, create_backup=True):
+    def apply_attribute_changes(
+        self,
+        g_path,
+        changes,
+        create_backup=True,
+        allow_new_attributes=True,
+        allowed_new_attributes=None,
+        only_existing_attributes=False,
+        allowed_attributes=None,
+    ):
         g_path = Path(g_path)
         if not g_path.exists():
             raise GWriteBackError(f"G 文件不存在：{g_path}")
@@ -164,8 +173,18 @@ class GWriteBackService:
             attrs = dict(change.get("attributes", {}))
             normalized_changes.append((tag, xml_id, attrs))
 
-        total = len(normalized_changes)
+        if allowed_attributes is not None:
+            allowed = set(allowed_attributes)
+            for tag, xml_id, attrs in normalized_changes:
+                unknown = sorted(set(attrs) - allowed)
+                if unknown:
+                    raise GWriteBackError(
+                        f"回写字段不在许可列表中：tag={tag}, XML ID={xml_id}, "
+                        f"属性={', '.join(unknown)}"
+                    )
+
         target_keys = {(tag, xml_id) for tag, xml_id, _ in normalized_changes}
+        total = len(normalized_changes)
         self.log(
             f"正在建立 G 文件回写索引：{g_path.name}；"
             f"目标对象数={total}"
@@ -181,6 +200,46 @@ class GWriteBackService:
                 raise GWriteBackError(
                     f"回写目标必须唯一：tag={tag}, XML ID={xml_id}, 匹配数={len(matches)}"
                 )
+
+        if only_existing_attributes:
+            filtered_changes = []
+            for tag, xml_id, attrs in normalized_changes:
+                opening = indexed[(tag, xml_id)][0].group(0)
+                existing = {
+                    attr_key: value
+                    for attr_key, value in attrs.items()
+                    if re.search(
+                        rf'\b{re.escape(attr_key)}\s*=\s*(["\']).*?\1',
+                        opening,
+                        re.DOTALL,
+                    )
+                }
+                if existing:
+                    filtered_changes.append((tag, xml_id, existing))
+            normalized_changes = filtered_changes
+            total = len(normalized_changes)
+            if not normalized_changes:
+                return {
+                    "g_file": str(g_path),
+                    "backup": "",
+                    "applied_count": 0,
+                    "changes": [],
+                }
+
+        if not allow_new_attributes or allowed_new_attributes is not None:
+            allowed_new = set(allowed_new_attributes or ()) if allow_new_attributes else set()
+            for tag, xml_id, attrs in normalized_changes:
+                opening = indexed[(tag, xml_id)][0].group(0)
+                for attr_key in attrs:
+                    if not re.search(
+                        rf'\b{re.escape(attr_key)}\s*=\s*(["\']).*?\1',
+                        opening,
+                        re.DOTALL,
+                    ) and attr_key not in allowed_new:
+                        raise GWriteBackError(
+                            f"回写禁止新增未许可属性：tag={tag}, XML ID={xml_id}, "
+                            f"属性={attr_key} 在原 G 图元中不存在且不在许可字段中"
+                        )
 
         backup = self.create_backup(g_path) if create_backup else None
 

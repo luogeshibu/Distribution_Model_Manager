@@ -15,6 +15,13 @@ from dmm.domain.gfile.element_catalog import (
 )
 from dmm.domain.gfile.parser import GParser, GObject, ParsedG
 from dmm.domain.rmu.validator import int_or_none, norm
+from dmm.application.modules.feeder_context import (
+    add_feeder_fields,
+    candidate_from_keyid,
+    resolve_graph_feeder,
+    rmu_keyid_candidates,
+    rmu_positions_from_settings,
+)
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 
 
@@ -765,6 +772,17 @@ class PoleSwitchModelModule(ModelModule):
             return
         row["current_model_status"] = "DECODED"
 
+    @staticmethod
+    def _fail(row, reason):
+        row.update({
+            "status": "FAIL",
+            "severity": "ERROR",
+            "reason": reason,
+            "association_ready": "NO",
+            "writeback_needed": "NO",
+        })
+        return row
+
     def _resolve_row(self, row, db):
         name = str(row.get("graphical_name") or "").strip()
         row.update({
@@ -778,6 +796,7 @@ class PoleSwitchModelModule(ModelModule):
             "cb_parent_match_count": 0,
             "cb_db_match_count": 0,
             "db_combined_id": "",
+            "combined_db_feeder_id": "",
             "combined_match_field": "",
             "db_device_id": "",
             "db_code": "",
@@ -827,6 +846,13 @@ class PoleSwitchModelModule(ModelModule):
         row["combined_name"] = name
         row["combined_db_code"] = str(combined.get("code") or "").strip()
         row["combined_db_name"] = str(combined.get("name") or "").strip()
+        combined_feeder_id = combined.get("feeder_id")
+        if combined_feeder_id in (None, "") and hasattr(db, "get_rmu_by_id"):
+            try:
+                combined_feeder_id = (db.get_rmu_by_id(combined_id) or {}).get("feeder_id")
+            except Exception:
+                combined_feeder_id = ""
+        row["combined_db_feeder_id"] = str(combined_feeder_id or "").strip()
         row["combined_match_field"] = str(
             combined.get("_matched_field") or "NAME_OR_CODE"
         )
@@ -901,6 +927,7 @@ class PoleSwitchModelModule(ModelModule):
             "db_name": norm(device.get("name")),
             "db_cb_combined_id": str(device.get("combined_id") or "").strip(),
             "db_bv_id": bv_id,
+            "db_feeder_id": str(device.get("feeder_id") or "").strip(),
             "expected_keyid": expected,
         })
         try:
@@ -969,6 +996,51 @@ class PoleSwitchModelModule(ModelModule):
             rows.append(resolved)
             if progress_callback:
                 progress_callback(index, total, f"正在处理柱上开关 {index}/{len(discovered)}")
+        # Resolve one feeder for the whole drawing.  A unique RMU association
+        # wins; otherwise use the unique 13501 parent resolved from the pole
+        # switch name.  No topology or G-root facID fallback is used.
+        feeder_candidates = rmu_keyid_candidates(
+            db,
+            parsed,
+            positions=rmu_positions_from_settings(settings),
+        )
+        for row in rows:
+            current_candidate = candidate_from_keyid(
+                db,
+                row.get("current_keyid"),
+                kind="POLE_SWITCH",
+                source=f"CURRENT_KEYID:{row.get('xml_id') or '-'}",
+            )
+            if current_candidate:
+                feeder_candidates.append(current_candidate)
+            parent_feeder = row.get("combined_db_feeder_id")
+            if parent_feeder not in (None, ""):
+                feeder_candidates.append({
+                    "kind": "POLE_SWITCH",
+                    "identity": row.get("db_combined_id", ""),
+                    "name": row.get("combined_db_name") or row.get("graphical_name", ""),
+                    "feeder_id": parent_feeder,
+                    "source": f"13501_PARENT:{row.get('xml_id') or '-'}",
+                })
+        feeder_resolution = resolve_graph_feeder(db, feeder_candidates)
+        graph_feeder_id = int_or_none(feeder_resolution.get("feeder_id"))
+        for row in rows:
+            add_feeder_fields(row, feeder_resolution)
+            if not feeder_resolution.get("ready"):
+                self._fail(
+                    row,
+                    feeder_resolution.get("reason") or "GRAPH_FEEDER_NOT_RESOLVED",
+                )
+                continue
+            row_feeder_id = int_or_none(
+                row.get("combined_db_feeder_id") or row.get("db_feeder_id")
+            )
+            if row_feeder_id is not None and row_feeder_id != graph_feeder_id:
+                self._fail(
+                    row,
+                    "POLE_SWITCH_FEEDER_MISMATCH: 13501/13502 目标不属于图级 "
+                    f"FEEDER_ID={graph_feeder_id}。",
+                )
         if log_callback:
             log_callback(
                 f"[{Path(g_file).name}] 柱上开关识别完成："
@@ -980,6 +1052,26 @@ class PoleSwitchModelModule(ModelModule):
             "file_name": Path(g_file).name,
             "report_type": "POLE_SWITCH",
             "pole_switch_rows": rows,
+            "feeder_resolution_source": feeder_resolution.get("feeder_source", "UNRESOLVED"),
+            "feeder_resolution_evidence": feeder_resolution.get("feeder_evidence", ""),
+            "feeder_id": feeder_resolution.get("feeder_id", ""),
+            "station_id": (feeder_resolution.get("feeder") or {}).get("st_id", ""),
+            "station_name": str((feeder_resolution.get("feeder") or {}).get("station_name") or "").strip(),
+            "feeder_code": str((feeder_resolution.get("feeder") or {}).get("code") or "").strip(),
+            "feeder_graph_name": str((feeder_resolution.get("feeder") or {}).get("graph_name") or "").strip(),
+            "feeder_name": str(
+                (feeder_resolution.get("feeder") or {}).get("display_name")
+                or (feeder_resolution.get("feeder") or {}).get("name")
+                or ""
+            ).strip(),
+            "feeder_path": " / ".join(
+                value for value in (
+                    str((feeder_resolution.get("feeder") or {}).get("station_name") or "").strip(),
+                    str((feeder_resolution.get("feeder") or {}).get("code") or "").strip(),
+                ) if value
+            ),
+            "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
+            "feeder_context_message": feeder_resolution.get("reason", "") or "图级 FEEDER_ID 已唯一确认。",
             "summary": {
                 "pole_switch_count": len(rows),
                 "pole_switch_pass": sum(1 for row in rows if row.get("status") == "PASS"),
@@ -987,6 +1079,7 @@ class PoleSwitchModelModule(ModelModule):
                 "pole_switch_unlinked": sum(1 for row in rows if row.get("status") == "UNLINKED"),
                 "pole_switch_relink": sum(1 for row in rows if row.get("status") == "RELINK"),
                 "association_ready_count": sum(1 for row in rows if row.get("association_ready") == "YES"),
+                "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
             },
         }
 

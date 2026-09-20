@@ -27,15 +27,9 @@ DEFAULT_DEVICE_RULES = {
     },
 }
 
-# 配网主站设备关联。Bus 的数据库表号没有在当前需求的 SQL 中明确给出，
-# 因此默认保持 0（未配置），避免把母线误写入 breaker/disconnector 表。
+# 配网主站设备关联。主站模块只处理数据库定义明确的三类开关设备；Bus
+# 不属于该模块的关联对象。
 DEFAULT_MASTER_STATION_RULES = {
-    "Bus": {
-        "table_id": 0,
-        "domain": 40,
-        "table_name": "",
-        "description": "主站母线图元（请配置对应数据库表号）",
-    },
     "CBreaker": {
         "table_id": 407,
         "domain": 40,
@@ -44,13 +38,13 @@ DEFAULT_MASTER_STATION_RULES = {
     },
     "Disconnector": {
         "table_id": 408,
-        "domain": 40,
+        "domain": 30,
         "table_name": "disconnector",
         "description": "主站隔离开关",
     },
     "GroundDisconnector": {
         "table_id": 409,
-        "domain": 40,
+        "domain": 30,
         "table_name": "grounddisconnector",
         "description": "主站接地开关",
     },

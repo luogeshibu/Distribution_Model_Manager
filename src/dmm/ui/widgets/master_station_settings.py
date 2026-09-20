@@ -31,8 +31,8 @@ class MasterStationSettingsWidget(QWidget):
             "使用 RMU 的 FEEDER_ID 反查厂站和馈线。"
             "没有 RMU，或最近 RMU 框内没有有效关联时，直接提示该图环网柜请手动关联；"
             "不会扫描整张图，也不分析拓扑。"
-            "CBreaker / Disconnector / GroundDisconnector 默认使用 407 / 408 / 409，域号默认 40；"
-            "Bus 的表号请按现场数据库配置。"
+            "CBreaker / Disconnector / GroundDisconnector 默认使用 407 / 408 / 409，域号分别为 40 / 30 / 30；"
+            "Bus 不在本模块处理。"
             "回写沿用现有安全副本与原子替换流程，不删除属性，既有回写规则保持不变。"
         )
         info.setWordWrap(True)
@@ -64,7 +64,7 @@ class MasterStationSettingsWidget(QWidget):
             table_spin.setMinimumHeight(34)
             domain_spin = NoWheelSpinBox()
             domain_spin.setRange(0, 999999)
-            domain_spin.setValue(int(values.get("domain", 40) or 0))
+            domain_spin.setValue(int(values.get("domain", default.get("domain", 40)) or 0))
             domain_spin.setMinimumHeight(34)
             table_label = QLabel(str(values.get("table_name", "") or "未配置"))
 
@@ -76,8 +76,8 @@ class MasterStationSettingsWidget(QWidget):
             self.table_labels[tag] = table_label
 
         note = QLabel(
-            "识别对象：Bus、CBreaker、GroundDisconnector；同时支持 SQL 中明确给出的 "
-            "Disconnector。Bus 表号为 0 时只报告已识别，不执行数据库关联或回写。"
+            "识别对象：CBreaker、Disconnector、GroundDisconnector。Bus 不在本模块分析、"
+            "不进入报告，也不会被回写。"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#60756d;")

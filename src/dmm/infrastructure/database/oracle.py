@@ -303,6 +303,32 @@ class OracleClient:
             row["_table_name"] = table_name
         return table_name, rows
 
+    def get_devices_by_bay_id(
+        self,
+        table_id: int,
+        bay_id: int,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Resolve model devices by their owning BAY_ID.
+
+        Main-station tables 407/408/409 already carry BAY_ID.  This is the
+        authoritative lookup for the master-station module; the G object's
+        visible CODE/NAME is deliberately not used as a database key.
+        """
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE bay_id = :bay_id
+            ORDER BY id
+            """,
+            {"bay_id": int(bay_id)},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return table_name, rows
+
     def get_relay_signals_by_combined_id(
         self,
         combined_id: int,
@@ -513,6 +539,33 @@ class OracleClient:
         row["_table_id"] = int(table_id)
         row["_table_name"] = table_name
         return row
+
+    def find_bays_by_feeder(
+        self,
+        feeder_hint: str,
+        station_id: Any,
+        table_id: int = 406,
+    ) -> List[Dict[str, Any]]:
+        """Resolve the unique BAY row from feeder name/CODE and station."""
+        lookup = str(feeder_hint or "").strip()
+        if not lookup or station_id in (None, ""):
+            return []
+        table_name = self.get_table_name(int(table_id))
+        sql = f"""
+            SELECT id, code, name, st_id, bv_id, vl_id
+            FROM {table_name}
+            WHERE st_id = :station_id
+              AND TRIM({{field}}) = :feeder_hint
+            ORDER BY id
+        """
+        binds = {"station_id": int(station_id), "feeder_hint": lookup}
+        rows = self._query(sql.format(field="code"), binds)
+        if not rows:
+            rows = self._query(sql.format(field="name"), binds)
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
 
     def find_feeders_by_bay(
         self,

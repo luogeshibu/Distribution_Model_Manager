@@ -6,6 +6,13 @@ from collections import defaultdict
 from pathlib import Path
 
 from dmm.application.modules.base import ModelModule
+from dmm.application.modules.feeder_context import (
+    add_feeder_fields,
+    candidate_from_record,
+    resolve_graph_feeder,
+    rmu_keyid_candidates,
+    rmu_positions_from_settings,
+)
 from dmm.config.defaults import DEFAULT_MASTER_STATION_RULES
 from dmm.domain.gfile.parser import GParser
 from dmm.domain.rmu.validator import int_or_none
@@ -13,31 +20,51 @@ from dmm.infrastructure.gfile.writeback import GWriteBackService
 
 
 KEYID_STEP = 1 << 32
-TARGET_TAGS = ("Bus", "CBreaker", "Disconnector", "GroundDisconnector")
+TARGET_TAGS = ("CBreaker", "Disconnector", "GroundDisconnector")
+MASTER_STATION_WRITE_ATTRIBUTES = frozenset(
+    {"app", "voltype", "p_ReportType", "state", "keyid"}
+)
 RMU_ANCHOR_TAGS = {
     "CBreakerDis", "BusDis", "ZhaiWaiJieDiDaoZha", "pwbh",
 }
-CODE_PATTERNS = {
-    "CBreaker": re.compile(r"\b(B[A-Z0-9]+(?:_[A-Z0-9]+)?)\s+id\b", re.I),
-    "Disconnector": re.compile(r"\b(D[A-Z0-9]+(?:_[A-Z0-9]+)?)\s+id\b", re.I),
-    "GroundDisconnector": re.compile(r"\b(K[A-Z0-9]+(?:_[A-Z0-9]+)?)\s+id\b", re.I),
-}
 
 
-def _code_from_key_name(tag, key_name):
-    value = str(key_name or "").strip()
-    match = CODE_PATTERNS.get(tag)
-    if match:
-        found = match.search(value)
-        if found:
-            return found.group(1)
-    if tag == "Bus":
-        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value)
-        if tokens:
-            # busbarsection ... AHBB1 AHBB1 id -> AHBB1
-            usable = [item for item in tokens if item.casefold() not in {"busbarsection", "id"}]
-            return usable[-1] if usable else ""
-    return ""
+def _object_identity(obj):
+    return str(obj.xml_id or f"{obj.tag}:{obj.xml_index}").strip()
+
+
+def _connect_line_node_ids(obj):
+    """Return object IDs referenced by a ConnectLine node_area/link value."""
+    values = []
+    for key in ("node_area", "link"):
+        raw = str(obj.attrs.get(key) or "")
+        values.extend(re.findall(r"(?:^|;)\s*\d+\s*,\s*\d+\s*,\s*([^;]+)", raw))
+    return {str(value).strip() for value in values if str(value).strip()}
+
+
+def _record_assignment_order(record):
+    """Order already BAY_ID-filtered DB rows by NAME suffix only.
+
+    The prefix (for example ``D331``) is intentionally ignored.  The only
+    database naming markers used for the three-way disconnector layout are
+    ``_1``, ``_2`` and ``_T``.  No G-file name and no database CODE is used.
+    """
+    value = str(record.get("name") or "").strip().upper()
+    if re.search(r"_1$", value):
+        priority = 0
+    elif re.search(r"_2$", value):
+        priority = 1
+    elif re.search(r"_T$", value):
+        priority = 2
+    else:
+        priority = 3
+    return priority, int_or_none(record.get("id")) or 0
+
+
+def _record_name_marker(record):
+    value = str(record.get("name") or "").strip().upper()
+    match = re.search(r"_(1|2|T)$", value)
+    return match.group(1) if match else ""
 
 
 class MasterStationModelModule(ModelModule):
@@ -45,7 +72,8 @@ class MasterStationModelModule(ModelModule):
     display_name = "配网主站设备关联"
     description = (
         "以每个 CBreaker 为锚点查找最近的 RMU 矩形框，只检查该框内部设备或保护信号的已有关联，"
-        "再反查厂站/馈线并按 G 文件 key_name 中的 CODE 精确关联主站设备表；不分析拓扑。"
+        "再反查厂站/馈线，并使用关联上下文中的 BAY_ID 直接关联主站设备表；不解析 G 文件 CODE/NAME，"
+        "仅对多个 Disconnector 做 Bus 侧左右顺序判定。"
     )
     SUPPORTED_OPERATIONS = ("VALIDATE", "PREVIEW_ASSOCIATION", "APPLY_ASSOCIATION")
 
@@ -68,13 +96,12 @@ class MasterStationModelModule(ModelModule):
                 "目标数据库 BV_ID 为空，禁止生成主站设备模型回写。"
             )
         state = {
-            "Bus": "10",
             "CBreaker": "41",
             "Disconnector": "31",
             "GroundDisconnector": "31",
         }.get(str(row.get("object_type") or ""), "41")
         return {
-            "app": "6500000",
+            "app": "100000",
             "voltype": bv_id,
             "p_ReportType": "1",
             "state": state,
@@ -179,6 +206,22 @@ class MasterStationModelModule(ModelModule):
             station = None
             if station_id is not None and hasattr(db, "get_station_info"):
                 station = db.get_station_info(station_id) or {}
+            bay = None
+            if bay_id is not None and hasattr(db, "get_bay_by_id"):
+                bay = db.get_bay_by_id(bay_id) or {}
+            if bay_id is None and station_id is not None and hasattr(db, "find_bays_by_feeder"):
+                feeder_hint = str(
+                    feeder.get("code") or feeder.get("name") or feeder.get("graph_name") or ""
+                ).strip()
+                bay_rows = db.find_bays_by_feeder(feeder_hint, station_id)
+                if len(bay_rows) == 1:
+                    bay = bay_rows[0]
+                    bay_id = int_or_none(bay.get("id"))
+                elif len(bay_rows) > 1:
+                    return None, (
+                        f"馈线 {feeder_id} 在厂站 {station_id} 下对应多个 BAY_ID，"
+                        "无法安全确定间隔。"
+                    )
             return {
                 "source": source,
                 "source_keyid": parsed_keyid,
@@ -188,6 +231,8 @@ class MasterStationModelModule(ModelModule):
                 "rmu_id": rmu_id,
                 "rmu_name": str((rmu or {}).get("name") or "").strip(),
                 "bay_id": bay_id or "",
+                "bay_code": str((bay or {}).get("code") or "").strip(),
+                "bay_name": str((bay or {}).get("name") or "").strip(),
                 "station_id": station_id or "",
                 "station_name": str((station or {}).get("name") or "").strip(),
                 "feeder_id": feeder_id,
@@ -202,9 +247,10 @@ class MasterStationModelModule(ModelModule):
     @staticmethod
     def _distance_to_box(obj, frame):
         """Distance from an object's center to an RMU rectangle."""
+        box = frame.frame.box if hasattr(frame, "frame") else frame.box
         x, y = obj.box.cx, obj.box.cy
-        dx = max(frame.frame.box.left - x, 0.0, x - frame.frame.box.right)
-        dy = max(frame.frame.box.top - y, 0.0, y - frame.frame.box.bottom)
+        dx = max(box.left - x, 0.0, x - box.right)
+        dy = max(box.top - y, 0.0, y - box.bottom)
         return math.hypot(dx, dy)
 
     @staticmethod
@@ -321,32 +367,168 @@ class MasterStationModelModule(ModelModule):
         if context_feeder is not None and record_bay is not None and db is not None:
             try:
                 bay = db.get_bay_by_id(record_bay) or {}
-                hint = str(bay.get("code") or bay.get("name") or "").strip()
+                hint = str(
+                    bay.get("code") or bay.get("graph_name") or bay.get("name") or ""
+                ).strip()
                 station_id = int_or_none(bay.get("st_id"))
                 candidates = db.find_feeders_by_bay(hint, station_id)
                 if len(candidates) == 1:
                     return int_or_none(candidates[0].get("id")) == context_feeder
             except Exception:
                 pass
+        # A station-only match is not enough: one station may own multiple
+        # feeders.  Feeder ownership must be proven explicitly.
+        return False
 
-        context_station = int_or_none(context.get("station_id"))
-        record_station = int_or_none(record.get("st_id"))
-        if context_station is not None and record_station is not None:
-            return context_station == record_station
-        return True
+    @classmethod
+    def _ordered_disconnectors(cls, parsed, disconnectors):
+        """Order disconnectors as left Bus-side, right Bus-side, remaining."""
+        buses = [obj for obj in parsed.objects if obj.tag == "Bus"]
+        if not buses:
+            return sorted(
+                disconnectors,
+                key=lambda obj: (obj.box.x, obj.box.y, obj.xml_index),
+            )
 
-    def _resolve_object(self, obj, db, rules, context=None, context_error="", context_meta=None):
+        direct = []
+        for obj in disconnectors:
+            best_distance = None
+            obj_id = _object_identity(obj)
+            for line in parsed.objects:
+                if line.tag != "ConnectLine":
+                    continue
+                node_ids = _connect_line_node_ids(line)
+                if obj_id not in node_ids:
+                    continue
+                for bus in buses:
+                    if _object_identity(bus) in node_ids:
+                        distance = cls._distance_to_box(obj, bus)
+                        best_distance = (
+                            distance if best_distance is None
+                            else min(best_distance, distance)
+                        )
+            if best_distance is not None:
+                direct.append((best_distance, obj))
+
+        if len(direct) >= 2:
+            bus_side = [obj for _, obj in sorted(
+                direct,
+                key=lambda item: (item[0], item[1].box.x, item[1].box.y, item[1].xml_index),
+            )[:2]]
+        else:
+            distances = []
+            for obj in disconnectors:
+                distance = min(cls._distance_to_box(obj, bus) for bus in buses)
+                distances.append((distance, obj))
+            bus_side = [obj for _, obj in sorted(
+                distances,
+                key=lambda item: (item[0], item[1].box.x, item[1].box.y, item[1].xml_index),
+            )[:2]]
+
+        bus_side = sorted(
+            bus_side,
+            key=lambda obj: (obj.box.x, obj.box.y, obj.xml_index),
+        )
+        selected = {_object_identity(obj) for obj in bus_side}
+        remaining = sorted(
+            [obj for obj in disconnectors if _object_identity(obj) not in selected],
+            key=lambda obj: (obj.box.y, obj.box.x, obj.xml_index),
+        )
+        return bus_side + remaining
+
+    @classmethod
+    def _assign_bay_records(cls, parsed, objects, contexts, records_by_bay, rules):
+        """Assign BAY_ID-filtered database rows without parsing G CODE/NAME."""
+        groups = defaultdict(list)
+        errors = {}
+        assignments = {}
+        for obj in objects:
+            context = contexts.get(_object_identity(obj), ({}, "", {}))[0] or {}
+            rule = rules.get(obj.tag, {})
+            table_id = int(rule.get("table_id", 0) or 0)
+            bay_id = int_or_none(context.get("bay_id"))
+            groups[(obj.tag, table_id, bay_id)].append(obj)
+
+        for (tag, table_id, bay_id), group in groups.items():
+            records = list(records_by_bay.get((table_id, bay_id), []))
+            if bay_id is None:
+                message = (
+                    "MASTER_STATION_BAY_ID_NOT_FOUND: 已关联上下文没有 BAY_ID，"
+                    "无法按间隔定位主站设备。"
+                )
+                for obj in group:
+                    errors[_object_identity(obj)] = message
+                continue
+            if not records:
+                message = (
+                    f"MASTER_STATION_BAY_NOT_MATCHED: 表 {table_id} 中 BAY_ID={bay_id} "
+                    "没有设备记录。"
+                )
+                for obj in group:
+                    errors[_object_identity(obj)] = message
+                continue
+
+            if tag == "Disconnector" and len(group) > 1:
+                if len(records) != len(group):
+                    message = (
+                        "MASTER_STATION_DISCONNECTOR_COUNT_MISMATCH: "
+                        f"同一 BAY_ID={bay_id} 的 G 隔离开关={len(group)}，"
+                        f"数据库隔离开关={len(records)}，拒绝猜测关联。"
+                    )
+                    for obj in group:
+                        errors[_object_identity(obj)] = message
+                    continue
+                expected_markers = {"1", "2"} if len(records) == 2 else {"1", "2", "T"}
+                markers = [_record_name_marker(record) for record in records]
+                if len(records) not in (2, 3) or set(markers) != expected_markers or len(set(markers)) != len(markers):
+                    message = (
+                        "MASTER_STATION_DISCONNECTOR_NAME_MARKER_INVALID: "
+                        f"BAY_ID={bay_id} 的数据库 NAME 必须能唯一识别 "
+                        f"{', '.join(sorted(expected_markers))}，当前={', '.join(markers) or '-'}。"
+                    )
+                    for obj in group:
+                        errors[_object_identity(obj)] = message
+                    continue
+                ordered_objects = cls._ordered_disconnectors(parsed, group)
+                ordered_records = sorted(records, key=_record_assignment_order)
+                for obj, record in zip(ordered_objects, ordered_records):
+                    assignments[_object_identity(obj)] = record
+                continue
+
+            if len(group) != 1 or len(records) != 1:
+                message = (
+                    f"MASTER_STATION_BAY_NOT_UNIQUE: 表 {table_id} / BAY_ID={bay_id} "
+                    f"G对象={len(group)}，数据库记录={len(records)}。"
+                )
+                for obj in group:
+                    errors[_object_identity(obj)] = message
+                continue
+            assignments[_object_identity(group[0])] = records[0]
+
+        return assignments, errors
+
+    def _resolve_object(
+        self,
+        obj,
+        db,
+        rules,
+        context=None,
+        context_error="",
+        context_meta=None,
+        target_record=None,
+        target_records_count=0,
+        target_lookup_error="",
+    ):
         tag = obj.tag
         rule = dict(rules.get(tag, {}) or {})
         table_id = int(rule.get("table_id", 0) or 0)
         domain = int(rule.get("domain", 40) or 0)
-        code = _code_from_key_name(tag, obj.attrs.get("key_name"))
         row = {
             "file_name": obj.attrs.get("_file_name", ""),
             "object_type": tag,
             "xml_id": obj.xml_id,
             "key_name": obj.attrs.get("key_name", ""),
-            "logical_code": code,
+            "logical_code": "",
             "current_keyid": obj.keyid,
             "table_id": table_id,
             "configured_domain": domain,
@@ -397,31 +579,22 @@ class MasterStationModelModule(ModelModule):
             )
             return row
         self._current_link(row, db)
-        if not code:
-            row["reason"] = "MASTER_STATION_CODE_NOT_FOUND: G 图元 key_name 中未找到设备 CODE。"
-            return row
         if table_id <= 0:
             row["reason"] = "MASTER_STATION_TABLE_NOT_CONFIGURED: 该图元尚未配置数据库表号。"
             return row
-        try:
-            table_name, records = db.get_devices_by_code(table_id, code)
-            records = [
-                record for record in records
-                if self._record_matches_context(record, context, db)
-            ]
-            row["table_name"] = table_name
-        except Exception as exc:
-            row["reason"] = f"MASTER_STATION_TABLE_LOOKUP_ERROR: {exc}"
+        if target_lookup_error:
+            row["reason"] = target_lookup_error
             return row
-        row["db_match_count"] = len(records)
-        if len(records) != 1:
+        if target_record is None:
             row["reason"] = (
-                "MASTER_STATION_CODE_NOT_UNIQUE: "
-                f"table={table_id} CODE={code} 匹配记录数={len(records)}。"
+                "MASTER_STATION_BAY_RECORD_NOT_SELECTED: "
+                f"表 {table_id} 未按 BAY_ID 选出唯一目标设备。"
             )
             return row
 
-        record = records[0]
+        record = target_record
+        row["table_name"] = record.get("_table_name", rule.get("table_name", ""))
+        row["db_match_count"] = target_records_count
         device_id = int_or_none(record.get("id"))
         if device_id is None:
             row["reason"] = "MASTER_STATION_DEVICE_ID_INVALID: 数据库 ID 无效。"
@@ -480,7 +653,126 @@ class MasterStationModelModule(ModelModule):
         rules = self._rules(settings)
         frames = GParser().find_rmu_frames(parsed)
         breakers = [obj for obj in parsed.objects if obj.tag == "CBreaker"]
+        objects = [obj for obj in parsed.objects if obj.tag in TARGET_TAGS]
         context_cache = {}
+        feeder_candidates = rmu_keyid_candidates(
+            db,
+            parsed,
+            positions=rmu_positions_from_settings(settings),
+        )
+        local_contexts = {}
+        for obj in objects:
+            local_contexts[_object_identity(obj)] = self._resolve_local_context(
+                parsed, obj, breakers, frames, db, context_cache
+            )
+
+        records_by_bay = {}
+        bay_candidates = []
+        # Main-station tables 407/408/409 are resolved only through the
+        # context BAY_ID.  The G object's visible CODE/NAME is not parsed.
+        for obj in objects:
+            context = local_contexts[_object_identity(obj)][0] or {}
+            rule = rules.get(obj.tag, {})
+            table_id = int(rule.get("table_id", 0) or 0)
+            bay_id = int_or_none(context.get("bay_id"))
+            if bay_id is None or table_id <= 0:
+                continue
+            cache_key = (table_id, bay_id)
+            if cache_key not in records_by_bay:
+                try:
+                    _table_name, records_by_bay[cache_key] = db.get_devices_by_bay_id(
+                        table_id, bay_id
+                    )
+                except Exception:
+                    records_by_bay[cache_key] = []
+            records = records_by_bay[cache_key]
+            bay_reader = getattr(db, "get_bay_by_id", None)
+            bay = bay_reader(bay_id) if bay_reader else None
+            if bay:
+                for record in records:
+                    candidate = candidate_from_record(
+                        db,
+                        record,
+                        kind="POLE_SWITCH" if obj.tag == "CBreaker" else "OTHER",
+                        identity=record.get("id"),
+                        name=record.get("name") or record.get("code"),
+                        source=f"MASTER_{obj.tag}_BAY_ID:{bay_id}:TABLE_{table_id}",
+                    )
+                    feeder_candidates.append(candidate)
+                    bay_candidates.append({
+                        "candidate_feeder_id": candidate.get("feeder_id"),
+                        "bay_id": bay_id,
+                        "bay_code": str(bay.get("code") or "").strip(),
+                        "bay_name": str(bay.get("name") or "").strip(),
+                        "bay_st_id": bay.get("st_id", ""),
+                        "source": f"{obj.tag}:BAY_ID:{bay_id}:TABLE_{table_id}",
+                    })
+        feeder_resolution = resolve_graph_feeder(db, feeder_candidates)
+        graph_context = {}
+        if feeder_resolution.get("ready"):
+            feeder = feeder_resolution.get("feeder") or {}
+            resolved_feeder_id = int_or_none(feeder_resolution.get("feeder_id"))
+            matching_bays = [
+                item for item in bay_candidates
+                if int_or_none(item.get("candidate_feeder_id")) == resolved_feeder_id
+            ]
+            unique_bays = []
+            seen_bays = set()
+            for item in matching_bays:
+                bay_key = (
+                    item.get("bay_id"),
+                    item.get("bay_code"),
+                    item.get("bay_name"),
+                )
+                if bay_key not in seen_bays:
+                    seen_bays.add(bay_key)
+                    unique_bays.append(item)
+            graph_bay = unique_bays[0] if len(unique_bays) == 1 else {}
+            feeder_db_name = str(feeder.get("name") or "").strip()
+            feeder_code = str(feeder.get("code") or "").strip()
+            location_parts = [
+                str(feeder.get("station_name") or "").strip(),
+                feeder_db_name,
+                feeder_code,
+            ]
+            location_parts = list(dict.fromkeys(item for item in location_parts if item))
+            graph_context = {
+                "source": feeder_resolution.get("feeder_source", ""),
+                "feeder_id": feeder_resolution.get("feeder_id", ""),
+                "feeder_code": str(feeder.get("code") or "").strip(),
+                "feeder_graph_name": str(feeder.get("graph_name") or "").strip(),
+                "feeder_db_name": feeder_db_name,
+                "feeder_name": str(feeder.get("display_name") or feeder.get("name") or "").strip(),
+                "station_id": feeder.get("st_id", ""),
+                "station_name": str(feeder.get("station_name") or "").strip(),
+                "bay_id": graph_bay.get("bay_id", ""),
+                "bay_code": graph_bay.get("bay_code", ""),
+                "bay_name": graph_bay.get("bay_name", ""),
+                "location_label": " ".join(location_parts),
+            }
+        resolved_contexts = {}
+        for obj in objects:
+            context, context_error, context_meta = local_contexts[_object_identity(obj)]
+            local_feeder_id = int_or_none((context or {}).get("feeder_id"))
+            if feeder_resolution.get("ready"):
+                if local_feeder_id is not None and local_feeder_id != int_or_none(feeder_resolution.get("feeder_id")):
+                    context_error = (
+                        "MASTER_STATION_FEEDER_MISMATCH: 最近环网柜馈线与图级唯一馈线不一致。"
+                    )
+                else:
+                    merged = dict(context or {})
+                    merged.update({
+                        key: value for key, value in graph_context.items()
+                        if value not in (None, "")
+                    })
+                    context = merged
+                    context_error = ""
+            else:
+                context_error = feeder_resolution.get("reason") or context_error
+            resolved_contexts[_object_identity(obj)] = (context, context_error, context_meta)
+        assignments, assignment_errors = self._assign_bay_records(
+            parsed, objects, resolved_contexts, records_by_bay, rules
+        )
         if log_callback:
             if frames:
                 log_callback(
@@ -493,14 +785,14 @@ class MasterStationModelModule(ModelModule):
                     f"[{Path(g_file).name}] 主站设备关联阻断："
                     "G 文件未找到环网柜矩形框，该图环网柜请手动关联。"
                 )
-        objects = [obj for obj in parsed.objects if obj.tag in TARGET_TAGS]
         rows = []
         total = max(len(objects), 1)
         for index, obj in enumerate(objects, 1):
             obj.attrs["_file_name"] = Path(g_file).name
-            context, context_error, context_meta = self._resolve_local_context(
-                parsed, obj, breakers, frames, db, context_cache
-            )
+            context, context_error, context_meta = resolved_contexts[_object_identity(obj)]
+            assignment_error = assignment_errors.get(_object_identity(obj), "")
+            if not context_error and assignment_error:
+                context_error = assignment_error
             if log_callback and context:
                 log_callback(
                     f"[{Path(g_file).name}] {obj.tag} XML ID={obj.xml_id or '-'}："
@@ -510,8 +802,20 @@ class MasterStationModelModule(ModelModule):
                     f"馈线={context.get('feeder_code') or context.get('feeder_id') or '-'}。"
                 )
             row = self._resolve_object(
-                obj, db, rules, context, context_error, context_meta
+                obj,
+                db,
+                rules,
+                context,
+                context_error,
+                context_meta,
+                target_record=assignments.get(_object_identity(obj)),
+                target_records_count=len(records_by_bay.get((
+                    int(rules.get(obj.tag, {}).get("table_id", 0) or 0),
+                    int_or_none((context or {}).get("bay_id")),
+                ), [])),
+                target_lookup_error=assignment_error,
             )
+            add_feeder_fields(row, feeder_resolution)
             rows.append(row)
             if progress_callback:
                 progress_callback(index, total, f"正在处理主站设备 {index}/{len(objects)}")
@@ -526,10 +830,31 @@ class MasterStationModelModule(ModelModule):
             "report_type": "MASTER_STATION",
             "master_station_rows": rows,
             "association_context": {
-                "mode": "nearest_cbreaker_nearest_rmu",
+                "mode": "graph_unique_feeder_with_local_rmu_evidence",
                 "rmu_frame_count": len(frames),
                 "cbreaker_count": len(breakers),
-                "message": "每个对象按最近断路器对应的最近环网柜框内关联反查。",
+                "feeder_resolution_source": feeder_resolution.get("feeder_source", "UNRESOLVED"),
+                "feeder_resolution_evidence": feeder_resolution.get("feeder_evidence", ""),
+                "feeder_anchor": feeder_resolution.get("feeder_anchor", ""),
+                "station_id": graph_context.get("station_id", ""),
+                "station_name": graph_context.get("station_name", ""),
+                "feeder_code": graph_context.get("feeder_code", ""),
+                "feeder_graph_name": graph_context.get("feeder_graph_name", ""),
+                "feeder_db_name": graph_context.get("feeder_db_name", ""),
+                "feeder_id": feeder_resolution.get("feeder_id", ""),
+                "feeder_name": graph_context.get("feeder_name", ""),
+                "bay_id": graph_context.get("bay_id", ""),
+                "bay_code": graph_context.get("bay_code", ""),
+                "bay_name": graph_context.get("bay_name", ""),
+                "location_label": graph_context.get("location_label", ""),
+                "feeder_path": " / ".join(
+                    value for value in (
+                        graph_context.get("station_name", ""),
+                        graph_context.get("feeder_code", "")
+                        or graph_context.get("feeder_name", ""),
+                    ) if value
+                ),
+                "message": feeder_resolution.get("reason") or "图级 FEEDER_ID 已按唯一设备证据确认，所有目标按该馈线校验。",
             },
             "summary": {
                 "master_station_count": len(rows),
@@ -538,8 +863,8 @@ class MasterStationModelModule(ModelModule):
                 "master_station_unlinked": sum(1 for row in rows if row.get("status") == "UNLINKED"),
                 "master_station_relink": sum(1 for row in rows if row.get("status") == "RELINK"),
                 "association_ready_count": sum(1 for row in rows if row.get("association_ready") == "YES" and row.get("writeback_needed") == "YES"),
-                "feeder_context_ready": "LOCAL_PER_RMU",
-                "feeder_context_message": "未使用全局设备兜底；无 RMU 或框内无有效关联时逐对象阻断。",
+                "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
+                "feeder_context_message": feeder_resolution.get("reason") or "图级 FEEDER_ID 已唯一确认。",
             },
         }
 
@@ -578,7 +903,10 @@ class MasterStationModelModule(ModelModule):
                 }
                 changes_by_file[report["g_file"]].append(change)
                 output_row = dict(row)
-                output_row["reason"] = "PREVIEW_WRITE: 仅修改目标图元已有 app/voltype/p_ReportType/state/keyid 属性。"
+                output_row["reason"] = (
+                    "PREVIEW_WRITE: 仅回写 G 图元中已经存在的主站字段 "
+                    "app/voltype/p_ReportType/state/keyid；G 图元没有的字段不写入。"
+                )
                 rows.append(output_row)
         fingerprints = {}
         for g_file in changes_by_file:
@@ -640,7 +968,13 @@ class MasterStationModelModule(ModelModule):
                         break
                     index += 1
             target.write_bytes(source.read_bytes())
-            result = writer.apply_attribute_changes(target, changes, create_backup=False)
+            result = writer.apply_attribute_changes(
+                target,
+                changes,
+                create_backup=False,
+                only_existing_attributes=True,
+                allowed_attributes=MASTER_STATION_WRITE_ATTRIBUTES,
+            )
             applied += int(result.get("applied_count", 0))
             copied_files.append(str(target))
 

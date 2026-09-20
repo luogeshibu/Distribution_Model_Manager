@@ -16,6 +16,13 @@ from dmm.application.modules.pole_switch import (
     POLE_SWITCH_NAME_RE,
     PoleSwitchParser,
 )
+from dmm.application.modules.feeder_context import (
+    add_feeder_fields,
+    candidate_from_record,
+    resolve_graph_feeder,
+    rmu_keyid_candidates,
+    rmu_positions_from_settings,
+)
 
 
 TRANSFORMER_TABLE_ID = 13505
@@ -140,9 +147,8 @@ class TransformerParser(PoleSwitchParser):
                 element_catalog,
             ),
         )
-        # Feeder resolution is intentionally fixed-mode: use only the G-root
-        # facID (with the unique facName fallback below). No topology branch
-        # or CBreaker traversal is performed during model association.
+        # Feeder resolution is performed after name discovery at drawing
+        # scope.  This method only discovers Transformer_OH objects/text.
         source_keyids_by_transformer = {}
         all_source_keyids = []
         rows = []
@@ -208,7 +214,7 @@ class TransformerModelModule(ModelModule):
     display_name = "柱上变压器模型"
     description = (
         "只识别图元管理中标记为 Transformer_OH 的图元；被标记图元直接视为柱上变压器，"
-        "每个设备独立取最近合规 Text，馈线固定使用 G 根 facID 查询，必要时仅用唯一 facName 兜底，"
+        "每个设备独立取最近合规 Text，先按图内唯一设备证据确定 FEEDER_ID，"
         "按 13505 / dms_tr_device 计算双 KeyID 并安全回写。"
     )
     SUPPORTED_OPERATIONS = (
@@ -223,11 +229,12 @@ class TransformerModelModule(ModelModule):
             TRANSFORMER_TAG: {
                 "table_id": TRANSFORMER_TABLE_ID,
                 "domain": TRANSFORMER_DOMAIN,
-                "match_mode": "TRANSFORMERDIS_NEAREST_TEXT_AND_ROOT_FACID",
+                "match_mode": "TRANSFORMERDIS_NEAREST_TEXT_AND_GRAPH_FEEDER",
                 "description": (
                     "仅使用图元管理标记 Transformer_OH 的图元，直接视为柱上变压器；"
                     "每个变压器直接解析整张 G 图中最近的 Text，不依赖现场图元文件名；"
-                    "G 根 facID 确认馈线；目标表为 13505，Domain=1"
+                    "优先使用图内唯一环网柜馈线，其次使用唯一变压器数据库馈线；"
+                    "目标表为 13505，Domain=1"
                 ),
             }
         }
@@ -266,8 +273,8 @@ class TransformerModelModule(ModelModule):
             if feeder:
                 return feeder, "G_ROOT_FACID"
 
-        # Last-resort label fallback remains unique-only after the fixed
-        # facID lookup. It does not inspect topology.
+        # Retained for compatibility with older callers; the active analysis
+        # path uses resolve_graph_feeder and never calls this method.
         hint = str(context.get("root_fac_name") or "").strip()
         if hint:
             candidates = db.find_feeders_by_name_hint(hint)
@@ -351,7 +358,7 @@ class TransformerModelModule(ModelModule):
         if feeder_id is None:
             return self._fail(
                 row,
-                "TRANSFORMER_FEEDER_NOT_RESOLVED: G 根 facID 和唯一 facName 均未能解析到 13500 馈线。",
+                "TRANSFORMER_FEEDER_NOT_RESOLVED: 图内唯一环网柜/柱上变压器均未能解析到 13500 馈线。",
             )
         if not name:
             return self._fail(
@@ -450,15 +457,54 @@ class TransformerModelModule(ModelModule):
             (settings or {}).get("element_catalog", {}),
             settings or {},
         )
+        # Feeder ownership is a drawing-level hard constraint.  RMU evidence
+        # has precedence; only when no usable RMU association exists do we
+        # use uniquely named Transformer_OH database records.  The old
+        # root-facID/topology fallback is intentionally not used here.
+        feeder_candidates = rmu_keyid_candidates(
+            db,
+            parsed,
+            positions=rmu_positions_from_settings(settings),
+        )
+        for item in discovered:
+            name = str(item.get("graphical_name") or "").strip()
+            if not name:
+                continue
+            try:
+                records = db.get_transformer_devices_by_name(
+                    name,
+                    feeder_id=None,
+                    table_id=TRANSFORMER_TABLE_ID,
+                )
+            except Exception:
+                records = []
+            feeder_candidates.extend(
+                candidate_from_record(
+                    db,
+                    record,
+                    kind="TRANSFORMER",
+                    identity=record.get("id"),
+                    name=name,
+                    source=f"TRANSFORMER_NAME:{name}",
+                )
+                for record in records
+            )
+        feeder_resolution = resolve_graph_feeder(db, feeder_candidates)
+        feeder = feeder_resolution.get("feeder") or None
+        feeder_source = feeder_resolution.get("feeder_source", "UNRESOLVED")
         rows = []
         total = max(len(discovered), 1)
         for index, row in enumerate(discovered, start=1):
-            row_context = dict(context)
-            row_source_keyids = list(row.get("source_cbreaker_keyids") or [])
-            if row_source_keyids:
-                row_context["source_cbreaker_keyids"] = row_source_keyids
-            feeder, feeder_source = self._resolve_feeder(db, row_context)
             resolved = self._resolve_row(dict(row), db, feeder, feeder_source)
+            add_feeder_fields(resolved, feeder_resolution)
+            if not feeder_resolution.get("ready"):
+                self._fail(resolved, feeder_resolution.get("reason") or "GRAPH_FEEDER_NOT_RESOLVED")
+            elif resolved.get("db_feeder_id") and int_or_none(resolved.get("db_feeder_id")) != int_or_none(feeder_resolution.get("feeder_id")):
+                self._fail(
+                    resolved,
+                    "TRANSFORMER_FEEDER_MISMATCH: 目标 13505 记录不属于图级 FEEDER_ID="
+                    f"{feeder_resolution.get('feeder_id')}。",
+                )
             resolved["file_name"] = Path(g_file).name
             rows.append(resolved)
             if progress_callback:
@@ -479,6 +525,22 @@ class TransformerModelModule(ModelModule):
             "file_name": Path(g_file).name,
             "report_type": "TRANSFORMER",
             "transformer_rows": rows,
+            "feeder_resolution_source": feeder_resolution.get("feeder_source", "UNRESOLVED"),
+            "feeder_resolution_evidence": feeder_resolution.get("feeder_evidence", ""),
+            "feeder_id": feeder_resolution.get("feeder_id", ""),
+            "station_id": (feeder_resolution.get("feeder") or {}).get("st_id", ""),
+            "station_name": str((feeder_resolution.get("feeder") or {}).get("station_name") or "").strip(),
+            "feeder_code": str((feeder_resolution.get("feeder") or {}).get("code") or "").strip(),
+            "feeder_graph_name": str((feeder_resolution.get("feeder") or {}).get("graph_name") or "").strip(),
+            "feeder_name": str((feeder or {}).get("display_name") or (feeder or {}).get("name") or "").strip(),
+            "feeder_path": " / ".join(
+                value for value in (
+                    str((feeder_resolution.get("feeder") or {}).get("station_name") or "").strip(),
+                    str((feeder_resolution.get("feeder") or {}).get("code") or "").strip(),
+                ) if value
+            ),
+            "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
+            "feeder_context_message": feeder_resolution.get("reason", "") or "图级 FEEDER_ID 已唯一确认。",
             "summary": {
                 "transformer_count": len(rows),
                 "transformer_pass": sum(1 for row in rows if row.get("status") == "PASS"),
@@ -486,6 +548,7 @@ class TransformerModelModule(ModelModule):
                 "transformer_unlinked": sum(1 for row in rows if row.get("status") == "UNLINKED"),
                 "transformer_relink": sum(1 for row in rows if row.get("status") == "RELINK"),
                 "association_ready_count": sum(1 for row in rows if row.get("association_ready") == "YES"),
+                "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
             },
         }
 
