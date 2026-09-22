@@ -117,8 +117,9 @@ class PoleSwitchSettingsWidget(QGroupBox):
             "名称识别先扫描整张 G 图的有效 Text，当前模块的每个设备独立取最近名称，"
             "Text 中的换行名称（例如 AUTO RECLOSER 101601）会作为一个完整名称保留，"
             "kV、A、V 等单位文字会排除；"
-            "当前模块不分析 RMU、ConnectLine、node_area 或其他拓扑关系；"
-            "每个已标记设备独立取距离最近的合规 Text，多个设备可以解析到同一个 Text。"
+            "只处理已标记的 CBreakerDis，不查找或锁定 RMU、Bus、CBreaker、"
+            "Disconnector、GroundDisconnector 或其他设备；"
+            "多个柱上开关可以解析到同一个 Text。"
             "拓扑明细不输出到报告。"
         )
         topology.setWordWrap(True)

@@ -98,6 +98,17 @@ DEFAULT_SETTINGS = {
         "remote_directory": "/home/up8000/data/graph/display/sln",
         "element_directory": "/home/up8000/data/graph/element",
     },
+    # Bootstrap-only connection to the shared NARI configuration directory.
+    # The first-run Admin wizard creates the files on the server.
+    "central_config": {
+        "enabled": True,
+        "host": "172.16.21.27",
+        "port": 22,
+        "username": "up8000",
+        "password": "up8000",
+        "remote_directory": "/home/up8000/nari-international/distribution-model-manager/config",
+    },
+    "machine_id": "",
     "element_catalog": {
         "records": [],
     },

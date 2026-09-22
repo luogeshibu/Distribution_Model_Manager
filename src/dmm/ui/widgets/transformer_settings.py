@@ -95,10 +95,9 @@ class TransformerSettingsWidget(QGroupBox):
         layout.addWidget(preference_box)
 
         topology = QLabel(
-            "模型关联不分析 RMU、ConnectLine、node_area 或其他拓扑关系。"
-            "每个已标记变压器独立取距离最近的合规 Text，多个设备可以解析到同一个 Text。"
-            "馈线固定优先使用 G 根节点 facID 精确查询 13500 / dms_feeder_device；"
-            "facID 查不到时仅使用唯一 facName 兜底。"
+            "柱上变压器只处理已标记的 TransformerDis：每个设备独立按名称规则"
+            "匹配最近的合规 Text，再仅查询 13505 柱上变压器自身。"
+            "不查找、不锁定 CBreaker、Disconnector、GroundDisconnector、RMU 或其他设备。"
         )
         topology.setWordWrap(True)
         topology.setStyleSheet(

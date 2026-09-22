@@ -24,11 +24,7 @@ from dmm.config.defaults import (
 )
 from dmm.domain.gfile.parser import GParser
 from dmm.domain.rmu.validator import RmuValidator, KEYID_STEP, norm, int_or_none
-from dmm.application.modules.feeder_context import (
-    add_feeder_fields,
-    candidate_from_record,
-    resolve_graph_feeder,
-)
+from dmm.application.modules.jeddah_scope import apply_association_block
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 
 class RmuModelModule(ModelModule):
@@ -38,98 +34,55 @@ class RmuModelModule(ModelModule):
     SUPPORTED_OPERATIONS = ("VALIDATE", "PREVIEW_ASSOCIATION", "APPLY_ASSOCIATION")
 
     @staticmethod
-    def _apply_graph_feeder_context(db, reports):
-        """Require every RMU/device in a drawing to share one feeder."""
-        candidates = []
-        for report in reports:
-            for rmu in report.get("rmu_results", []) or []:
-                records = rmu.get("rmu_records", []) or []
-                candidates.append(
-                    candidate_from_record(
-                        db,
-                        records[0] if len(records) == 1 else {},
-                        kind="RMU",
-                        identity=(
-                            f"{records[0].get('id')}@FRAME_"
-                            f"{rmu.get('frame_xml_id') or rmu.get('frame_index') or '-'}"
-                            if len(records) == 1
-                            else rmu.get("frame_xml_id") or rmu.get("xml_id")
-                        ),
-                        name=rmu.get("rmu_name", ""),
-                        source=f"RMU_NAME:{rmu.get('rmu_name') or '-'}",
-                    )
+    def _block_duplicate_graph_names(report):
+        """Block every RMU when the same graphical RMU name repeats in one G file."""
+        grouped = defaultdict(list)
+        for rmu in report.get("rmu_results", []) or []:
+            name = norm(rmu.get("rmu_name"))
+            if name:
+                grouped[name].append(rmu)
+
+        for name, rmus in grouped.items():
+            if len(rmus) <= 1:
+                continue
+            reason = (
+                "RMU_DUPLICATE_GRAPH_NAME: 当前 G 图中环网柜名称重复，"
+                f"名称={name}，出现次数={len(rmus)}；禁止这些环网柜关联。"
+            )
+            for rmu in rmus:
+                rmu["association_eligible"] = False
+                rmu["rmu_status"] = "FAIL"
+                rmu["rmu_severity"] = "ERROR"
+                rmu["rmu_reason"] = reason
+                if reason not in rmu.setdefault("association_block_reasons", []):
+                    rmu["association_block_reasons"].append(reason)
+                apply_association_block(
+                    rmu.get("device_rows", []),
+                    reason,
                 )
-        resolution = resolve_graph_feeder(db, candidates)
-        for report in reports:
-            report.update({
-                "feeder_resolution_source": resolution.get("feeder_source", "UNRESOLVED"),
-                "feeder_resolution_evidence": resolution.get("feeder_evidence", ""),
-                "feeder_id": resolution.get("feeder_id", ""),
-                "station_id": (resolution.get("feeder") or {}).get("st_id", ""),
-                "station_name": str((resolution.get("feeder") or {}).get("station_name") or "").strip(),
-                "feeder_code": str((resolution.get("feeder") or {}).get("code") or "").strip(),
-                "feeder_graph_name": str((resolution.get("feeder") or {}).get("graph_name") or "").strip(),
-                "feeder_name": str(
-                    (resolution.get("feeder") or {}).get("display_name")
-                    or (resolution.get("feeder") or {}).get("name")
-                    or ""
-                ).strip(),
-                "feeder_path": " / ".join(
-                    value for value in (
-                        str((resolution.get("feeder") or {}).get("station_name") or "").strip(),
-                        str((resolution.get("feeder") or {}).get("code") or "").strip(),
-                    ) if value
-                ),
-                "feeder_context_ready": "YES" if resolution.get("ready") else "NO",
-                "feeder_context_message": resolution.get("reason") or "图级 FEEDER_ID 已唯一确认。",
-            })
-            for rmu in report.get("rmu_results", []) or []:
-                rmu_feeder = ""
-                records = rmu.get("rmu_records", []) or []
-                if len(records) == 1:
-                    rmu_feeder = records[0].get("feeder_id", "")
-                rmu["feeder_resolution_source"] = resolution.get("feeder_source", "UNRESOLVED")
-                rmu["feeder_resolution_evidence"] = resolution.get("feeder_evidence", "")
-                rmu["feeder_id"] = resolution.get("feeder_id", "")
-                rmu["feeder_name"] = report.get("feeder_name", "")
-                for row in rmu.get("device_rows", []) or []:
-                    add_feeder_fields(row, resolution)
-                    if not resolution.get("ready"):
-                        row["status"] = "FAIL"
-                        row["severity"] = "ERROR"
-                        row["association_ready"] = "NO"
-                        row["writeback_needed"] = "NO"
-                        row["reason"] = resolution.get("reason") or "GRAPH_FEEDER_NOT_RESOLVED"
-                    elif rmu_feeder not in (None, "") and int_or_none(rmu_feeder) != int_or_none(resolution.get("feeder_id")):
-                        row["status"] = "FAIL"
-                        row["severity"] = "ERROR"
-                        row["association_ready"] = "NO"
-                        row["writeback_needed"] = "NO"
-                        row["reason"] = (
-                            "RMU_FEEDER_MISMATCH: 环网柜不属于图级 FEEDER_ID="
-                            f"{resolution.get('feeder_id')}。"
-                        )
-                if not resolution.get("ready"):
-                    rmu["association_eligible"] = False
-                    rmu.setdefault("association_block_reasons", []).append(
-                        resolution.get("reason") or "GRAPH_FEEDER_NOT_RESOLVED"
-                    )
-                elif rmu_feeder not in (None, "") and int_or_none(rmu_feeder) != int_or_none(resolution.get("feeder_id")):
-                    rmu["association_eligible"] = False
-                    rmu.setdefault("association_block_reasons", []).append(
-                        "RMU_FEEDER_MISMATCH: 环网柜馈线与图级 FEEDER_ID 不一致"
-                    )
-            report_summary = report.get("summary", {}) or {}
-            report_summary["feeder_context_ready"] = (
-                "YES" if resolution.get("ready") else "NO"
-            )
-            report_summary["rmu_association_eligible"] = sum(
-                1
-                for item in report.get("rmu_results", []) or []
-                if item.get("association_eligible")
-            )
-            report["summary"] = report_summary
-        return resolution
+
+        rmus = report.get("rmu_results", []) or []
+        summary = report.get("summary", {}) or {}
+        summary.update({
+            "rmu_pass": sum(1 for r in rmus if r.get("rmu_status") == "PASS"),
+            "rmu_fail": sum(1 for r in rmus if r.get("rmu_status") == "FAIL"),
+            "rmu_association_eligible": sum(
+                1 for r in rmus if r.get("association_eligible")
+            ),
+            "element_pass": sum(
+                1 for r in rmus for row in r.get("device_rows", [])
+                if row.get("status") == "PASS"
+            ),
+            "element_warn": sum(
+                1 for r in rmus for row in r.get("device_rows", [])
+                if row.get("status") in ("WARN", "RELINK", "RMU_RELINK")
+            ),
+            "element_fail": sum(
+                1 for r in rmus for row in r.get("device_rows", [])
+                if row.get("status") in ("FAIL", "RMU_LINK", "BLOCKED")
+            ),
+        })
+        report["summary"] = summary
 
     @staticmethod
     def _runtime_device_rules(settings):
@@ -218,13 +171,10 @@ class RmuModelModule(ModelModule):
                 positions,
                 progress_callback=_file_progress,
             )
+            self._block_duplicate_graph_names(report)
             reports.append(report)
             for key in aggregate:
                 aggregate[key] += report["summary"].get(key, 0)
-        feeder_resolution = self._apply_graph_feeder_context(db, reports)
-        aggregate["feeder_context_ready"] = (
-            "YES" if feeder_resolution.get("ready") else "NO"
-        )
         return reports, aggregate, self._runtime_device_rules(settings)
 
     @staticmethod

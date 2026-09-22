@@ -158,8 +158,6 @@ FEEDLINE_LABELS = {
 
 DEVICE_FIELDS = [
     "rmu_name", "rmu_id",
-    "feeder_resolution_source", "feeder_resolution_evidence", "feeder_id", "station_name",
-    "feeder_code", "feeder_graph_name", "feeder_name", "feeder_path",
     "object_type", "xml_id", "logical_code", "graphical_name",
     "selected_name_source", "selected_device_name", "paired_breaker_name",
     "table_id", "table_name", "configured_domain", "match_mode",
@@ -266,7 +264,7 @@ POLE_LABELS_EN = {
 TRANSFORMER_FIELDS = [
     "file_name", "object_type", "xml_id", "devref", "graphical_name",
     "name_source", "name_distance", "name_direction", "name_xml_id",
-    "feeder_resolution_source", "feeder_resolution_evidence", "feeder_id",
+    "feeder_resolution_source", "feeder_id",
     "station_name", "feeder_code", "feeder_graph_name", "feeder_db_name", "feeder_name", "feeder_path",
     "bay_id", "bay_code", "bay_name", "location_label",
     "current_keyid", "current_keyid1", "current_keyid2",
@@ -283,7 +281,7 @@ TRANSFORMER_LABELS = {
     "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID（来源：G文件）",
     "devref": "devref", "graphical_name": "图上名称", "name_source": "名称来源",
     "name_distance": "名称距离", "name_direction": "名称方向", "name_xml_id": "名称XML ID",
-    "feeder_resolution_source": "馈线识别方式", "feeder_resolution_evidence": "馈线判定依据", "feeder_id": "目标馈线ID",
+    "feeder_resolution_source": "馈线识别方式", "feeder_id": "目标馈线ID",
     "station_name": "厂站名称（来源：数据库）", "feeder_code": "馈线CODE（来源：数据库）",
     "feeder_graph_name": "馈线图名（来源：数据库）", "feeder_path": "厂站 / 馈线定位（数据库）",
     "feeder_name": "目标馈线名称（来源：数据库）", "current_keyid": "当前KeyID（来源：G文件）",
@@ -306,7 +304,7 @@ TRANSFORMER_LABELS_EN = {
     "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID (G File)",
     "devref": "devref", "graphical_name": "Graphical Name", "name_source": "Name Source",
     "name_distance": "Name Distance", "name_direction": "Name Direction", "name_xml_id": "Name XML ID",
-    "feeder_resolution_source": "Feeder Resolution Source", "feeder_resolution_evidence": "Feeder Evidence", "feeder_id": "Target Feeder ID",
+    "feeder_resolution_source": "Feeder Resolution Source", "feeder_id": "Target Feeder ID",
     "station_name": "Station Name (Database)", "feeder_code": "Feeder CODE (Database)",
     "feeder_graph_name": "Feeder Graph Name (Database)", "feeder_path": "Station / Feeder Path (Database)",
     "feeder_name": "Target Feeder Name (Database)", "current_keyid": "Current KeyID (G File)",
@@ -411,8 +409,6 @@ MASTER_STATION_LABELS_EN = {
 
 RMU_FIELDS = [
     "file_name", "frame_index", "frame_xml_id", "rmu_name",
-    "feeder_resolution_source", "feeder_resolution_evidence", "feeder_id", "station_name",
-    "feeder_code", "feeder_graph_name", "feeder_name", "feeder_path",
     "rmu_type", "rmu_type_source", "rmu_type_text", "rmu_type_devref",
     "rmu_type_consistent", "rmu_type_check_status", "rmu_type_check_reason",
     "rmu_is_smart", "rmu_smart_marker_types",
@@ -440,7 +436,6 @@ DEVICE_LABELS = {
     "rmu_smart_marker_types": "智能标识",
     "rmu_id": "环网柜ID（来源：数据库）",
     "feeder_resolution_source": "图级馈线识别方式",
-    "feeder_resolution_evidence": "图级馈线判定依据",
     "feeder_id": "图级馈线ID（来源：数据库）",
     "station_name": "厂站名称（来源：数据库）",
     "feeder_code": "馈线CODE（来源：数据库）",
@@ -494,7 +489,6 @@ RMU_LABELS = {
     "frame_xml_id": "矩形框XML ID（来源：G文件）",
     "rmu_name": "环网柜名称（来源：G文件图上文字）",
     "feeder_resolution_source": "图级馈线识别方式",
-    "feeder_resolution_evidence": "图级馈线判定依据",
     "feeder_id": "图级馈线ID（来源：数据库）",
     "feeder_name": "图级馈线名称（来源：数据库）",
     "rmu_type": "环网柜类型",
@@ -562,7 +556,7 @@ DEVICE_LABELS_EN = {
     "rmu_type_text": "Graphical Text Type", "rmu_type_devref": "devref Type", "rmu_type_consistent": "Type Cross-check",
     "rmu_type_check_status": "Type Check Status", "rmu_type_check_reason": "Type Cross-check Details",
     "rmu_is_smart": "Smart Type", "rmu_smart_marker_types": "Smart Markers", "rmu_id": "RMU ID (Database)",
-    "feeder_resolution_source": "Graph Feeder Resolution Source", "feeder_resolution_evidence": "Graph Feeder Evidence",
+    "feeder_resolution_source": "Graph Feeder Resolution Source",
     "feeder_id": "Graph Feeder ID (Database)", "feeder_name": "Graph Feeder Name (Database)",
     "object_type": "G Object Type", "xml_id": "XML ID (G File)", "logical_code": "Logical CODE (Graph Rule)",
     "graphical_name": "Graphical Name", "selected_name_source": "Device Name Source", "selected_device_name": "Final Device Name",
@@ -582,7 +576,7 @@ DEVICE_LABELS_EN = {
 
 RMU_LABELS_EN = {
     "file_name": "G File", "frame_index": "RMU Index (G File)", "frame_xml_id": "Frame XML ID (G File)", "rmu_name": "RMU Name (G Text)",
-    "feeder_resolution_source": "Graph Feeder Resolution Source", "feeder_resolution_evidence": "Graph Feeder Evidence",
+    "feeder_resolution_source": "Graph Feeder Resolution Source",
     "feeder_id": "Graph Feeder ID (Database)", "feeder_name": "Graph Feeder Name (Database)",
     "rmu_type": "RMU Type", "rmu_type_source": "Type Source", "rmu_type_text": "Graphical Text Type",
     "rmu_type_devref": "devref Type", "rmu_type_consistent": "Type Cross-check", "rmu_type_check_status": "Type Check Status",
@@ -743,11 +737,11 @@ def flatten_rmu_rows(reports):
                 severity = "ERROR"
                 reason = (
                     f"RMU_DUPLICATE_IN_DATABASE: 数据库中找到 {db_count} 个同名环网柜，"
-                    "请检查数据库模型和单线图中的该环网柜。"
+                    "请检查数据库模型和当前 G 图中的该环网柜。"
                 )
                 duplicate_block = (
                     f"数据库中找到 {db_count} 个同名环网柜；环网柜必须唯一，"
-                    "禁止自动关联，请检查数据库模型和单线图中的该环网柜。"
+                    "禁止自动关联，请检查数据库模型和当前 G 图中的该环网柜。"
                 )
                 if duplicate_block not in block_reasons:
                     block_reasons.append(duplicate_block)
@@ -758,7 +752,7 @@ def flatten_rmu_rows(reports):
                 if not reason or reason == "RMU_NOT_FOUND_IN_DATABASE":
                     reason = (
                         "RMU_NOT_FOUND_IN_DATABASE: 数据库中未找到该环网柜，"
-                        "请检查数据库模型和单线图中的环网柜名称。"
+                        "请检查数据库模型和当前 G 图中的环网柜名称。"
                     )
 
             device_rows = [
@@ -893,6 +887,257 @@ def flatten_device_rows(reports):
                 rows.append(row)
 
     return rows
+
+
+def _rmu_feeder_overview(reports, english=False):
+    """Render a compact per-G-file feeder count for a graph-based report.
+
+    The detailed resolver evidence is intentionally not rendered here. The
+    operator needs the number of distinct FEEDER_ID values in each drawing,
+    the IDs themselves, and whether one feeder was uniquely selected.
+    """
+    rows = []
+    for report in reports:
+        feeder_ids = []
+        for value in report.get("graph_feeder_ids", []) or []:
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if value not in feeder_ids:
+                feeder_ids.append(value)
+        feeder_ids.sort()
+
+        selected_id = str(report.get("feeder_id", "") or "").strip()
+        if selected_id:
+            try:
+                selected_value = int(selected_id)
+                if selected_value not in feeder_ids:
+                    feeder_ids.append(selected_value)
+                    feeder_ids.sort()
+            except (TypeError, ValueError):
+                pass
+        selected_name = str(
+            report.get("feeder_path", "")
+            or report.get("feeder_name", "")
+            or report.get("feeder_graph_name", "")
+            or ""
+        ).strip()
+        ready = str(report.get("feeder_context_ready", "")).upper() == "YES"
+        if ready and len(feeder_ids) == 1:
+            result = "已唯一确定" if not english else "Uniquely resolved"
+        elif len(feeder_ids) > 1:
+            result = "多馈线，禁止按单一馈线关联" if not english else "Multiple feeders; single-feeder association blocked"
+        else:
+            result = "未确定" if not english else "Unresolved"
+
+        rows.append(
+            "<tr>"
+            f"<td>{esc(report.get('file_name', ''))}</td>"
+            f"<td>{esc(len(feeder_ids))}</td>"
+            f"<td>{esc(', '.join(str(value) for value in feeder_ids) or '-')}</td>"
+            f"<td>{esc(selected_id or '-')}</td>"
+            f"<td>{esc(selected_name or '-')}</td>"
+            f"<td>{esc(result)}</td>"
+            "</tr>"
+        )
+
+    headers = (
+        ["G File", "Feeder Count", "FEEDER_ID Set", "Selected FEEDER_ID", "Selected Feeder", "Result"]
+        if english
+        else ["G文件", "图中馈线数量", "图中 FEEDER_ID 集合", "最终馈线ID", "最终馈线", "结果"]
+    )
+    empty = (
+        "No G-file feeder context was found." if english else "未找到可用于统计的馈线信息。"
+    )
+    body = "".join(rows) or f"<tr><td colspan='6'>{esc(empty)}</td></tr>"
+    title = "Graph Feeder Overview" if english else "图级馈线概览"
+    intro = (
+        "This summary shows how many distinct FEEDER_ID values are present in each G file."
+        if english
+        else "这里汇总每个 G 图中识别到的不同 FEEDER_ID 数量；多馈线图不会按单一馈线自动关联。"
+    )
+    return (
+        f"<div class='card'><h2>{esc(title)}</h2><p>{esc(intro)}</p>"
+        "<table class='feeder-overview-table'><thead><tr>"
+        + "".join(f"<th>{esc(header)}</th>" for header in headers)
+        + "</tr></thead><tbody>"
+        + body
+        + "</tbody></table></div>"
+    )
+
+
+def _pole_switch_feeder_result(reports, english=False):
+    """Render only the feeder result needed by the pole-switch operator.
+
+    Pole-switch validation is target-only.  The old drawing-scope card
+    displayed zero main devices because this module no longer loads them,
+    then incorrectly translated that empty scope into an association block.
+    """
+    rows = []
+    for report in reports:
+        feeder_ids = []
+        for value in report.get("graph_feeder_ids", []) or []:
+            value = str(value or "").strip()
+            if value and value not in feeder_ids:
+                feeder_ids.append(value)
+        selected_id = str(report.get("feeder_id") or "").strip()
+        if selected_id and selected_id not in feeder_ids:
+            feeder_ids.append(selected_id)
+
+        feeder_label = str(
+            report.get("feeder_path")
+            or report.get("feeder_name")
+            or report.get("feeder_graph_name")
+            or ""
+        ).strip()
+        ready = str(report.get("feeder_context_ready") or "").upper() == "YES"
+        if ready and len(feeder_ids) == 1:
+            result = "已确定" if not english else "Resolved"
+            display_feeder = feeder_label or selected_id or feeder_ids[0]
+        elif len(feeder_ids) > 1:
+            result = "不能关联：检测到多个馈线" if not english else "Cannot associate: multiple feeders"
+            display_feeder = "、".join(feeder_ids)
+        else:
+            result = "不能关联：未识别到馈线" if not english else "Cannot associate: feeder unresolved"
+            display_feeder = feeder_label or selected_id or "-"
+
+        rows.append(
+            "<tr>"
+            f"<td>{esc(report.get('file_name', ''))}</td>"
+            f"<td>{esc(display_feeder)}</td>"
+            f"<td>{esc(result)}</td>"
+            "</tr>"
+        )
+
+    headers = ["G File", "Belonging Feeder", "Result"] if english else ["G文件", "所属馈线", "结果"]
+    body = "".join(rows) or f"<tr><td colspan='3'>{esc('No feeder result.' if english else '未找到馈线结果。')}</td></tr>"
+    title = "Pole-switch Feeder Result" if english else "柱上开关所属馈线"
+    intro = (
+        "The feeder is taken only from the pole-switch target records in 13501/13502."
+        if english
+        else "仅根据柱上开关自身的 13501/13502 记录确定所属馈线。"
+    )
+    return (
+        f"<div class='card'><h2>{esc(title)}</h2><p>{esc(intro)}</p>"
+        "<table class='feeder-overview-table'><thead><tr>"
+        + "".join(f"<th>{esc(header)}</th>" for header in headers)
+        + "</tr></thead><tbody>"
+        + body
+        + "</tbody></table></div>"
+    )
+
+
+def _jeddah_scope_overview(reports, english=False):
+    """Compact common Jeddah association-scope card for every module."""
+    rows = []
+    for report in reports:
+        scope = report.get("drawing_scope", {}) or {}
+        counts = scope.get("main_device_counts", {}) or {}
+        main_text = ", ".join(
+            f"{tag}={counts.get(tag, 0)}"
+            for tag in ("CBreaker", "Disconnector", "GroundDisconnector")
+        )
+        allowed = bool(scope.get("association_allowed"))
+        result = "允许关联" if allowed else "禁止关联"
+        if english:
+            result = "Association allowed" if allowed else "Association blocked"
+        rows.append(
+            "<tr>"
+            f"<td>{esc(report.get('file_name', ''))}</td>"
+            f"<td>{esc(scope.get('drawing_type', '') or '-')}</td>"
+            f"<td>{esc(report.get('graph_facid', '') or '-')}</td>"
+            f"<td>{esc(report.get('facid_check', '') or '-')}</td>"
+            f"<td>{esc(scope.get('associated_bus_count', 0))}</td>"
+            f"<td>{esc(scope.get('main_bus_layout', '') or '-')}</td>"
+            f"<td>{esc(scope.get('associated_bus_xml_id', '') or '-')}</td>"
+            f"<td>{esc(main_text)}</td>"
+            f"<td>{esc(result)}</td>"
+            f"<td>{esc(scope.get('block_reason', '') or '-')}</td>"
+            "</tr>"
+        )
+    headers = (
+        ["G File", "Drawing Type", "G facID", "facID Check", "Connected Main Bus Count", "Bus Layout", "Main Bus XML ID", "Main Device Counts", "Result", "Restriction"]
+        if english
+        else ["G文件", "图纸类型", "G根节点 facID", "facID 校验", "关联主网 Bus 数量", "母线形式", "主网 Bus XML ID", "主网设备数量", "结果", "关联限制"]
+    )
+    body = "".join(rows) or f"<tr><td colspan='10'>{esc('No scope data.' if english else '未找到图纸范围判断信息。')}</td></tr>"
+    title = "Jeddah Association Scope" if english else "吉达关联范围判断"
+    intro = (
+        "Association is allowed only when one single-line feeder and one connected main-device group are detected. A single-bus or double-bus arrangement is valid; isolated Bus objects are ignored."
+        if english
+        else
+        "只有在单线图中，并且检测到一个与主网设备相连的主网设备组时才允许关联；单母线或双母线均可，孤立 Bus 不计入。"
+    )
+    return (
+        f"<div class='card'><h2>{esc(title)}</h2><p>{esc(intro)}</p>"
+        "<table><thead><tr>"
+        + "".join(f"<th>{esc(header)}</th>" for header in headers)
+        + "</tr></thead><tbody>"
+        + body
+        + "</tbody></table></div>"
+    )
+
+
+def _compact_transformer_feeder_result(reports, english=False):
+    """Render only the final station/feeder result for transformer reports."""
+    rows = []
+    for report in reports:
+        def clean(value):
+            return re.sub(r"\s+", " ", re.sub(r"[-_/]+", " ", str(value or "").strip())).strip()
+
+        area = clean(report.get("subcontrolarea_path"))
+        station = clean(report.get("station_name"))
+        feeder = clean(report.get("feeder_name"))
+        # feeder_name is the complete database display_name (area + station
+        # + feeder).  Keep the fallback for older reports generated before
+        # that field was made complete.
+        if feeder:
+            label = feeder
+        elif area and station and station.casefold().startswith(area.casefold() + " "):
+            label = station
+        else:
+            label = " ".join(value for value in (area, station) if value) or "-"
+        scope = report.get("drawing_scope", {}) or {}
+        if str(report.get("feeder_context_ready", "")).upper() != "YES":
+            result = "无法确定" if not english else "Unresolved"
+            reason = report.get("feeder_context_message") or ""
+        elif not report.get("facid_consistent", True):
+            result = "禁止关联" if not english else "Association blocked"
+            reason = report.get("facid_reason") or ""
+        elif scope and not scope.get("association_allowed", True):
+            result = "禁止关联" if not english else "Association blocked"
+            reason = scope.get("block_reason") or ""
+        else:
+            result = "已确定" if not english else "Resolved"
+            reason = ""
+        rows.append(
+            "<tr>"
+            f"<td>{esc(report.get('file_name', ''))}</td>"
+            f"<td><strong>{esc(label)}</strong></td>"
+            f"<td>{esc(result)}</td>"
+            f"<td>{esc(reason or '-')}</td>"
+            "</tr>"
+        )
+    headers = (
+        ["G File", "Station / Feeder", "Result", "Note"]
+        if english
+        else ["G文件", "图级厂站 / 馈线", "结果", "说明"]
+    )
+    body = "".join(rows) or (
+        "<tr><td colspan='4'>"
+        + esc("No feeder result." if english else "未找到图级厂站/馈线结果。")
+        + "</td></tr>"
+    )
+    title = "Feeder Result" if english else "图级厂站 / 馈线结果"
+    return (
+        f"<div class='card compact-result'><h2>{esc(title)}</h2>"
+        "<table><thead><tr>"
+        + "".join(f"<th>{esc(header)}</th>" for header in headers)
+        + "</tr></thead><tbody>"
+        + body
+        + "</tbody></table></div>"
+    )
 
 
 
@@ -1497,6 +1742,8 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"
             "环网柜汇总严格按照 G 文件环网柜序号排列，"
             "每个环网柜只展示一行；柜型、智能标识、数据库唯一性、"
             "设备完整性及关联状态统一汇总在本表中。"
+            "环网柜名称只使用距离不超过 200 的 Text；环网柜模块不判断馈线和 facID，支持单线图、合成图和环网图；"
+            "同一 G 图内环网柜名称重复时，重复名称对应的环网柜全部禁止关联。"
         )
     )
     device_intro = (
@@ -1514,7 +1761,7 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"
         rmu_intro = (
             "This report contains only RMUs selected and executed in this operation. Unselected RMUs are excluded."
             if is_operation_report else
-            "The RMU summary follows the RMU sequence in each G file. Each RMU is shown once with type, smart markers, database uniqueness, device completeness, and association status."
+            "The RMU summary follows the RMU sequence in each G file. Each RMU is shown once with type, smart markers, database uniqueness, device completeness, and association status. Only Text within distance 200 is eligible for RMU names. The RMU module does not validate feeder or facID and supports single-line, composite, and ring-network drawings; repeated RMU names in one G file block all matching RMUs."
         )
         device_intro = (
             "This table contains only devices selected for this execution. PASS means write-back succeeded; FAIL means database facts changed during execution and the device was skipped."
@@ -1526,12 +1773,14 @@ def _export_rmu_html_bundle(reports, export_path, domain_rules, language="zh_CN"
         "字段来源说明：矩形框 XML ID、图元 XML ID、当前 G 文件 KeyID 来自 G 文件；"
         "环网柜 ID、设备 ID、CODE、NAME、BV_ID、所属环网柜 ID 来自数据库；"
         "表号和域号来自数据库定义；期望 KeyID 是程序按设备 ID + 域号计算后，再通过数据库函数校验的结果。"
+        "本模块不使用馈线或 facID 作为环网柜关联条件。"
     )
     if english:
         source_note = (
             "Field sources: Frame XML ID, G-object XML ID, and current G-file KeyID come from the G file; "
             "RMU ID, device ID, CODE, NAME, BV_ID, and owning RMU ID come from the database; "
-            "table/domain values come from database definitions; Expected KeyID is calculated from device ID + domain and then verified by the database function."
+            "table/domain values come from database definitions; Expected KeyID is calculated from device ID + domain and then verified by the database function. "
+            "This module does not use feeder or facID as an RMU association condition."
         )
 
     domain_rows = "".join(
@@ -1751,6 +2000,7 @@ def _export_feeder_html_bundle(reports, export_path, domain_rules, language="zh_
         filter_placeholder=("Enter a feeder section name or any text" if english else "输入馈线段名称或任意字符，模糊匹配"),
         language=language,
     )
+    scope_overview = _jeddah_scope_overview(reports, english=english)
 
     feeder_rule_intro = (
         "Feeder resolution uses exactly the operator-selected independent source: G-root facID, file name, or manual input. An existing facID is current-state evidence only and does not override the selected source. File-name mode supports both single files and batch folders; each file independently resolves its substation and feeder token (for example ABH + 03 -> AH303, while AH303 is used directly) and must produce one unique 13500 / dms_feeder_device match. Replacing a different existing facID/cross-feeder section association requires the explicit override option. Substation 405 determines feeder ownership; section BV_ID is selected from the station voltage levels. The only database write allowed is INSERT into 13503 / dms_section_device, using model Domain 1."
@@ -1859,6 +2109,8 @@ td.select-col{{background:inherit}}
     {feeder_table}
   </div>
 
+  {scope_overview}
+
   <div class="card">
     <h2>{("Feeder Section Details" if english else "馈线段明细")}</h2>
     <p>{esc(feedline_detail_intro)}</p>
@@ -1923,13 +2175,13 @@ def _export_pole_html_bundle(reports, export_path, domain_rules, language="zh_CN
     title = "Pole Switch Model Report" if english else "柱上开关模型报告"
     intro = (
         "Only CBreakerDis objects whose element file is marked LBS, SEC, or AR in Element Management are included. "
-        "Each device independently resolves its name from the nearest eligible Text; RMU and connection topology are not analyzed."
+        "All target devices compete globally for eligible Text objects within distance 300; the nearest device wins, while separate Text objects may contain the same name, then 13501/13502 ownership and feeder consistency are validated."
         if english
         else
-        "本报告只展示 CBreakerDis 且对应图元文件在图元管理中标记为 LBS/SEC/AR 的柱上开关，"
-        "每个设备独立取最近合规 Text；Text.ts 中的换行名称会合并为空格后保留，"
+        "本报告只展示 CBreakerDis 且对应图元文件在图元管理中标记为 LBS/SEC/AR 的柱上开关。"
+        "所有目标设备只从距离不超过 300 的候选中全局按距离优先分配合规 Text 图元；不同位置的 Text 可以有相同名称，Text.ts 中的换行名称会合并为空格后保留，"
         "kV、A、V 等单位文字不作为名称，"
-        "并输出数据库链路和 KeyID 校验结果。"
+        "并输出 13501/13502 归属、feeder_id 一致性和 KeyID 校验结果。"
     )
     domain_rows = "<tr><td>CBreakerDis</td><td>13502</td><td>40</td></tr>"
     table = _table_html(
@@ -1946,6 +2198,7 @@ def _export_pole_html_bundle(reports, export_path, domain_rules, language="zh_CN
         ),
         language=language,
     )
+    feeder_overview = _pole_switch_feeder_result(reports, english=english)
     text = f"""<!doctype html>
 <html lang="{'en' if english else 'zh-CN'}">
 <head>
@@ -1981,6 +2234,7 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
   <div class="status-item blocked"><strong>{'Blue BLOCKED' if english else '蓝色 BLOCKED'}</strong><span>{'A blocked scenario requiring manual confirmation.' if english else '需要人工确认的整体阻断场景。'}</span></div>
   <div class="status-item fail"><strong>{'Red FAIL' if english else '红色 FAIL'}</strong><span>{'The current database facts cannot safely determine a unique target or the KeyID/BV_ID is invalid.' if english else '数据库当前事实无法安全确定唯一目标，或者 Expected KeyID / BV_ID 无效。'}</span></div>
 </div></div>
+{feeder_overview}
 <div class="card"><h2>{'Pole Switch Details' if english else '柱上开关明细'}</h2>{table}</div>
 </main>
 </body></html>"""
@@ -1997,12 +2251,12 @@ def _export_transformer_html_bundle(reports, export_path, domain_rules, language
     title = "Pole Transformer Model Report" if english else "柱上变压器模型报告"
     intro = (
         "Only TransformerDis objects marked Transformer_OH in Element Management are included. "
-        "Each device independently resolves its name from the nearest eligible Text. "
+        "All target transformers compete globally for eligible Text objects within distance 200; the nearest transformer owns each Text, while separate Text objects may contain the same name. "
         "The feeder is resolved from one unique in-drawing RMU or transformer database source; connection topology is not analyzed."
         if english
         else
         "本报告只展示图元管理中标记为 Transformer_OH 的 TransformerDis 图元。"
-        "每个设备独立取整张 G 图中最近的合规 Text 直接解析，"
+        "先在本图全部目标变压器之间全局分配距离不超过 200 且互不重复的合规 Text 图元，距离更近的设备优先；不同位置的 Text 可以有相同名称，"
         "馈线优先使用图内唯一环网柜，其次使用唯一柱上变压器数据库记录，不分析连接拓扑。"
     )
     domain_rows = "<tr><td>TransformerDis</td><td>13505</td><td>1</td></tr>"
@@ -2020,6 +2274,7 @@ def _export_transformer_html_bundle(reports, export_path, domain_rules, language
         ),
         language=language,
     )
+    feeder_result = _compact_transformer_feeder_result(reports, english=english)
     text = f"""<!doctype html>
 <html lang="{'en' if english else 'zh-CN'}">
 <head>
@@ -2055,6 +2310,7 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
   <div class="status-item blocked"><strong>{'Blue BLOCKED' if english else '蓝色 BLOCKED'}</strong><span>{'Manual confirmation is required.' if english else '需要人工确认。'}</span></div>
   <div class="status-item fail"><strong>{'Red FAIL' if english else '红色 FAIL'}</strong><span>{'The feeder, name, target device, or Expected KeyID cannot be determined safely.' if english else '馈线、名称、目标设备或 Expected KeyID 无法安全确定。'}</span></div>
 </div></div>
+{feeder_result}
 <div class="card"><h2>{'Pole Transformer Details' if english else '柱上变压器明细'}</h2>{table}</div>
 </main>
 </body></html>"""
@@ -2107,6 +2363,8 @@ def _export_master_station_html_bundle(reports, export_path, domain_rules, langu
         for label, value in (
             (("判定依据" if not english else "Anchor"), context.get("feeder_anchor", "") or "未找到唯一判定设备"),
             (("馈线定位" if not english else "Feeder Location"), context.get("location_label", "") or context.get("feeder_path", "")),
+            (("G根节点 facID" if not english else "G root facID"), context.get("graph_facid", "")),
+            (("facID校验" if not english else "facID Check"), context.get("facid_check", "")),
             (("FEEDER_ID" if not english else "FEEDER_ID"), context.get("feeder_id", "")),
             (("BAY_ID" if not english else "BAY_ID"), context.get("bay_id", "")),
             (("处理结果" if not english else "Result"), context.get("message", "")),
@@ -2116,6 +2374,7 @@ def _export_master_station_html_bundle(reports, export_path, domain_rules, langu
         f"<div class=\"card\"><h2>{esc(feeder_context_title)}</h2>"
         f"<table class=\"context-table\"><tbody>{feeder_context_rows}</tbody></table></div>"
     )
+    scope_overview = _jeddah_scope_overview(reports, english=english)
     text = f"""<!doctype html>
 <html lang="{'en' if english else 'zh-CN'}"><head><meta charset="utf-8">
 <title>{esc(title)}</title>
@@ -2134,6 +2393,7 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
 <main><div class="card"><h2>{'Association Rules' if english else '关联规则'}</h2><p>{esc(intro)}</p><p><strong>{'Field sources:' if english else '字段来源：'}</strong>{esc(source_note)}</p>
 <table><thead><tr><th>{'G Object Type' if english else 'G图元类型'}</th><th>{'Table ID' if english else '表号'}</th><th>{'Domain' if english else '域号'}</th><th>{'Database Table' if english else '数据库表'}</th></tr></thead><tbody>{domain_rows}</tbody></table></div>
 {feeder_context_card}
+{scope_overview}
 <div class="card"><h2>{'Master Station Device Details' if english else '配网主站设备明细'}</h2>{table}</div></main></body></html>"""
     export_path.write_text(text, encoding="utf-8")
     return export_path

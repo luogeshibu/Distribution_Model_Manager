@@ -13,6 +13,13 @@ from dmm.application.modules.feeder_context import (
     rmu_keyid_candidates,
     rmu_positions_from_settings,
 )
+from dmm.application.modules.jeddah_scope import (
+    assess_jeddah_drawing_scope,
+    apply_association_block,
+    apply_jeddah_scope_block,
+    check_graph_facid,
+    scope_report_fields,
+)
 from dmm.config.defaults import DEFAULT_MASTER_STATION_RULES
 from dmm.domain.gfile.parser import GParser
 from dmm.domain.rmu.validator import int_or_none
@@ -650,6 +657,7 @@ class MasterStationModelModule(ModelModule):
 
     def _analyze_file(self, db, g_file, settings, log_callback, progress_callback=None):
         parsed = GParser().parse(g_file)
+        drawing_scope = assess_jeddah_drawing_scope(parsed)
         rules = self._rules(settings)
         frames = GParser().find_rmu_frames(parsed)
         breakers = [obj for obj in parsed.objects if obj.tag == "CBreaker"]
@@ -708,6 +716,9 @@ class MasterStationModelModule(ModelModule):
                         "source": f"{obj.tag}:BAY_ID:{bay_id}:TABLE_{table_id}",
                     })
         feeder_resolution = resolve_graph_feeder(db, feeder_candidates)
+        facid_check = check_graph_facid(
+            parsed, feeder_resolution.get("feeder_id")
+        )
         graph_context = {}
         if feeder_resolution.get("ready"):
             feeder = feeder_resolution.get("feeder") or {}
@@ -819,6 +830,10 @@ class MasterStationModelModule(ModelModule):
             rows.append(row)
             if progress_callback:
                 progress_callback(index, total, f"正在处理主站设备 {index}/{len(objects)}")
+        if not drawing_scope["association_allowed"]:
+            apply_jeddah_scope_block(rows, drawing_scope)
+        if not facid_check["facid_consistent"]:
+            apply_association_block(rows, facid_check["facid_reason"])
         if log_callback:
             log_callback(
                 f"[{Path(g_file).name}] 配网主站设备识别完成：图元={len(rows)}；"
@@ -828,6 +843,11 @@ class MasterStationModelModule(ModelModule):
             "g_file": str(Path(g_file)),
             "file_name": Path(g_file).name,
             "report_type": "MASTER_STATION",
+            **scope_report_fields(drawing_scope),
+            "graph_facid": facid_check["graph_facid"],
+            "facid_check": facid_check["facid_check"],
+            "facid_consistent": facid_check["facid_consistent"],
+            "facid_reason": facid_check["facid_reason"],
             "master_station_rows": rows,
             "association_context": {
                 "mode": "graph_unique_feeder_with_local_rmu_evidence",
@@ -842,6 +862,9 @@ class MasterStationModelModule(ModelModule):
                 "feeder_graph_name": graph_context.get("feeder_graph_name", ""),
                 "feeder_db_name": graph_context.get("feeder_db_name", ""),
                 "feeder_id": feeder_resolution.get("feeder_id", ""),
+                "graph_facid": facid_check["graph_facid"],
+                "facid_check": facid_check["facid_check"],
+                "facid_reason": facid_check["facid_reason"],
                 "feeder_name": graph_context.get("feeder_name", ""),
                 "bay_id": graph_context.get("bay_id", ""),
                 "bay_code": graph_context.get("bay_code", ""),

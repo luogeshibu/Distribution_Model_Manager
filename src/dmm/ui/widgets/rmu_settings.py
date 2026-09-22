@@ -100,6 +100,7 @@ class RmuSettingsWidget(QWidget):
             "CBreakerDis 使用图上名称，接地刀闸使用开关名+D，BusDis 固定使用 BUS。"
             "RMU 内 NariPd_Normal.pwbh.icn.g 为固定 EFI 信号：默认按环网柜 ID 查询 13533 dms_relay_sig，"
             "仅 CODE=EFI INDICATOR 才参与关联，默认回写 value 域 keyid1（域号 40）；表号和域号可在右侧调整。"
+            "环网柜模块不判断馈线或 facID，支持单线图、合成图和环网图；同一 G 图内环网柜名称重复时全部阻断关联。"
         )
         info.setWordWrap(True)
         info.setObjectName("moduleDescription")
@@ -172,6 +173,7 @@ class RmuSettingsWidget(QWidget):
             "图上文字；接地刀闸逻辑名称=配对开关名+D；BusDis 固定为 BUS。"
             "NariPd_Normal.pwbh.icn.g 仍按固定 CODE=EFI INDICATOR 关联，但其表号和域号也可在右侧直接调整。"
             "图上名称无法唯一识别，或与数据库 CODE 校验失败时，会明确告警对应环网柜。"
+            "本模块不判断馈线或 facID；同一 G 图内环网柜名称重复时，重复名称对应的环网柜全部禁止关联。"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#60756d;")

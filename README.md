@@ -1,4 +1,4 @@
-# 配网模型管理工具 / Distribution Model Manager v4.1.39
+# 配网模型管理工具 / Distribution Model Manager v4.1.40
 
 
 ## v4.1.39：馈线来源按模式显示 / Mode-specific Feeder Source UI

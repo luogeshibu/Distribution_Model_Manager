@@ -16,19 +16,11 @@ from dmm.application.modules.pole_switch import (
     POLE_SWITCH_NAME_RE,
     PoleSwitchParser,
 )
-from dmm.application.modules.feeder_context import (
-    add_feeder_fields,
-    candidate_from_record,
-    resolve_graph_feeder,
-    rmu_keyid_candidates,
-    rmu_positions_from_settings,
-)
 
 
 TRANSFORMER_TABLE_ID = 13505
 TRANSFORMER_DOMAIN = 1
 TRANSFORMER_TAG = "TransformerDis"
-TRANSFORMER_SOURCE_TAG = "CBreaker"
 
 
 class TransformerParser(PoleSwitchParser):
@@ -59,10 +51,6 @@ class TransformerParser(PoleSwitchParser):
     def _text_value(obj: GObject) -> str:
         return re.sub(r"\s+", " ", str(obj.attrs.get("ts") or "")).strip()
 
-    @staticmethod
-    def _root_int(parsed: ParsedG, attribute: str):
-        return int_or_none(parsed.root.attrib.get(attribute))
-
     @classmethod
     def _is_transformer_object(cls, obj: GObject, element_catalog=None) -> bool:
         record = resolve_element_record(
@@ -71,72 +59,11 @@ class TransformerParser(PoleSwitchParser):
         )
         return classification_is(record, "TRANSFORMER_OH")
 
-    @classmethod
-    def _topology_source_keyids(cls, parsed: ParsedG, element_catalog=None):
-        """Find source CBreaker keyids per TransformerDis topology branch."""
-        by_id = {
-            str(obj.xml_id): obj
-            for obj in parsed.objects
-            if str(obj.xml_id or "").strip()
-        }
-        graph = defaultdict(set)
-        for obj in parsed.objects:
-            xml_id = str(obj.xml_id or "").strip()
-            if not xml_id:
-                continue
-            for ref in cls._refs(obj):
-                ref = str(ref).strip()
-                if not ref or ref not in by_id:
-                    continue
-                graph[xml_id].add(ref)
-                graph[ref].add(xml_id)
-
-        breakers_by_id = {
-            xml_id: obj
-            for xml_id, obj in by_id.items()
-            if obj.tag == TRANSFORMER_SOURCE_TAG
-            and str(obj.attrs.get("keyid") or "").strip()
-        }
-        result = {}
-        for transformer in parsed.objects:
-            if not cls._is_transformer_object(transformer, element_catalog):
-                continue
-            transformer_id = str(transformer.xml_id or "").strip()
-            if not transformer_id:
-                continue
-            queue = [transformer_id]
-            visited = {transformer_id}
-            source_ids = []
-            while queue:
-                current = queue.pop(0)
-                if current in breakers_by_id:
-                    source_ids.append(
-                        str(breakers_by_id[current].attrs.get("keyid") or "").strip()
-                    )
-                    # A source CBreaker is an anchor. Do not walk through it
-                    # into another source branch.
-                    continue
-                for neighbor in graph.get(current, set()):
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        queue.append(neighbor)
-            result[transformer_id] = list(dict.fromkeys(source_ids))
-
-        all_source_keyids = [
-            str(obj.attrs.get("keyid") or "").strip()
-            for obj in breakers_by_id.values()
-            if str(obj.attrs.get("keyid") or "").strip()
-        ]
-        # Sparse/legacy drawings may not expose explicit refs.  A single main
-        # CBreaker remains a safe fallback; multiple unconnected breakers are
-        # intentionally left unresolved instead of guessing.
-        if len(all_source_keyids) == 1:
-            for transformer_id, source_ids in result.items():
-                if not source_ids:
-                    result[transformer_id] = list(all_source_keyids)
-        return result, all_source_keyids
-
     def discover(self, parsed: ParsedG, element_catalog=None, name_settings=None):
+        # Allocate names once for the complete set of Transformer_OH devices
+        # in this G file.  The pool is intentionally limited to the requested
+        # transformer devices: other modules must not reserve or consume a
+        # transformer name, but two transformers must never share one Text.
         global_name_owners = self.build_global_name_owners(
             parsed,
             element_catalog,
@@ -146,11 +73,11 @@ class TransformerParser(PoleSwitchParser):
                 obj,
                 element_catalog,
             ),
+            # Transformer recognition is independent from other modules, but
+            # ownership is exclusive inside this target-device family.
+            include_shared_devices=False,
+            lock_text_ownership=True,
         )
-        # Feeder resolution is performed after name discovery at drawing
-        # scope.  This method only discovers Transformer_OH objects/text.
-        source_keyids_by_transformer = {}
-        all_source_keyids = []
         rows = []
         for obj in parsed.objects:
             if not self._is_transformer_object(obj, element_catalog):
@@ -177,36 +104,14 @@ class TransformerParser(PoleSwitchParser):
                 "name_distance": label.get("distance", "") if label else "",
                 "name_direction": label.get("direction", "") if label else "",
                 "name_xml_id": label.get("xml_id", "") if label else "",
-                "source_cbreaker_keyids": source_keyids_by_transformer.get(
-                    str(obj.xml_id), []
-                ),
                 "current_keyid1": str(attrs.get("keyid1") or "").strip(),
                 "current_keyid2": str(attrs.get("keyid2") or "").strip(),
-                "source_cbreaker_count": 0,
-                "source_cbreaker_keyid": "",
                 "status": "",
                 "severity": "",
                 "reason": "",
             })
 
-        source_keyids = all_source_keyids
-        source_keyid = ""
-        if source_keyids:
-            source_keyid = source_keyids[0]
-        root_fac_id = self._root_int(parsed, "facID")
-        root_fac_name = str(parsed.root.attrib.get("facName") or "").strip()
-        context = {
-            "root_fac_id": root_fac_id,
-            "root_fac_name": root_fac_name,
-            "source_cbreaker_count": 0,
-            "source_cbreaker_keyid": source_keyid,
-            "source_cbreaker_keyids": source_keyids,
-            "source_cbreaker_keyids_by_transformer": source_keyids_by_transformer,
-        }
-        for row in rows:
-            row["source_cbreaker_count"] = 0
-            row["source_cbreaker_keyid"] = source_keyid
-        return rows, context
+        return rows, {}
 
 
 class TransformerModelModule(ModelModule):
@@ -214,7 +119,7 @@ class TransformerModelModule(ModelModule):
     display_name = "柱上变压器模型"
     description = (
         "只识别图元管理中标记为 Transformer_OH 的图元；被标记图元直接视为柱上变压器，"
-        "每个设备独立取最近合规 Text，先按图内唯一设备证据确定 FEEDER_ID，"
+        "先在本图全部目标变压器之间全局分配距离不超过 200 且互不重复的最近合规 Text 图元，不参与其他设备的名称锁定，"
         "按 13505 / dms_tr_device 计算双 KeyID 并安全回写。"
     )
     SUPPORTED_OPERATIONS = (
@@ -229,11 +134,11 @@ class TransformerModelModule(ModelModule):
             TRANSFORMER_TAG: {
                 "table_id": TRANSFORMER_TABLE_ID,
                 "domain": TRANSFORMER_DOMAIN,
-                "match_mode": "TRANSFORMERDIS_NEAREST_TEXT_AND_GRAPH_FEEDER",
+                "match_mode": "TRANSFORMERDIS_NEAREST_TEXT_AND_DEVICE_NAME",
                 "description": (
                     "仅使用图元管理标记 Transformer_OH 的图元，直接视为柱上变压器；"
-                    "每个变压器直接解析整张 G 图中最近的 Text，不依赖现场图元文件名；"
-                    "优先使用图内唯一环网柜馈线，其次使用唯一变压器数据库馈线；"
+                    "先对整张 G 图中的目标变压器全局分配距离不超过 200 且互不重复的 Text 图元，不依赖现场图元文件名；"
+                    "名称匹配只查询 13505 柱上变压器自身，不查找或锁定其他设备；"
                     "目标表为 13505，Domain=1"
                 ),
             }
@@ -264,28 +169,6 @@ class TransformerModelModule(ModelModule):
             "keyid1": expected,
             "keyid2": expected,
         }
-
-    @staticmethod
-    def _resolve_feeder(db, context):
-        root_fac_id = int_or_none(context.get("root_fac_id"))
-        if root_fac_id is not None:
-            feeder = db.get_feeder_info(root_fac_id)
-            if feeder:
-                return feeder, "G_ROOT_FACID"
-
-        # Retained for compatibility with older callers; the active analysis
-        # path uses resolve_graph_feeder and never calls this method.
-        hint = str(context.get("root_fac_name") or "").strip()
-        if hint:
-            candidates = db.find_feeders_by_name_hint(hint)
-            unique = {}
-            for candidate in candidates:
-                candidate_id = int_or_none(candidate.get("id"))
-                if candidate_id is not None:
-                    unique[candidate_id] = candidate
-            if len(unique) == 1:
-                return next(iter(unique.values())), "G_ROOT_FACNAME_UNIQUE"
-        return None, "UNRESOLVED"
 
     @staticmethod
     def _current_keyids(row):
@@ -327,16 +210,15 @@ class TransformerModelModule(ModelModule):
             return
         row["current_model_status"] = "DECODED"
 
-    def _resolve_row(self, row, db, feeder, feeder_source):
+    def _resolve_row(self, row, db):
         name = str(row.get("graphical_name") or "").strip()
-        feeder_id = int_or_none((feeder or {}).get("id"))
         row.update({
             "selected_device_name": name,
-            "feeder_resolution_source": feeder_source,
-            "source_feeder_id": feeder_id or "",
-            "source_feeder_name": str((feeder or {}).get("display_name") or "").strip(),
-            "feeder_id": feeder_id or "",
-            "feeder_name": str((feeder or {}).get("display_name") or "").strip(),
+            "feeder_resolution_source": "TRANSFORMER_DEVICE",
+            "source_feeder_id": "",
+            "source_feeder_name": "",
+            "feeder_id": "",
+            "feeder_name": "",
             "table_id": TRANSFORMER_TABLE_ID,
             "table_name": "dms_tr_device",
             "configured_domain": TRANSFORMER_DOMAIN,
@@ -355,20 +237,15 @@ class TransformerModelModule(ModelModule):
         })
         self._current_link_fields(row, db)
 
-        if feeder_id is None:
-            return self._fail(
-                row,
-                "TRANSFORMER_FEEDER_NOT_RESOLVED: 图内唯一环网柜/柱上变压器均未能解析到 13500 馈线。",
-            )
         if not name:
             return self._fail(
                 row,
-                "TRANSFORMER_NAME_NOT_FOUND: 未找到 Transformer_OH 图元对应的最近 Text。",
+                "TRANSFORMER_NAME_NOT_FOUND: 未获得 Transformer_OH 图元的可用 Text；候选 Text 可能已分配给更近的变压器，无法查询 13505 柱上变压器设备。",
             )
 
         records = db.get_transformer_devices_by_name(
             name,
-            feeder_id=feeder_id,
+            feeder_id=None,
             table_id=TRANSFORMER_TABLE_ID,
         )
         row["db_match_count"] = len(records)
@@ -376,7 +253,7 @@ class TransformerModelModule(ModelModule):
             return self._fail(
                 row,
                 "TRANSFORMER_DATABASE_NOT_UNIQUE: "
-                f"dms_tr_device NAME={name} 且 FEEDER_ID={feeder_id}；匹配数={len(records)}。",
+                f"dms_tr_device NAME={name}；匹配数={len(records)}。",
             )
 
         device = records[0]
@@ -391,6 +268,8 @@ class TransformerModelModule(ModelModule):
             "db_feeder_id": str(device.get("feeder_id") or "").strip(),
             "expected_keyid": expected,
         })
+        row["feeder_id"] = row["db_feeder_id"]
+        row["source_feeder_id"] = row["db_feeder_id"]
         try:
             decoded = db.verify_keyid(expected)
             verified = (
@@ -452,59 +331,17 @@ class TransformerModelModule(ModelModule):
 
     def _analyze_file(self, db, g_file, settings=None, log_callback=None, progress_callback=None):
         parsed = GParser().parse(g_file)
-        discovered, context = TransformerParser().discover(
+        discovered, _context = TransformerParser().discover(
             parsed,
             (settings or {}).get("element_catalog", {}),
             settings or {},
         )
-        # Feeder ownership is a drawing-level hard constraint.  RMU evidence
-        # has precedence; only when no usable RMU association exists do we
-        # use uniquely named Transformer_OH database records.  The old
-        # root-facID/topology fallback is intentionally not used here.
-        feeder_candidates = rmu_keyid_candidates(
-            db,
-            parsed,
-            positions=rmu_positions_from_settings(settings),
-        )
-        for item in discovered:
-            name = str(item.get("graphical_name") or "").strip()
-            if not name:
-                continue
-            try:
-                records = db.get_transformer_devices_by_name(
-                    name,
-                    feeder_id=None,
-                    table_id=TRANSFORMER_TABLE_ID,
-                )
-            except Exception:
-                records = []
-            feeder_candidates.extend(
-                candidate_from_record(
-                    db,
-                    record,
-                    kind="TRANSFORMER",
-                    identity=record.get("id"),
-                    name=name,
-                    source=f"TRANSFORMER_NAME:{name}",
-                )
-                for record in records
-            )
-        feeder_resolution = resolve_graph_feeder(db, feeder_candidates)
-        feeder = feeder_resolution.get("feeder") or None
-        feeder_source = feeder_resolution.get("feeder_source", "UNRESOLVED")
         rows = []
         total = max(len(discovered), 1)
         for index, row in enumerate(discovered, start=1):
-            resolved = self._resolve_row(dict(row), db, feeder, feeder_source)
-            add_feeder_fields(resolved, feeder_resolution)
-            if not feeder_resolution.get("ready"):
-                self._fail(resolved, feeder_resolution.get("reason") or "GRAPH_FEEDER_NOT_RESOLVED")
-            elif resolved.get("db_feeder_id") and int_or_none(resolved.get("db_feeder_id")) != int_or_none(feeder_resolution.get("feeder_id")):
-                self._fail(
-                    resolved,
-                    "TRANSFORMER_FEEDER_MISMATCH: 目标 13505 记录不属于图级 FEEDER_ID="
-                    f"{feeder_resolution.get('feeder_id')}。",
-                )
+            # Resolve only the marked TransformerDis itself.  No RMU, Bus,
+            # CBreaker, drawing-scope or cross-module feeder lock is used.
+            resolved = self._resolve_row(dict(row), db)
             resolved["file_name"] = Path(g_file).name
             rows.append(resolved)
             if progress_callback:
@@ -517,30 +354,54 @@ class TransformerModelModule(ModelModule):
             log_callback(
                 f"[{Path(g_file).name}] 柱上变压器识别完成："
                 f"TransformerDis={len(discovered)}；"
-                f"主网CBreaker={context.get('source_cbreaker_count', 0)}；"
                 f"数据库可关联={sum(1 for row in rows if row.get('association_ready') == 'YES')}"
             )
-        return {
+        feeder_ids = sorted({
+            int_or_none(row.get("db_feeder_id"))
+            for row in rows
+            if int_or_none(row.get("db_feeder_id")) is not None
+        })
+        feeder = {}
+        if len(feeder_ids) == 1 and hasattr(db, "get_feeder_info"):
+            try:
+                feeder = db.get_feeder_info(feeder_ids[0]) or {}
+            except Exception:
+                feeder = {}
+        feeder_id = feeder_ids[0] if len(feeder_ids) == 1 else ""
+        feeder_name = str(
+            feeder.get("display_name")
+            or feeder.get("name")
+            or ""
+        ).strip()
+        report = {
             "g_file": str(Path(g_file)),
             "file_name": Path(g_file).name,
             "report_type": "TRANSFORMER",
             "transformer_rows": rows,
-            "feeder_resolution_source": feeder_resolution.get("feeder_source", "UNRESOLVED"),
-            "feeder_resolution_evidence": feeder_resolution.get("feeder_evidence", ""),
-            "feeder_id": feeder_resolution.get("feeder_id", ""),
-            "station_id": (feeder_resolution.get("feeder") or {}).get("st_id", ""),
-            "station_name": str((feeder_resolution.get("feeder") or {}).get("station_name") or "").strip(),
-            "feeder_code": str((feeder_resolution.get("feeder") or {}).get("code") or "").strip(),
-            "feeder_graph_name": str((feeder_resolution.get("feeder") or {}).get("graph_name") or "").strip(),
-            "feeder_name": str((feeder or {}).get("display_name") or (feeder or {}).get("name") or "").strip(),
+            "feeder_resolution_source": "TRANSFORMER_DEVICE",
+            "feeder_resolution_evidence": "仅依据唯一匹配的 13505 柱上变压器记录。",
+            "feeder_id": feeder_id,
+            "station_id": feeder.get("st_id", ""),
+            "station_name": str(feeder.get("station_name") or "").strip(),
+            "subcontrolarea_path": str(feeder.get("subcontrolarea_path") or "").strip(),
+            "feeder_code": str(feeder.get("code") or "").strip(),
+            "feeder_graph_name": str(feeder.get("graph_name") or "").strip(),
+            "feeder_name": feeder_name,
             "feeder_path": " / ".join(
                 value for value in (
-                    str((feeder_resolution.get("feeder") or {}).get("station_name") or "").strip(),
-                    str((feeder_resolution.get("feeder") or {}).get("code") or "").strip(),
+                    str(feeder.get("subcontrolarea_path") or "").strip(),
+                    str(feeder.get("station_name") or "").strip(),
+                    str(feeder.get("name") or "").strip(),
                 ) if value
             ),
-            "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
-            "feeder_context_message": feeder_resolution.get("reason", "") or "图级 FEEDER_ID 已唯一确认。",
+            "feeder_context_ready": "YES" if len(feeder_ids) == 1 else "NO",
+            "feeder_context_message": (
+                "馈线取自唯一匹配的 13505 柱上变压器记录。"
+                if len(feeder_ids) == 1
+                else "未对其他设备或图级对象做馈线锁定。"
+            ),
+            "graph_feeder_ids": feeder_ids,
+            "graph_feeder_count": len(feeder_ids),
             "summary": {
                 "transformer_count": len(rows),
                 "transformer_pass": sum(1 for row in rows if row.get("status") == "PASS"),
@@ -548,9 +409,10 @@ class TransformerModelModule(ModelModule):
                 "transformer_unlinked": sum(1 for row in rows if row.get("status") == "UNLINKED"),
                 "transformer_relink": sum(1 for row in rows if row.get("status") == "RELINK"),
                 "association_ready_count": sum(1 for row in rows if row.get("association_ready") == "YES"),
-                "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
+                "feeder_context_ready": "YES" if len(feeder_ids) == 1 else "NO",
             },
         }
+        return report
 
     def validate(self, db, files, settings, log_callback, progress_callback=None):
         reports = []
@@ -569,7 +431,8 @@ class TransformerModelModule(ModelModule):
             )
             reports.append(report)
             for key, value in report["summary"].items():
-                aggregate[key] += value
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    aggregate[key] += value
         return reports, dict(aggregate), self._rules()
 
     def preview_association(self, db, files, settings, log_callback, progress_callback=None):
@@ -642,15 +505,7 @@ class TransformerModelModule(ModelModule):
         for source_file, changes in changes_by_file.items():
             for change in changes:
                 base = dict(change.get("validated_row", {}) or {})
-                current = self._resolve_row(
-                    dict(base),
-                    db,
-                    {
-                        "id": base.get("feeder_id"),
-                        "display_name": base.get("feeder_name"),
-                    },
-                    base.get("feeder_resolution_source", "G_ROOT_FACID"),
-                )
+                current = self._resolve_row(dict(base), db)
                 if current.get("association_ready") != "YES" or current.get("writeback_needed") != "YES":
                     current["_execution_result"] = "SKIPPED"
                     execution_rows.append((change, current))

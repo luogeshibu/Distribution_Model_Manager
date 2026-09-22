@@ -35,7 +35,14 @@ from dmm.config.constants import (
     APP_SITE_LABEL, APP_SITE_LABEL_EN, APP_BUILD_DATE,
     WORKSPACE_RETENTION_DAYS,
 )
-from dmm.config.settings import load_settings, save_settings
+from dmm.config.settings import (
+    initialize_central_settings,
+    load_settings,
+    publish_central_settings,
+    release_central_admin,
+    save_settings,
+    sync_central_settings,
+)
 from dmm.i18n import normalize_language, tr, translate_runtime_text, retranslate_qt_tree
 from dmm.infrastructure.database.oracle import OracleClient
 from dmm.infrastructure.reporting.writer import (
@@ -224,7 +231,10 @@ class MainWindow(QMainWindow):
         ensure_workspace()
         cleanup_workspace(WORKSPACE_RETENTION_DAYS)
 
-        self.cfg = load_settings()
+        # Load local cache first, then replace shared values with the latest
+        # central bundle when it is available.  The central server is the
+        # source of truth for element marks, database and file-server config.
+        self.cfg = load_settings(sync_central=True)
         self.language = normalize_language(self.cfg.get("language", "zh_CN"))
         self.cfg["language"] = self.language
         self.modules = get_model_modules()
@@ -274,6 +284,19 @@ class MainWindow(QMainWindow):
         self.log(f"{APP_NAME} v{APP_VERSION} 已启动。")
         self.log("工作流：模型校验 → 勾选可关联对象 → 执行模型关联。")
         self.log("安全模式：原始 G 文件永不修改；执行关联时只处理 Workspace 中的安全副本。")
+        if (self.cfg.get("_central_sync", {}) or {}).get("status") == "UNINITIALIZED":
+            QTimer.singleShot(450, self._offer_central_initialization)
+
+    def _offer_central_initialization(self):
+        answer = QMessageBox.question(
+            self,
+            "初始化公共配置",
+            "检测到中央配置尚未初始化。是否打开设置页面，由本机完成首次 Admin 初始化？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Yes:
+            self.nav.setCurrentRow(5)
 
     # ------------------------------------------------------------
     # Theme
@@ -303,6 +326,24 @@ class MainWindow(QMainWindow):
 
         #headerSub {
             color: #D8EEE6;
+        }
+
+        #globalAssociationNotice {
+            color: #FFF4D6;
+            background: #8A4B00;
+            border: 1px solid #FFD58A;
+            border-radius: 5px;
+            padding: 3px 8px;
+            font-weight: 700;
+        }
+
+        #workspaceScopeNotice {
+            color: #7A3E00;
+            background: #FFF4D6;
+            border: 1px solid #E7B85C;
+            border-radius: 7px;
+            padding: 10px 12px;
+            font-weight: 700;
         }
 
         #brandTag {
@@ -629,7 +670,7 @@ class MainWindow(QMainWindow):
         # Header
         header = QFrame()
         header.setObjectName("header")
-        header.setFixedHeight(112)
+        header.setFixedHeight(136)
 
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(24, 15, 28, 15)
@@ -864,6 +905,13 @@ class MainWindow(QMainWindow):
                 "模型配置、处理进度和 Console 运行日志集中在当前工作区；任务完成后自动生成 HTML / CSV 报告。",
             )
         )
+
+        self.workspace_scope_notice = QLabel(
+            "请选择模型类型。"
+        )
+        self.workspace_scope_notice.setObjectName("workspaceScopeNotice")
+        self.workspace_scope_notice.setWordWrap(True)
+        layout.addWidget(self.workspace_scope_notice)
 
         # --------------------------------------------------------
         # 模型任务
@@ -1498,7 +1546,7 @@ class MainWindow(QMainWindow):
                 <h2>Pole Transformer Model Help</h2>
                 <h3>1. Recognition and Feeder</h3>
                 <ul>
-                  <li>Only elements marked <b>Transformer_OH</b> in Element Management are recognized as pole transformers. Each transformer directly takes the nearest <b>Text</b> from the G file; numeric names such as 97803 are supported.</li>
+                  <li>Only elements marked <b>Transformer_OH</b> in Element Management are recognized as pole transformers. Only <b>Text</b> within distance 200 is eligible; all target transformers compete globally, the nearest transformer owns each Text, and separate Text objects may contain the same name. Numeric names such as 97803 are supported.</li>
                   <li>G-root <b>facID</b> is queried exactly in 13500 / dms_feeder_device. RMU, ConnectLine, node_area, and CBreaker topology are not analyzed by this module.</li>
                   <li>Only a unique facName is used as the fallback when the root facID is unavailable; otherwise the row remains unresolved.</li>
                 </ul>
@@ -1521,7 +1569,7 @@ class MainWindow(QMainWindow):
                 <ul>
                   <li>Only <b>CBreakerDis</b> objects whose element file is marked <b>LBS</b>, <b>SEC</b>, or <b>AR</b> in Element Management are included.</li>
                   <li>The element mark is mandatory; devref text, key_name, and p_NameString are not type-recognition sources.</li>
-                  <li>Each eligible CBreakerDis independently takes its nearest valid Text. RMU, ConnectLine, node_area, and other topology are not analyzed by this module.</li>
+                  <li>Only valid Text within distance 300 is eligible; all CBreakerDis targets compete globally, the nearest device wins, and separate Text objects may contain the same name. RMU, ConnectLine, node_area, and other topology are not analyzed by this module.</li>
                 </ul>
                 <h3>2. Database Chain</h3>
                 <p>Graphical name → 13501 / dms_combined_device.NAME (if not found, CODE) → 13501.ID → 13502 / dms_cb_device.combined_id. The target device is 13502.ID and Domain is fixed at 40 for KeyID calculation.</p>
@@ -1545,7 +1593,7 @@ class MainWindow(QMainWindow):
               <li><b>devref names are not interpreted:</b> only CBreakerDis participates. Y devices must share one template, Q devices must share one template, and the Y/Q templates must differ. ZhaiWaiJieDiDaoZha (for example RMU_ES), BusDis, and all other objects are excluded.</li>
               <li>If text type and valid devref type disagree, the final RMU type uses the devref result and the report raises WARN.</li>
               <li><b>SMART/NORMAL:</b> SMART and SMR graphical markers are globally assigned to the nearest RMU. Any SMART/SMR marker makes the cabinet SMART; otherwise it is NORMAL.</li>
-               <li>RMU names are searched only above the rectangle, and each RMU keeps exactly one nearest Text.</li>
+               <li>RMU names are searched only above the rectangle, and only Text within distance 200 is eligible; each RMU keeps exactly one nearest Text.</li>
                <li>Each Text belongs to only one nearest RMU, preventing the same name from being reused by adjacent cabinets.</li>
               <li>Names are strings. Standard compact names are supported, plus the field form <b>number + space + suffix</b> such as <b>66 B</b>. Arbitrary descriptive text containing spaces is still rejected.</li>
             </ul>
@@ -1591,7 +1639,7 @@ class MainWindow(QMainWindow):
             <h2>柱上变压器模型帮助</h2>
             <h3>1. 识别与馈线</h3>
             <ul>
-              <li>只识别图元管理中标记为 <b>Transformer_OH</b> 的图元，被标记图元直接视为柱上变压器；每个变压器直接取整张 G 图中距离最近的 <b>Text</b>，支持 97803 这类纯数字名称。</li>
+              <li>只识别图元管理中标记为 <b>Transformer_OH</b> 的图元，被标记图元直接视为柱上变压器；先对本图全部目标变压器全局分配 <b>Text</b>/名称，距离更近的设备优先，同一名称不重复使用，支持 97803 这类纯数字名称。</li>
               <li>优先按 G 根节点 <b>facID</b> 精确查询 13500 / dms_feeder_device；不分析 RMU、ConnectLine、node_area 或 CBreaker 拓扑链路。</li>
               <li>根 facID 查不到时，仅使用唯一 facName 兜底；仍无法唯一确定时阻断。</li>
             </ul>
@@ -1614,7 +1662,7 @@ class MainWindow(QMainWindow):
             <ul>
               <li>只识别对应图元文件在图元管理中标记为 <b>LBS</b>、<b>SEC</b> 或 <b>AR</b> 的 <b>CBreakerDis</b> 图元。</li>
               <li>图元标记是强制条件，不从 devref、key_name 或 p_NameString 猜测设备类型。</li>
-              <li>扫描整张 G 图的有效 Text，每个柱上开关独立取最近的合规 Text；不分析 RMU、ConnectLine、node_area 或其他拓扑关系。</li>
+              <li>扫描整张 G 图的有效 Text，在所有目标柱上开关之间全局分配名称，距离更近者优先且名称不重复；不分析 RMU、ConnectLine、node_area 或其他拓扑关系。</li>
               <li>Text.ts 中的换行名称（例如 <b>AUTO RECLOSER 101601</b>）会规范空白后作为一个完整名称保留；只有 <b>kV</b>、<b>A</b>、<b>V</b> 等单位 Text 不参与设备名称分配，名称不读取 DText。</li>
             </ul>
             <h3>2. 数据库链路</h3>
@@ -1696,7 +1744,7 @@ class MainWindow(QMainWindow):
           <li>如果文字类型与 devref 类型不一致，报告中显示“类型交叉校验=NO”，最终“环网柜类型”采用 devref 类型；该差异本身不改变 RMU 数据库关联资格。</li>
           <li><b>智能环网柜识别：</b>在整张 G 图全局寻找 Text 中精确的 SMART 和 SMR，并把每个标识唯一归属给距离最近的 RMU。SMART 通常在柜内、SMR 可以在柜外，因此不设置最大距离限制。</li>
           <li>一个 RMU 只要命中 SMART 或 SMR 任意一种，报告“是否智能”列显示 <b>SMART</b>；未命中则显示 <b>NORMAL</b>。若两种标识都归属于同一个柜，“智能标识”仍记录 <b>SMART, SMR</b>。</li>
-           <li>环网柜名称默认搜索矩形框上方，也可以多选右侧、左侧或下方；多选时按距离只保留最近的一个 Text。</li>
+           <li>环网柜名称默认搜索矩形框上方，也可以多选右侧、左侧或下方；只使用距离不超过 200 的 Text，多选时按距离只保留最近的一个 Text。</li>
            <li>每个 RMU 只保留一个名称；同一 Text 全局只归属距离最近的一个环网柜，避免名称重复使用。</li>
           <li>名称始终按照字符串处理，支持数字、字母、横线、下划线等常见工程名称。</li>
         </ul>
@@ -1731,7 +1779,7 @@ class MainWindow(QMainWindow):
           <li>同一 RMU 内某些设备不符合条件时，只阻断这些设备；其它符合条件的设备仍可以正常关联。</li>
           <li>模型校验完成后，工作区会展示设备明细选择表，并可按环网柜名称快速筛选；只有数据库事实已唯一确定且需要写回的设备可勾选。</li>
           <li>执行模型关联时直接使用校验阶段已确定并由用户勾选的设备，只处理本次勾选记录，不再重新全量循环所有环网柜；本次关联报告也只记录本次实际选择和写回结果。</li>
-          <li>RMU 模块不进行任何馈线判断。</li>
+          <li>RMU 模块不进行任何馈线或 facID 判断，支持单线图、合成图和环网图；同一 G 图内环网柜名称重复时，重复名称对应的环网柜全部禁止关联。</li>
         </ul>
 
         <h3>4. RMU 安全回写</h3>
@@ -2091,6 +2139,62 @@ class MainWindow(QMainWindow):
             )
         )
 
+        central_box = QGroupBox("公共配置同步")
+        central_layout = QVBoxLayout(central_box)
+        central_layout.setContentsMargins(14, 18, 14, 14)
+        central_cfg = dict(self.cfg.get("central_config", {}) or {})
+        central_layout.addWidget(
+            QLabel(
+                "首次部署由 Admin 输入并初始化图元标记、数据库和文件服务器配置；"
+                "普通客户端只读取中央配置。客户端可以修改本机设置，但不会发布到中央配置，"
+                "需要时点击【连接并同步中央配置】即可重新读取。"
+            )
+        )
+        central_grid = QGridLayout()
+        self.central_edits = {}
+        central_fields = [
+            ("host", "中央服务器", central_cfg.get("host", "172.16.21.27")),
+            ("port", "端口", central_cfg.get("port", 22)),
+            ("username", "中央服务器用户名", central_cfg.get("username", "")),
+            ("password", "中央服务器密码", central_cfg.get("password", "")),
+            (
+                "remote_directory",
+                "中央配置目录",
+                central_cfg.get(
+                    "remote_directory",
+                    "/home/up8000/nari-international/distribution-model-manager/config",
+                ),
+            ),
+        ]
+        for row, (key, label, value) in enumerate(central_fields):
+            central_grid.addWidget(QLabel(label), row, 0)
+            edit = QLineEdit(str(value))
+            if key == "password":
+                edit.setEchoMode(QLineEdit.Password)
+            central_grid.addWidget(edit, row, 1)
+            self.central_edits[key] = edit
+        central_layout.addLayout(central_grid)
+        central_actions = QHBoxLayout()
+        self.central_sync_button = QPushButton("连接并同步中央配置")
+        self.central_sync_button.clicked.connect(self.sync_central_configuration)
+        self.central_publish_button = QPushButton("保存并发布全部配置")
+        self.central_publish_button.clicked.connect(self.publish_current_configuration)
+        self.central_init_button = QPushButton("初始化并设为 Admin")
+        self.central_init_button.clicked.connect(self.initialize_central_configuration)
+        self.central_release_button = QPushButton("释放 Admin 权限")
+        self.central_release_button.clicked.connect(self.release_central_configuration)
+        central_actions.addWidget(self.central_sync_button)
+        central_actions.addWidget(self.central_publish_button)
+        central_actions.addWidget(self.central_init_button)
+        central_actions.addWidget(self.central_release_button)
+        central_actions.addStretch()
+        central_layout.addLayout(central_actions)
+        self.central_status = QLabel()
+        self.central_status.setWordWrap(True)
+        central_layout.addWidget(self.central_status)
+        self._refresh_central_status()
+        layout.addWidget(central_box)
+
         language_box = QGroupBox("语言设置")
         language_layout = QGridLayout(language_box)
         language_layout.setContentsMargins(14, 18, 14, 14)
@@ -2128,6 +2232,180 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         return page
+
+    def _refresh_central_status(self):
+        if not hasattr(self, "central_status"):
+            return
+        state = dict(self.cfg.get("_central_sync", {}) or {})
+        status = str(state.get("status") or "UNKNOWN").upper()
+        message = str(state.get("message") or "")
+        is_current_admin = (
+            status == "ACTIVE"
+            and str(state.get("admin_machine_id") or "")
+            == str(self.cfg.get("machine_id") or "")
+        )
+        can_initialize = status in {"UNINITIALIZED", "UNASSIGNED"}
+        recorded_admin_id = str(state.get("admin_machine_id") or "")
+        if status == "UNINITIALIZED" and recorded_admin_id:
+            can_initialize = recorded_admin_id == str(self.cfg.get("machine_id") or "")
+        if hasattr(self, "central_init_button"):
+            self.central_init_button.setEnabled(can_initialize)
+        if hasattr(self, "central_publish_button"):
+            self.central_publish_button.setEnabled(is_current_admin)
+        if hasattr(self, "central_release_button"):
+            self.central_release_button.setEnabled(is_current_admin)
+        admin_name = str(state.get("admin_machine_name") or "").strip()
+        admin_ip = str(state.get("admin_ip") or "").strip()
+        admin_desc = " / ".join(value for value in (admin_name, admin_ip) if value)
+        if not admin_desc:
+            admin_desc = "未记录机器信息"
+        labels = {
+            "ACTIVE": (
+                f"已连接中央配置；当前机器为 Admin（{admin_desc}）。"
+                if is_current_admin
+                else f"已连接中央配置；当前 Admin：{admin_desc}；当前机器为普通客户端。"
+            ),
+            "UNASSIGNED": "中央配置已存在，但当前没有 Admin；只有完成 Admin 初始化的机器才能发布配置。",
+            "UNINITIALIZED": "中央配置尚未初始化；请由 Admin 机器首次初始化，其他机器只能读取配置。",
+            "OFFLINE": "中央配置暂时不可用，将继续使用本机缓存。",
+            "DISABLED": "中央配置同步已关闭。",
+            "UNKNOWN": "尚未读取中央配置。",
+        }
+        self.central_status.setText(
+            f"状态：{labels.get(status, status)}"
+            + (f"\n{message}" if message else "")
+        )
+        self.central_status.setStyleSheet(
+            "color:#006B52;background:#EAF8F2;"
+            "border:1px solid #B9DACD;border-radius:6px;padding:8px;"
+            if status in {"ACTIVE", "UNASSIGNED"}
+            else "color:#7A4B00;background:#FFF6DF;"
+            "border:1px solid #E7C66A;border-radius:6px;padding:8px;"
+        )
+
+    def _current_central_config(self) -> dict:
+        cfg = {
+            key: edit.text().strip()
+            for key, edit in self.central_edits.items()
+        }
+        try:
+            cfg["port"] = int(cfg.get("port") or 22)
+        except Exception as exc:
+            raise ValueError("中央服务器端口必须是整数。") from exc
+        if not cfg.get("host"):
+            raise ValueError("中央服务器地址不能为空。")
+        if not cfg.get("username"):
+            raise ValueError("中央服务器用户名不能为空。")
+        if not cfg.get("remote_directory"):
+            raise ValueError("中央配置目录不能为空。")
+        cfg["enabled"] = True
+        return cfg
+
+    def _save_central_connection(self):
+        self.cfg["central_config"] = self._current_central_config()
+
+    def sync_central_configuration(self):
+        try:
+            self._save_central_connection()
+            sync_central_settings(self.cfg, raise_on_error=True)
+            save_settings(self.cfg)
+            self._refresh_central_status()
+            QMessageBox.information(
+                self,
+                "读取中央配置",
+                "中央配置读取完成。请重新打开软件，使数据库、文件服务器和图元标记全部重新载入。",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "读取中央配置失败", str(exc))
+
+    def _collect_shared_configuration(self):
+        """Collect the currently visible values before central publish/init."""
+        if hasattr(self, "central_edits"):
+            self._save_central_connection()
+        if hasattr(self, "db_edits"):
+            self.cfg["db"] = self.current_db_config()
+        if hasattr(self, "ssh_edits"):
+            self.cfg["ssh"] = self._current_ssh_config()
+
+        element_page = getattr(self, "element_management_page", None)
+        if element_page is not None:
+            element_page._sync_rows_from_table()
+            self.cfg["element_catalog"] = {
+                "remote_directory": element_page.directory_edit.text().strip(),
+                "records": [dict(row) for row in element_page.rows],
+            }
+        save_settings(self.cfg)
+
+    def publish_current_configuration(self):
+        """Publish database, file-server and element-mark settings together."""
+        try:
+            state = dict(self.cfg.get("_central_sync", {}) or {})
+            machine_id = str(self.cfg.get("machine_id") or "")
+            admin_id = str(state.get("admin_machine_id") or "")
+            if state.get("status") != "ACTIVE" or machine_id != admin_id:
+                raise ValueError(
+                    "当前机器不是 Admin，不能发布中央配置。"
+                    "请先点击【初始化并设为 Admin】或由现有 Admin 释放权限。"
+                )
+            self._collect_shared_configuration()
+            version = publish_central_settings(self.cfg)
+            save_settings(self.cfg)
+            self._refresh_central_status()
+            QMessageBox.information(
+                self,
+                "中央配置发布完成",
+                f"图元标记、数据库和文件服务器配置已全部发布。\n中央配置版本：{version}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "中央配置发布失败", str(exc))
+
+    def initialize_central_configuration(self):
+        answer = QMessageBox.question(
+            self,
+            "初始化中央配置",
+            "将使用当前机器上的图元标记、数据库配置和文件服务器配置创建中央配置，"
+            "并将当前机器设为唯一 Admin。是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self._collect_shared_configuration()
+            save_settings(self.cfg)
+            version = initialize_central_settings(self.cfg)
+            save_settings(self.cfg)
+            self._refresh_central_status()
+            QMessageBox.information(
+                self,
+                "中央配置初始化完成",
+                f"当前机器已成为 Admin，中央配置版本：{version}。\n"
+                "其他机器首次启动时会自动读取这些配置。",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "中央配置初始化失败", str(exc))
+
+    def release_central_configuration(self):
+        answer = QMessageBox.question(
+            self,
+            "释放 Admin 权限",
+            "释放后当前机器不再拥有发布权限，其他机器可以重新申请成为 Admin。是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            version = release_central_admin(self.cfg)
+            save_settings(self.cfg)
+            self._refresh_central_status()
+            QMessageBox.information(
+                self,
+                "Admin 权限已释放",
+                f"Admin 权限已释放，中央配置版本：{version}。",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "释放 Admin 失败", str(exc))
 
     def _on_language_changed(self, _index):
         if not hasattr(self, "language_combo"):
@@ -2197,6 +2475,7 @@ class MainWindow(QMainWindow):
                 if self.language == "en_US"
                 else f"{APP_EDITION} · {APP_SITE_LABEL}  |  v{APP_VERSION}"
             )
+        self._update_scope_notice()
         if hasattr(self, "about_text_label"):
             if self.language == "en_US":
                 self.about_text_label.setText(
@@ -2324,7 +2603,7 @@ class MainWindow(QMainWindow):
 "• 环网柜数据库记录为 0 条或多条时，环网柜汇总直接 FAIL。若 G 设备未关联，禁止自动关联。\n"
             "• 环网柜数据库记录为 0 条或多条，但 G 设备已经有人为 KeyID 时，不丢弃该模型：继续反解当前设备并校验 CODE/图上逻辑名称 和实际所属环网柜。\n"
             "• 唯一 RMU 下，若旧 KeyID 实际属于其它环网柜，使用紫色 RMU_RELINK 标记，可以覆盖旧模型并重新关联到当前 RMU；只有 RMU 本身不唯一时才继续作为硬阻断。\n"
-            "• RMU 模块中的馈线判断已完全关闭；馈线模型关联由独立的【馈线模型】模块处理。\n"
+            "• RMU 模块中的馈线和 facID 判断已完全关闭，支持合成图和环网图；但同一 G 图内环网柜名称重复时，重复名称对应的环网柜全部阻断。馈线模型关联由独立的【馈线模型】模块处理。\n"
             "• 唯一 RMU 下以当前数据库为准：CODE/图上逻辑名称 和目标设备 RMU 归属通过后，即使旧设备 ID、表号、域号、KeyID 已失效，也允许重新关联。"
         )
         naming_text.setWordWrap(True)
@@ -2492,6 +2771,7 @@ class MainWindow(QMainWindow):
         self.module_stack.setMaximumHeight(16777215)
 
         self.module_stack.setCurrentIndex(index)
+        self._update_scope_notice()
 
         widget = self.module_stack.currentWidget()
         if widget is not None:
@@ -2530,6 +2810,44 @@ class MainWindow(QMainWindow):
 
         # 等 Qt 完成本次 stacked page 切换后，再计算新页面高度。
         QTimer.singleShot(0, self._update_module_stack_height)
+
+    def _update_scope_notice(self):
+        """Show one short reminder for the currently selected module."""
+        if not hasattr(self, "workspace_scope_notice"):
+            return
+        module_id = str(
+            self.module_combo.currentData() if hasattr(self, "module_combo") else ""
+        ).upper()
+        notices = {
+            "RMU": (
+                "RMU: 支持单线图、合成图和环网图。"
+                if self.language != "en_US"
+                else "RMU: single-line, composite, and ring-network drawings are supported."
+            ),
+            "FEEDER": (
+                "馈线：必须使用单馈线图。"
+                if self.language != "en_US"
+                else "Feeder: a single-feeder drawing is required."
+            ),
+            "POLE_SWITCH": (
+                "柱上开关：必须使用单馈线图。"
+                if self.language != "en_US"
+                else "Pole switch: a single-feeder drawing is required."
+            ),
+            "TRANSFORMER": (
+                "柱上变压器：必须使用单馈线图。"
+                if self.language != "en_US"
+                else "Pole transformer: a single-feeder drawing is required."
+            ),
+            "MASTER_STATION": (
+                "配网主站设备：必须使用单馈线图。"
+                if self.language != "en_US"
+                else "Master-station devices: a single-feeder drawing is required."
+            ),
+        }
+        self.workspace_scope_notice.setText(
+            notices.get(module_id, "请选择模型类型。" if self.language != "en_US" else "Select a model type.")
+        )
 
     def refresh_operation_state(self):
         module_id = self.module_combo.currentData()
@@ -2745,10 +3063,22 @@ class MainWindow(QMainWindow):
         db["port"] = int(db["port"])
         return db
 
+    def _publish_central_if_admin(self):
+        state = dict(self.cfg.get("_central_sync", {}) or {})
+        machine_id = str(self.cfg.get("machine_id") or "")
+        owner = str(state.get("admin_machine_id") or "")
+        if state.get("status") != "ACTIVE" or not machine_id or owner != machine_id:
+            return None
+        version = publish_central_settings(self.cfg)
+        save_settings(self.cfg)
+        self._refresh_central_status()
+        return version
+
     def save_database_settings(self):
         try:
             self.cfg["db"] = self.current_db_config()
             save_settings(self.cfg)
+            self._publish_central_if_admin()
             self.statusBar().showMessage(self._rt("数据库配置已保存。"), 3000)
         except Exception as exc:
             QMessageBox.critical(self, "数据库配置", str(exc))
@@ -2762,6 +3092,7 @@ class MainWindow(QMainWindow):
 
             self.cfg["db"] = config
             save_settings(self.cfg)
+            self._publish_central_if_admin()
 
             self.db_status.setText(self._t("数据库连接正常"))
             self.db_status.show()
@@ -2827,6 +3158,7 @@ class MainWindow(QMainWindow):
             self.cfg["ssh"] = cfg
             self.cfg["input_source"] = "SSH"
             save_settings(self.cfg)
+            self._publish_central_if_admin()
             self._set_ssh_connection_status(
                 "SSH 配置已保存；下次启动将自动恢复最后一次保存的输入。",
                 "success",

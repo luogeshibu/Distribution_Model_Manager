@@ -15,28 +15,26 @@ from dmm.domain.gfile.element_catalog import (
 )
 from dmm.domain.gfile.parser import GParser, GObject, ParsedG
 from dmm.domain.rmu.validator import int_or_none, norm
-from dmm.application.modules.feeder_context import (
-    add_feeder_fields,
-    candidate_from_keyid,
-    resolve_graph_feeder,
-    rmu_keyid_candidates,
-    rmu_positions_from_settings,
-)
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 
 
 POLE_SWITCH_TABLE_ID = 13502
 POLE_SWITCH_DOMAIN = 40
 POLE_SWITCH_TAG = "CBreakerDis"
+# A graphical Text farther than this from a target device is not a valid
+# device name candidate for either pole switches or pole transformers.
+DEFAULT_DEVICE_TEXT_MAX_DISTANCE = 200.0
+POLE_SWITCH_TEXT_MAX_DISTANCE = 300.0
 
 # The recognition authority is the CBreakerDis tag plus a keyword contained
 # in its devref attribute. Never search these keywords in key_name, graphical
 # text, p_NameString, or any other attribute.
 POLE_SWITCH_DEVREF_KEYWORDS = ("LBS", "SEC", "AR")
 
-# The fixed-mode resolver scans the G file's Text objects for each marked
-# device. Devices do not compete for a label; the same nearest Text may be
-# returned for multiple independently parsed devices.
+# The fixed-mode resolver scans the G file's Text objects for all marked
+# target devices together. Target devices compete globally for Text ownership;
+# the nearest device wins, while separate Text objects may contain the same
+# displayed name and can be assigned to their corresponding nearby devices.
 GLOBAL_NAMEABLE_DEVICE_TAGS = frozenset({
     "CBreaker",
     "CBreakerDis",
@@ -287,6 +285,13 @@ class PoleSwitchParser:
         """
         devref = str(obj.attrs.get("devref") or "")
         if obj.tag == "CBreakerDis":
+            # RMU/LBS symbols belong to the ring-cabinet model.  They may be
+            # classified as LBS in the element catalog, but they must not
+            # consume a Text that is needed by a Transformer_OH or a genuine
+            # pole-switch device in the shared name pool.
+            devref_tail = devref.rsplit(":", 1)[-1].strip().casefold()
+            if devref_tail.startswith(("rmu_", "rmu-")):
+                return False
             return bool(_marked_pole_switch_family(devref, element_catalog))
         if obj.tag == "TransformerDis":
             record = resolve_element_record(devref, element_catalog)
@@ -399,17 +404,18 @@ class PoleSwitchParser:
         name_settings=None,
         nearest_only=False,
         device_filter=None,
+        include_shared_devices=True,
+        lock_text_ownership=True,
+        max_text_distance=DEFAULT_DEVICE_TEXT_MAX_DISTANCE,
     ):
-        """Find and one-to-one assign the nearest eligible Text per device.
+        """Find eligible Text objects for the requested device family.
 
         This is shared by pole switches and TransformerDis. The scan is
         global across the G file so a device can find a label outside its
-        local XML block. Text ownership is exclusive: one Text can belong to
-        only one device, and competing devices are resolved by physical
-        distance. The current module still returns only its own devices, while
-        marked pole switches and marked pole transformers share the ownership
-        pool. No RMU reservation or connection-topology analysis is performed
-        in this fixed-mode name lookup.
+        local XML block.  By default Text ownership is exclusive and marked
+        cross-module devices share the same pool.  A module that explicitly
+        opts out can receive only its requested device family and reuse a
+        nearest Text without creating a global name lock.
         """
 
         reserved_text_ids = set()
@@ -417,9 +423,12 @@ class PoleSwitchParser:
         devices = []
         for obj in parsed.objects:
             requested = device_filter is None or device_filter(obj)
-            shared_name_lock = self._is_cross_module_nameable_device(
-                obj,
-                element_catalog,
+            shared_name_lock = (
+                include_shared_devices
+                and self._is_cross_module_nameable_device(
+                    obj,
+                    element_catalog,
+                )
             )
             if not requested and not shared_name_lock:
                 continue
@@ -488,6 +497,8 @@ class PoleSwitchParser:
                     _point_to_box_distance(px, py, text_obj)
                     for px, py in anchors
                 )
+                if distance > float(max_text_distance):
+                    continue
                 items.append((
                     0,
                     0,
@@ -505,26 +516,35 @@ class PoleSwitchParser:
                 items.sort(key=lambda item: (item[0], item[1], item[2]))
             ranked[device.xml_index] = items
 
-        # Allocate Text objects one-to-one.  A Text that has already been
-        # assigned to one device must not be reused by another nearby device.
+        if not lock_text_ownership:
+            return defaultdict(
+                list,
+                {
+                    device_id: list(items)
+                    for device_id, items in ranked.items()
+                },
+            )
+
+        # Allocate Text objects one-to-one. A Text XML object already assigned
+        # to one device must not be reused by another nearby device. The same
+        # displayed value is allowed when it comes from different Text objects
+        # at different positions in the drawing.
         # Resolve the global competition by physical distance first, then by
         # stable XML order so the result does not depend on parser iteration
-        # details.  Each device contributes only its nearest eligible Text;
-        # if that Text is already owned by another device, this device stays
-        # unnamed instead of falling back to a farther label.
+        # details. Every device contributes all of its eligible Text
+        # candidates. If its nearest Text is already owned, the next nearest
+        # available Text is considered instead of leaving the device unnamed.
         candidate_pairs = []
         for device in devices:
             items = ranked.get(device.xml_index, [])
-            if not items:
-                continue
-            item = items[0]
-            candidate_pairs.append((
-                float(item[2]),
-                item[3],
-                device.xml_index,
-                item[-1],
-                item,
-            ))
+            for item in items:
+                candidate_pairs.append((
+                    float(item[2]),
+                    item[3],
+                    device.xml_index,
+                    item[-1],
+                    item,
+                ))
         candidate_pairs.sort(key=lambda item: (item[0], item[1], item[2]))
 
         owners = defaultdict(list)
@@ -619,6 +639,12 @@ class PoleSwitchParser:
                     )
                 )
             ),
+            # Pole-switch recognition is independent.  Only marked
+            # CBreakerDis objects participate; other modules neither reserve
+            # a Text nor compete for one.
+            include_shared_devices=False,
+            lock_text_ownership=True,
+            max_text_distance=POLE_SWITCH_TEXT_MAX_DISTANCE,
         )
         rows = []
         for obj in parsed.objects:
@@ -677,7 +703,8 @@ class PoleSwitchModelModule(ModelModule):
     display_name = "柱上开关模型"
     description = (
         "识别图元管理中标记为 LBS / AR / SEC 的柱上开关，"
-        "按整张 G 图中距离最近的 Text 直接解析名称，关联 13501 / 13502 并安全回写 KeyID。"
+        "在目标柱上开关之间全局分配 300 距离内的 Text，按距离优先且同一 Text 不重复使用，"
+        "只查询自身的 13501 / 13502 记录并安全回写 KeyID。"
     )
     SUPPORTED_OPERATIONS = (
         "VALIDATE",
@@ -692,7 +719,7 @@ class PoleSwitchModelModule(ModelModule):
                 "table_id": POLE_SWITCH_TABLE_ID,
                 "domain": POLE_SWITCH_DOMAIN,
                 "match_mode": "CBREAKERDIS_ELEMENT_MARK_NEAREST_TEXT",
-                "description": "柱上开关：CBreakerDis 且图元管理分类标记为 LBS/SEC/AR；每个设备独立取最近合规 Text；13501 ID -> 13502 combined_id",
+                "description": "柱上开关：CBreakerDis 且图元管理分类标记为 LBS/SEC/AR；仅使用距离不超过 300 的 Text，所有目标设备全局按距离优先分配不重复的 Text 图元（不同位置可有相同名称）；只查询自身 13501/13502",
             }
         }
 
@@ -847,11 +874,6 @@ class PoleSwitchModelModule(ModelModule):
         row["combined_db_code"] = str(combined.get("code") or "").strip()
         row["combined_db_name"] = str(combined.get("name") or "").strip()
         combined_feeder_id = combined.get("feeder_id")
-        if combined_feeder_id in (None, "") and hasattr(db, "get_rmu_by_id"):
-            try:
-                combined_feeder_id = (db.get_rmu_by_id(combined_id) or {}).get("feeder_id")
-            except Exception:
-                combined_feeder_id = ""
         row["combined_db_feeder_id"] = str(combined_feeder_id or "").strip()
         row["combined_match_field"] = str(
             combined.get("_matched_field") or "NAME_OR_CODE"
@@ -907,6 +929,31 @@ class PoleSwitchModelModule(ModelModule):
                 "reason": (
                     "POLE_SWITCH_CB_COMBINED_ID_MISMATCH: "
                     f"数据库={device.get('combined_id')}; 13501.ID={combined_id}。"
+                ),
+            })
+            return row
+
+        combined_feeder_id = int_or_none(row.get("combined_db_feeder_id"))
+        device_feeder_id = int_or_none(device.get("feeder_id"))
+        row["db_feeder_id"] = str(device.get("feeder_id") or "").strip()
+        if combined_feeder_id is None or device_feeder_id is None:
+            row.update({
+                "status": "FAIL",
+                "severity": "ERROR",
+                "reason": (
+                    "POLE_SWITCH_FEEDER_ID_EMPTY: 13501 和 13502 必须都有有效 feeder_id；"
+                    f"13501={row.get('combined_db_feeder_id') or '-'}；"
+                    f"13502={row.get('db_feeder_id') or '-'}。"
+                ),
+            })
+            return row
+        if combined_feeder_id != device_feeder_id:
+            row.update({
+                "status": "FAIL",
+                "severity": "ERROR",
+                "reason": (
+                    "POLE_SWITCH_13501_13502_FEEDER_MISMATCH: 13501 和 13502 feeder_id 不一致；"
+                    f"13501={combined_feeder_id}；13502={device_feeder_id}。"
                 ),
             })
             return row
@@ -991,87 +1038,62 @@ class PoleSwitchModelModule(ModelModule):
         rows = []
         total = max(len(discovered), 1)
         for index, row in enumerate(discovered, start=1):
+            # Resolve only the marked CBreakerDis itself. No RMU, Bus,
+            # main-network device, drawing-scope or cross-module feeder lock.
             resolved = self._resolve_row(dict(row), db)
             resolved["file_name"] = Path(g_file).name
             rows.append(resolved)
             if progress_callback:
                 progress_callback(index, total, f"正在处理柱上开关 {index}/{len(discovered)}")
-        # Resolve one feeder for the whole drawing.  A unique RMU association
-        # wins; otherwise use the unique 13501 parent resolved from the pole
-        # switch name.  No topology or G-root facID fallback is used.
-        feeder_candidates = rmu_keyid_candidates(
-            db,
-            parsed,
-            positions=rmu_positions_from_settings(settings),
-        )
-        for row in rows:
-            current_candidate = candidate_from_keyid(
-                db,
-                row.get("current_keyid"),
-                kind="POLE_SWITCH",
-                source=f"CURRENT_KEYID:{row.get('xml_id') or '-'}",
-            )
-            if current_candidate:
-                feeder_candidates.append(current_candidate)
-            parent_feeder = row.get("combined_db_feeder_id")
-            if parent_feeder not in (None, ""):
-                feeder_candidates.append({
-                    "kind": "POLE_SWITCH",
-                    "identity": row.get("db_combined_id", ""),
-                    "name": row.get("combined_db_name") or row.get("graphical_name", ""),
-                    "feeder_id": parent_feeder,
-                    "source": f"13501_PARENT:{row.get('xml_id') or '-'}",
-                })
-        feeder_resolution = resolve_graph_feeder(db, feeder_candidates)
-        graph_feeder_id = int_or_none(feeder_resolution.get("feeder_id"))
-        for row in rows:
-            add_feeder_fields(row, feeder_resolution)
-            if not feeder_resolution.get("ready"):
-                self._fail(
-                    row,
-                    feeder_resolution.get("reason") or "GRAPH_FEEDER_NOT_RESOLVED",
-                )
-                continue
-            row_feeder_id = int_or_none(
-                row.get("combined_db_feeder_id") or row.get("db_feeder_id")
-            )
-            if row_feeder_id is not None and row_feeder_id != graph_feeder_id:
-                self._fail(
-                    row,
-                    "POLE_SWITCH_FEEDER_MISMATCH: 13501/13502 目标不属于图级 "
-                    f"FEEDER_ID={graph_feeder_id}。",
-                )
         if log_callback:
             log_callback(
                 f"[{Path(g_file).name}] 柱上开关识别完成："
                 f"devref目标={len(discovered)}；数据库可关联="
                 f"{sum(1 for row in rows if row.get('association_ready') == 'YES')}"
             )
+
+        feeder_ids = sorted({
+            int_or_none(row.get("db_feeder_id") or row.get("combined_db_feeder_id"))
+            for row in rows
+            if int_or_none(row.get("db_feeder_id") or row.get("combined_db_feeder_id")) is not None
+        })
+        feeder = {}
+        if len(feeder_ids) == 1 and hasattr(db, "get_feeder_info"):
+            try:
+                feeder = db.get_feeder_info(feeder_ids[0]) or {}
+            except Exception:
+                feeder = {}
+        feeder_id = feeder_ids[0] if len(feeder_ids) == 1 else ""
+        feeder_name = str(feeder.get("display_name") or feeder.get("name") or "").strip()
         return {
             "g_file": str(Path(g_file)),
             "file_name": Path(g_file).name,
             "report_type": "POLE_SWITCH",
             "pole_switch_rows": rows,
-            "feeder_resolution_source": feeder_resolution.get("feeder_source", "UNRESOLVED"),
-            "feeder_resolution_evidence": feeder_resolution.get("feeder_evidence", ""),
-            "feeder_id": feeder_resolution.get("feeder_id", ""),
-            "station_id": (feeder_resolution.get("feeder") or {}).get("st_id", ""),
-            "station_name": str((feeder_resolution.get("feeder") or {}).get("station_name") or "").strip(),
-            "feeder_code": str((feeder_resolution.get("feeder") or {}).get("code") or "").strip(),
-            "feeder_graph_name": str((feeder_resolution.get("feeder") or {}).get("graph_name") or "").strip(),
-            "feeder_name": str(
-                (feeder_resolution.get("feeder") or {}).get("display_name")
-                or (feeder_resolution.get("feeder") or {}).get("name")
-                or ""
-            ).strip(),
+            "feeder_resolution_source": "POLE_SWITCH_DEVICE",
+            "feeder_resolution_evidence": "仅依据柱上开关自身的 13501/13502 记录。",
+            "feeder_id": feeder_id,
+            "station_id": feeder.get("st_id", ""),
+            "station_name": str(feeder.get("station_name") or "").strip(),
+            "subcontrolarea_path": str(feeder.get("subcontrolarea_path") or "").strip(),
+            "feeder_code": str(feeder.get("code") or "").strip(),
+            "feeder_graph_name": str(feeder.get("graph_name") or "").strip(),
+            "feeder_name": feeder_name,
             "feeder_path": " / ".join(
                 value for value in (
-                    str((feeder_resolution.get("feeder") or {}).get("station_name") or "").strip(),
-                    str((feeder_resolution.get("feeder") or {}).get("code") or "").strip(),
+                    str(feeder.get("subcontrolarea_path") or "").strip(),
+                    str(feeder.get("station_name") or "").strip(),
+                    str(feeder.get("name") or "").strip(),
                 ) if value
             ),
-            "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
-            "feeder_context_message": feeder_resolution.get("reason", "") or "图级 FEEDER_ID 已唯一确认。",
+            "feeder_context_ready": "YES" if len(feeder_ids) == 1 else "NO",
+            "feeder_context_message": (
+                "馈线取自柱上开关自身的 13501/13502 记录。"
+                if len(feeder_ids) == 1
+                else "未对其他设备或图级对象做馈线锁定。"
+            ),
+            "graph_feeder_ids": feeder_ids,
+            "graph_feeder_count": len(feeder_ids),
             "summary": {
                 "pole_switch_count": len(rows),
                 "pole_switch_pass": sum(1 for row in rows if row.get("status") == "PASS"),
@@ -1079,7 +1101,7 @@ class PoleSwitchModelModule(ModelModule):
                 "pole_switch_unlinked": sum(1 for row in rows if row.get("status") == "UNLINKED"),
                 "pole_switch_relink": sum(1 for row in rows if row.get("status") == "RELINK"),
                 "association_ready_count": sum(1 for row in rows if row.get("association_ready") == "YES"),
-                "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
+                "feeder_context_ready": "YES" if len(feeder_ids) == 1 else "NO",
             },
         }
 
@@ -1100,7 +1122,8 @@ class PoleSwitchModelModule(ModelModule):
             )
             reports.append(report)
             for key, value in report["summary"].items():
-                aggregate[key] += value
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    aggregate[key] += value
         return reports, dict(aggregate), self._rules()
 
     def preview_association(self, db, files, settings, log_callback, progress_callback=None):

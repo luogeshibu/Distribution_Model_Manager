@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import hashlib
+import unicodedata
 from pathlib import Path, PurePosixPath
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QTimer, Qt, QThread, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -24,8 +27,11 @@ from PySide6.QtWidgets import (
     QHeaderView,
 )
 
-from dmm.config.settings import save_settings
-from dmm.domain.gfile.element_catalog import resolve_element_record
+from dmm.config.settings import publish_central_settings, save_settings
+from dmm.domain.gfile.element_catalog import (
+    parse_element_definition,
+    resolve_element_record,
+)
 from dmm.infrastructure.remote import ReadOnlySshClient
 
 
@@ -60,7 +66,25 @@ def _record_with_defaults(record: dict) -> dict:
 def _record_identity(record: dict) -> str:
     """Use the relative file path as the stable maintenance identity."""
     value = str(record.get("file_key") or record.get("file_name") or "")
-    return value.replace("\\", "/").strip().casefold()
+    return _normalize_element_path(value).casefold()
+
+
+def _normalize_element_path(value: str) -> str:
+    """Normalize path spelling differences that are invisible in the table."""
+    value = unicodedata.normalize("NFKC", str(value or ""))
+    value = value.replace("\\", "/")
+    value = value.replace("\u200b", "").replace("\ufeff", "")
+    parts = []
+    for part in value.split("/"):
+        part = part.strip()
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
 
 
 def _merge_duplicate_records(records) -> list[dict]:
@@ -85,6 +109,24 @@ def _merge_duplicate_records(records) -> list[dict]:
             merged_by_identity[identity] = row
             order.append(identity)
             continue
+        existing_marked = any(
+            str(existing.get(key) or "").strip()
+            for key in ("classification", "remark", "device_alias", "device_code")
+        )
+        row_marked = any(
+            str(row.get(key) or "").strip()
+            for key in ("classification", "remark", "device_alias", "device_code")
+        )
+        existing_mtime = str(existing.get("mtime_text") or "")
+        row_mtime = str(row.get("mtime_text") or "")
+        prefer_row = (
+            (row_marked and not existing_marked)
+            or (row.get("source") == "SSH" and existing.get("source") != "SSH")
+            or (row_mtime and row_mtime > existing_mtime)
+        )
+        if prefer_row:
+            merged_by_identity[identity] = row
+            existing = row
         for key in ("classification", "remark", "device_alias", "device_code"):
             if not str(existing.get(key) or "").strip() and str(row.get(key) or "").strip():
                 existing[key] = row[key]
@@ -95,17 +137,69 @@ def _merge_duplicate_records(records) -> list[dict]:
     return [merged_by_identity[identity] for identity in order]
 
 
-def _shared_record(record: dict) -> dict:
-    """Return only portable marks; never export SSH credentials."""
+def _portable_record(record: dict) -> dict:
+    """Return a portable mark record without local/server-only metadata.
+
+    The exported file is intentionally independent of this application's
+    cache layout, SSH settings and runtime status.  Other tools can identify
+    the same element by ``path``/``file_name`` and consume the semantic mark
+    fields directly.
+    """
+    file_key = str(record.get("file_key") or record.get("file_name") or "")
     return {
-        "element_key": record.get("element_key", ""),
-        "file_key": record.get("file_key", ""),
+        "path": file_key.replace("\\", "/"),
         "file_name": record.get("file_name", ""),
+        "element_key": record.get("element_key", ""),
+        "target_xml": record.get("target_xml", ""),
         "root_id": record.get("root_id", ""),
         "classification": record.get("classification", ""),
+        "device_alias": record.get("device_alias", ""),
+        "device_code": record.get("device_code", ""),
         "remark": record.get("remark", ""),
-        "definition_hash": record.get("definition_hash", ""),
     }
+
+
+def _portable_import_records(payload) -> list[dict]:
+    """Read current and legacy mark JSON, plus simple third-party variants."""
+    if isinstance(payload, list):
+        records = payload
+    elif isinstance(payload, dict):
+        records = payload.get("records", payload.get("items", []))
+    else:
+        raise ValueError("共享配置必须是 JSON 数组或包含 records/items 的对象。")
+    if not isinstance(records, list):
+        raise ValueError("共享配置 records/items 必须是数组。")
+
+    normalized = []
+    aliases = {
+        "path": ("path", "file_key", "relative_path", "file", "file_path"),
+        "file_name": ("file_name", "filename", "name"),
+        "element_key": ("element_key", "element", "key"),
+        "target_xml": ("target_xml", "xml_tag", "tag"),
+        "root_id": ("root_id", "root", "root_element"),
+        "classification": ("classification", "category", "mark", "label"),
+        "device_alias": ("device_alias", "alias"),
+        "device_code": ("device_code", "code"),
+        "remark": ("remark", "note", "description"),
+    }
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        item = dict(record)
+        for target, candidates in aliases.items():
+            if str(item.get(target) or "").strip():
+                continue
+            for candidate in candidates:
+                value = item.get(candidate)
+                if value is not None and str(value).strip():
+                    item[target] = value
+                    break
+        if item.get("path") and not item.get("file_key"):
+            item["file_key"] = item["path"]
+        if item.get("file_name") and not item.get("file_key"):
+            item["file_key"] = item["file_name"]
+        normalized.append(item)
+    return normalized
 
 
 def _definition_changed(saved: dict, current: dict) -> bool:
@@ -170,19 +264,26 @@ class ElementDefinitionWorker(QThread):
                 content = b""
                 try:
                     content = client.read_file(remote_file.remote_path)
-                    row = _record_with_defaults(
-                        {
-                            "element_key": remote_file.name,
-                            "file_key": remote_file.name,
-                            "file_name": PurePosixPath(remote_file.name).name,
-                            "remote_path": remote_file.remote_path,
-                            "status": "已读取",
-                            "source": "SSH",
-                            "size": remote_file.size,
-                            "mtime_text": remote_file.mtime_text,
-                            "definition_hash": hashlib.sha256(content).hexdigest(),
+                    metadata = {
+                        "element_key": remote_file.name,
+                        "file_key": remote_file.name,
+                        "file_name": PurePosixPath(remote_file.name).name,
+                        "remote_path": remote_file.remote_path,
+                        "status": "已读取",
+                        "source": "SSH",
+                        "size": remote_file.size,
+                        "mtime_text": remote_file.mtime_text,
+                        "definition_hash": hashlib.sha256(content).hexdigest(),
+                    }
+                    try:
+                        definition = parse_element_definition(content, remote_file.name)
+                    except Exception as exc:
+                        # The file itself is readable even when its XML
+                        # metadata cannot be parsed. Keep it visible.
+                        definition = {
+                            "status": f"已读取（属性解析失败：{exc}）",
                         }
-                    )
+                    row = _record_with_defaults({**metadata, **definition})
                 except Exception as exc:
                     # Keep an unreadable file visible.  The page is a file
                     # mark registry and does not require XML parsing.
@@ -279,10 +380,29 @@ class ElementManagementWidget(QWidget):
 
     HEADERS = (
         "图元定义文件",
+        "w×h",
+        "AlignCenter",
+        "Pins",
+        "标准来源",
         "分类标记",
         "备注",
         "状态",
     )
+
+    # The table remains readable at normal window sizes, while long paths,
+    # notes and status text can still grow and be inspected with the
+    # horizontal scrollbar.
+    TABLE_MINIMUM_WIDTHS = {
+        0: 260,
+        1: 78,
+        2: 110,
+        3: 150,
+        4: 120,
+        5: 110,
+        6: 120,
+        7: 180,
+    }
+    TABLE_FLEX_COLUMNS = (0, 4, 5, 6, 7)
 
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
@@ -354,6 +474,8 @@ class ElementManagementWidget(QWidget):
         self.load_saved_button.clicked.connect(self._load_saved_records)
         self.save_button = QPushButton("保存标记")
         self.save_button.clicked.connect(self.save_catalog)
+        self.sync_button = QPushButton("保存并同步中央配置")
+        self.sync_button.clicked.connect(self.publish_catalog_to_central)
         self.import_button = QPushButton("导入共享配置")
         self.import_button.clicked.connect(self.import_shared_catalog)
         self.export_button = QPushButton("导出共享配置")
@@ -376,6 +498,7 @@ class ElementManagementWidget(QWidget):
         actions = QHBoxLayout()
         actions.addWidget(self.load_button)
         actions.addWidget(self.save_button)
+        actions.addWidget(self.sync_button)
         actions.addWidget(self.more_actions_button)
         actions.addStretch()
         source_grid.addLayout(actions, 5, 1, 1, 6)
@@ -401,15 +524,21 @@ class ElementManagementWidget(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setWordWrap(False)
         self.table.setEditTriggers(
             QAbstractItemView.DoubleClicked
             | QAbstractItemView.EditKeyPressed
             | QAbstractItemView.SelectedClicked
         )
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        for column in range(1, len(self.HEADERS)):
-            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        header.setStretchLastSection(False)
+        for column in range(len(self.HEADERS)):
+            # Start with content-sized sections, then switch to Interactive so
+            # the page can fill available width and the user can resize any
+            # column without losing the horizontal scrollbar.
+            header.setSectionResizeMode(column, QHeaderView.Interactive)
         self.table.setTextElideMode(Qt.ElideNone)
         self.table.setStyleSheet(
             "QTableWidget {"
@@ -428,9 +557,137 @@ class ElementManagementWidget(QWidget):
             "QTableWidget::item:selected:hover {"
             "background-color: #CFEBDD; color: #164E3F;"
             "}"
+            "QScrollBar:horizontal {"
+            "background: #E6F0EC; height: 14px; margin: 2px 2px 2px 2px;"
+            "border-radius: 7px;"
+            "}"
+            "QScrollBar::handle:horizontal {"
+            "background: #7EB5A1; min-width: 42px; border-radius: 6px;"
+            "}"
+            "QScrollBar::handle:horizontal:hover {"
+            "background: #00966E;"
+            "}"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {"
+            "width: 0px;"
+            "}"
+            "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {"
+            "background: transparent;"
+            "}"
         )
+        self._configure_table_readability()
         self.table.itemChanged.connect(self._on_table_changed)
         layout.addWidget(self.table, 1)
+        # The first layout pass happens after this method returns.  Refit
+        # once the table has its real viewport width instead of the initial
+        # zero-width value.
+        QTimer.singleShot(0, self._fit_table_columns)
+
+    def _configure_table_readability(self):
+        """Keep table content readable and responsive to app/DPI scaling."""
+        if not hasattr(self, "table"):
+            return
+        screen = self.screen()
+        dpi_scale = 1.0
+        if screen is not None:
+            try:
+                dpi_scale = float(screen.logicalDotsPerInch()) / 96.0
+            except Exception:
+                dpi_scale = 1.0
+        dpi_scale = max(1.0, min(dpi_scale, 2.0))
+
+        application_font = QApplication.font()
+        base_point_size = application_font.pointSizeF()
+        if base_point_size <= 0:
+            base_point_size = 10.0
+        point_size = max(12.0, base_point_size * 1.25, 11.0 * dpi_scale)
+
+        table_font = QFont(self.table.font())
+        table_font.setPointSizeF(point_size)
+        self.table.setFont(table_font)
+
+        header_font = QFont(table_font)
+        header_font.setBold(True)
+        header_font.setPointSizeF(point_size + 0.5)
+        header = self.table.horizontalHeader()
+        header.setFont(header_font)
+        header.setMinimumHeight(max(40, round(38 * dpi_scale)))
+        self.table.verticalHeader().setDefaultSectionSize(
+            max(38, round(36 * dpi_scale))
+        )
+        self.table.verticalHeader().setMinimumSectionSize(
+            max(34, round(34 * dpi_scale))
+        )
+        self._table_dpi_scale = dpi_scale
+        self._fit_table_columns()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.ScreenChangeInternal):
+            self._configure_table_readability()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Recalculate only the presentation widths.  Row data and editing
+        # state are deliberately left untouched when the window is resized.
+        QTimer.singleShot(0, self._fit_table_columns)
+
+    def _fit_table_columns(self):
+        """Fill the visible table width without hiding long cell values."""
+        if not hasattr(self, "table") or self.table.columnCount() == 0:
+            return
+
+        scale = float(getattr(self, "_table_dpi_scale", 1.0) or 1.0)
+        minimums = {
+            column: round(width * scale)
+            for column, width in self.TABLE_MINIMUM_WIDTHS.items()
+        }
+
+        header = self.table.horizontalHeader()
+        header.setUpdatesEnabled(False)
+        try:
+            # Content sizing is done only when rows are rendered.  During a
+            # resize we preserve those widths and only add spare space.
+            for column, minimum in minimums.items():
+                if self.table.columnWidth(column) < minimum:
+                    self.table.setColumnWidth(column, minimum)
+
+            available = max(0, self.table.viewport().width())
+            current_total = sum(
+                self.table.columnWidth(column)
+                for column in range(self.table.columnCount())
+            )
+            extra = available - current_total
+            if extra <= 0:
+                return
+
+            flex_columns = [
+                column
+                for column in self.TABLE_FLEX_COLUMNS
+                if column < self.table.columnCount()
+            ]
+            if not flex_columns:
+                flex_columns = list(range(self.table.columnCount()))
+
+            # Give long textual fields most of the spare width, while keeping
+            # numeric metadata compact.
+            weights = {0: 4, 4: 3, 5: 2, 6: 2, 7: 3}
+            total_weight = sum(weights.get(column, 1) for column in flex_columns)
+            for index, column in enumerate(flex_columns):
+                if index == len(flex_columns) - 1:
+                    addition = extra
+                else:
+                    addition = round(extra * weights.get(column, 1) / total_weight)
+                    addition = min(addition, extra)
+                self.table.setColumnWidth(
+                    column,
+                    self.table.columnWidth(column) + addition,
+                )
+                extra -= addition
+                total_weight -= weights.get(column, 1)
+                if total_weight <= 0:
+                    total_weight = 1
+        finally:
+            header.setUpdatesEnabled(True)
 
     def _current_element_ssh_config(self) -> dict:
         """Read and validate the SSH settings shown on this page."""
@@ -522,8 +779,31 @@ class ElementManagementWidget(QWidget):
         catalog = self.config.get("element_catalog", {})
         return catalog if isinstance(catalog, dict) else {}
 
+    def _canonicalize_record_path(self, record: dict) -> dict:
+        """Normalize legacy absolute paths to the configured relative path.
+
+        Older caches may contain both
+        ``/home/.../element/breaker_dis/Fuse...g`` and
+        ``breaker_dis/Fuse...g``.  They identify the same server file and
+        must therefore be merged before the table is rendered.
+        """
+        row = _record_with_defaults(record)
+        value = str(row.get("file_key") or row.get("file_name") or "").strip()
+        value = value.replace("\\", "/")
+        directory = str(getattr(self, "directory_edit", None).text() if hasattr(self, "directory_edit") else "")
+        directory = directory.strip().replace("\\", "/").rstrip("/")
+        prefix = f"{directory}/" if directory else ""
+        if prefix and value.casefold().startswith(prefix.casefold()):
+            value = value[len(prefix):]
+        value = _normalize_element_path(value)
+        if value:
+            row["file_key"] = value
+            row["file_name"] = PurePosixPath(value).name
+        return row
+
     def _load_saved_records(self):
         records = self._catalog().get("records", [])
+        records = [self._canonicalize_record_path(record) for record in records]
         self.rows = _merge_duplicate_records(records)
         self.dirty = False
         self._render_rows()
@@ -639,8 +919,13 @@ class ElementManagementWidget(QWidget):
 
     def _on_remote_loaded(self, rows: list):
         remote_count = len(rows or [])
-        rows = _merge_duplicate_records(rows)
-        saved_records = _merge_duplicate_records(self._catalog().get("records", []))
+        rows = _merge_duplicate_records(
+            self._canonicalize_record_path(row) for row in rows
+        )
+        saved_records = _merge_duplicate_records(
+            self._canonicalize_record_path(record)
+            for record in self._catalog().get("records", [])
+        )
         saved_by_identity = {
             _record_identity(record): record
             for record in saved_records
@@ -752,6 +1037,13 @@ class ElementManagementWidget(QWidget):
         return relative
 
     def _render_rows(self):
+        # Apply the same normalization at render time as a final guard for
+        # older in-memory caches.  This prevents two visually identical rows
+        # from appearing when one path contains hidden whitespace or Unicode
+        # path differences.
+        self.rows = _merge_duplicate_records(
+            self._canonicalize_record_path(row) for row in self.rows
+        )
         self._rendering = True
         self.table.setRowCount(0)
         for row_index, row in enumerate(self.rows):
@@ -767,19 +1059,50 @@ class ElementManagementWidget(QWidget):
             self.table.setItem(
                 row_index,
                 1,
-                self._item(row.get("classification"), editable=True),
+                self._item(
+                    f"{row.get('width')}×{row.get('height')}"
+                    if row.get("width") or row.get("height")
+                    else "-"
+                ),
             )
             self.table.setItem(
                 row_index,
                 2,
+                self._item(row.get("align_center") or "-"),
+            )
+            self.table.setItem(
+                row_index,
+                3,
+                self._item(row.get("pins") or "-"),
+            )
+            self.table.setItem(
+                row_index,
+                4,
+                self._item(self._source_text(row)),
+            )
+            self.table.setItem(
+                row_index,
+                5,
+                self._item(row.get("classification"), editable=True),
+            )
+            self.table.setItem(
+                row_index,
+                6,
                 self._item(row.get("remark"), editable=True),
             )
-            self.table.setItem(row_index, 3, self._item(row.get("status")))
+            status_item = self._item(self._status_text(row))
+            status_item.setToolTip(str(row.get("status") or ""))
+            self.table.setItem(row_index, 7, status_item)
         self._rendering = False
         self._apply_filter(self.filter_edit.text())
         self.table.resizeColumnsToContents()
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        scale = float(getattr(self, "_table_dpi_scale", 1.0) or 1.0)
+        for column, minimum in self.TABLE_MINIMUM_WIDTHS.items():
+            scaled_minimum = round(minimum * scale)
+            if self.table.columnWidth(column) < scaled_minimum:
+                self.table.setColumnWidth(column, scaled_minimum)
         self.table.resizeRowsToContents()
+        self._fit_table_columns()
 
     def _apply_filter(self, text: str):
         needle = str(text or "").strip().casefold()
@@ -794,12 +1117,44 @@ class ElementManagementWidget(QWidget):
                 bool(needle) and needle not in " ".join(values).casefold(),
             )
 
+    @staticmethod
+    def _source_text(row: dict) -> str:
+        source = str(row.get("source") or "").strip().upper()
+        if source == "SSH":
+            return "服务器图元库"
+        if source:
+            return source
+        if row.get("missing_on_server"):
+            return "本地缓存"
+        return "-"
+
+    @staticmethod
+    def _status_text(row: dict) -> str:
+        raw = str(row.get("status") or "").strip()
+        if row.get("missing_on_server"):
+            return "MISSING · 服务器不存在"
+        if raw == "本地缓存与服务器一致":
+            return "READY · 服务器已同步"
+        if raw == "服务器新增图元（待标记）":
+            return "NEW · 待标记"
+        if raw.startswith("服务器图元已更新"):
+            return "UPDATED · 请确认"
+        if raw.startswith("读取失败"):
+            return "ERROR · 读取失败"
+        if raw.startswith("已读取（属性解析失败"):
+            return "WARN · 属性解析失败"
+        if raw == "已读取":
+            return "READY · 服务器已读取"
+        if raw == "已保存标记":
+            return "LOCAL · 已保存标记"
+        return raw or "-"
+
     def _sync_rows_from_table(self):
         for row_index, row in enumerate(self.rows):
             if row_index >= self.table.rowCount():
                 break
-            row["classification"] = self.table.item(row_index, 1).text().strip()
-            row["remark"] = self.table.item(row_index, 2).text().strip()
+            row["classification"] = self.table.item(row_index, 5).text().strip()
+            row["remark"] = self.table.item(row_index, 6).text().strip()
 
     def _on_table_changed(self, _item):
         if self._rendering:
@@ -827,7 +1182,7 @@ class ElementManagementWidget(QWidget):
                 "有未保存的图元标记修改；模型校验仍会使用上一次已保存的配置。"
             )
 
-    def save_catalog(self):
+    def save_catalog(self, sync_central=True):
         self._sync_rows_from_table()
         self.config.setdefault("ssh", {})["element_directory"] = (
             self.directory_edit.text().strip()
@@ -837,11 +1192,57 @@ class ElementManagementWidget(QWidget):
             "records": [dict(row) for row in self.rows],
         }
         save_settings(self.config)
+        central_state = dict(self.config.get("_central_sync", {}) or {})
+        machine_id = str(self.config.get("machine_id") or "")
+        admin_id = str(central_state.get("admin_machine_id") or "")
+        central_published = False
+        central_error = ""
+        if (
+            sync_central
+            and
+            central_state.get("status") == "ACTIVE"
+            and machine_id
+            and machine_id == admin_id
+        ):
+            try:
+                publish_central_settings(self.config)
+                save_settings(self.config)
+                central_published = True
+            except Exception as exc:
+                central_error = str(exc)
         self.dirty = False
+        suffix = "，并已同步到中央配置" if central_published else ""
+        if central_error:
+            suffix = "，但中央配置同步失败"
         self.status_label.setText(
-            f"已保存 {len(self.rows)} 条图元标记。后续模型识别会按图元文件标识匹配。"
+            f"已保存 {len(self.rows)} 条图元标记{suffix}。后续模型识别会按图元文件标识匹配。"
         )
+        if central_error:
+            QMessageBox.warning(
+                self,
+                "中央配置同步失败",
+                "图元标记已保存到本机，但没有发布到中央配置：\n" + central_error,
+            )
         self.catalogChanged.emit()
+
+    def publish_catalog_to_central(self):
+        """Explicitly publish the current element marks from the Admin UI."""
+        try:
+            self.save_catalog(sync_central=False)
+            state = dict(self.config.get("_central_sync", {}) or {})
+            machine_id = str(self.config.get("machine_id") or "")
+            admin_id = str(state.get("admin_machine_id") or "")
+            if state.get("status") != "ACTIVE" or machine_id != admin_id:
+                raise ValueError(
+                    "当前机器不是 Admin，不能发布中央配置。请先在【设置】中完成 Admin 初始化或接管。"
+                )
+            version = publish_central_settings(self.config)
+            save_settings(self.config)
+            self.status_label.setText(
+                f"已保存 {len(self.rows)} 条图元标记，并已同步到中央配置（版本 {version}）。"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "中央配置同步失败", str(exc))
 
     def export_shared_catalog(self):
         self._sync_rows_from_table()
@@ -854,9 +1255,10 @@ class ElementManagementWidget(QWidget):
         if not path:
             return
         payload = {
-            "schema": "distribution-model-manager.element-marks",
-            "schema_version": 1,
-            "records": [_shared_record(row) for row in self.rows],
+            "schema": "element-marks",
+            "version": 1,
+            "description": "Portable element classification marks",
+            "records": [_portable_record(row) for row in self.rows],
         }
         try:
             with open(path, "w", encoding="utf-8") as handle:
@@ -880,11 +1282,7 @@ class ElementManagementWidget(QWidget):
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
-            if payload.get("schema") != "distribution-model-manager.element-marks":
-                raise ValueError("不是本工具导出的图元共享配置。")
-            records = payload.get("records", [])
-            if not isinstance(records, list):
-                raise ValueError("共享配置 records 必须是数组。")
+            records = _portable_import_records(payload)
         except Exception as exc:
             QMessageBox.warning(self, "导入共享配置失败", str(exc))
             return
@@ -898,7 +1296,7 @@ class ElementManagementWidget(QWidget):
         for record in records:
             if not isinstance(record, dict):
                 continue
-            incoming = _record_with_defaults(record)
+            incoming = self._canonicalize_record_path(record)
             identity = _record_identity(incoming)
             target = current_by_identity.get(identity)
             if target is None:

@@ -10,6 +10,13 @@ from dmm.domain.feeder.validator import FeederValidator, natural_section_key, in
 from dmm.domain.gfile.parser import GParser
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 from dmm.domain.feeder.topology import FeederDrawingTopologyClassifier
+from dmm.application.modules.jeddah_scope import (
+    assess_jeddah_drawing_scope,
+    apply_association_block,
+    apply_jeddah_scope_block,
+    check_graph_facid,
+    scope_report_fields,
+)
 from dmm.config.defaults import (
     DEFAULT_RMU_NAME_DETECTION_MODE,
     DEFAULT_RMU_NAME_EXCLUSIONS,
@@ -24,7 +31,7 @@ class FeederModelModule(ModelModule):
     description = (
         "馈线模型校验、数据库缺失馈线段补齐及安全回写。"
         "FACID、文件名、人工输入三种馈线来源相互独立；单文件与批量目录使用同一解析规则。"
-        "组合大图忽略根 facID，按单馈线 XML 指纹和连接拓扑审计 FeedLine 的 FEEDER_ID 一致性。"
+        "仅允许单线图关联；非空 G 根 facID 必须与目标 FEEDER_ID 一致。"
     )
     SUPPORTED_OPERATIONS = (
         "VALIDATE",
@@ -1475,6 +1482,83 @@ class FeederModelModule(ModelModule):
                     report=self._augment_section_creation_plan(db,report,settings,log_callback)
                     enriched_reports.append(report)
                 region_reports=enriched_reports
+
+            # Jeddah association is a strict single-line operation.  The
+            # feeder module may still produce an audit report for a composite
+            # drawing, but no root or FeedLine writeback may be planned when
+            # the common main-device scope is not unique.
+            parsed_for_scope = GParser().parse(g_file)
+            drawing_scope = assess_jeddah_drawing_scope(parsed_for_scope)
+            for report in region_reports:
+                report.update(scope_report_fields(drawing_scope))
+            if not drawing_scope["association_allowed"]:
+                for report in region_reports:
+                    report["association_eligible"] = False
+                    report["feeder_root_writeback_needed"] = "NO"
+                    apply_jeddah_scope_block(
+                        report.get("feedline_rows", []), drawing_scope
+                    )
+                    report["status"] = "FAIL"
+                    report["severity"] = "ERROR"
+                    report["reason"] = drawing_scope["block_reason"]
+                    summary = report.get("summary", {}) or {}
+                    summary.update({
+                        "feedline_pass": sum(
+                            1 for row in report.get("feedline_rows", [])
+                            if row.get("status") == "PASS"
+                        ),
+                        "feedline_warn": sum(
+                            1 for row in report.get("feedline_rows", [])
+                            if row.get("status") == "WARN"
+                        ),
+                        "feedline_fail": sum(
+                            1 for row in report.get("feedline_rows", [])
+                            if row.get("status") == "FAIL"
+                        ),
+                        "association_ready": 0,
+                    })
+                    report["summary"] = summary
+
+            # A non-empty G-root facID is authoritative.  Even when the
+            # feeder module obtained its target from filename/manual input,
+            # association and writeback are forbidden if that target differs.
+            for report in region_reports:
+                facid_check = check_graph_facid(
+                    parsed_for_scope, report.get("feeder_id")
+                )
+                report.update({
+                    "graph_facid": facid_check["graph_facid"],
+                    "facid_check": facid_check["facid_check"],
+                    "facid_consistent": facid_check["facid_consistent"],
+                    "facid_reason": facid_check["facid_reason"],
+                })
+                if not facid_check["facid_consistent"]:
+                    report["association_eligible"] = False
+                    report["feeder_root_writeback_needed"] = "NO"
+                    apply_association_block(
+                        report.get("feedline_rows", []),
+                        facid_check["facid_reason"],
+                    )
+                    report["status"] = "FAIL"
+                    report["severity"] = "ERROR"
+                    report["reason"] = facid_check["facid_reason"]
+                    summary = report.get("summary", {}) or {}
+                    summary.update({
+                        "feedline_pass": sum(
+                            1 for row in report.get("feedline_rows", [])
+                            if row.get("status") == "PASS"
+                        ),
+                        "feedline_warn": sum(
+                            1 for row in report.get("feedline_rows", [])
+                            if row.get("status") == "WARN"
+                        ),
+                        "feedline_fail": sum(
+                            1 for row in report.get("feedline_rows", [])
+                            if row.get("status") == "FAIL"
+                        ),
+                        "association_ready": 0,
+                    })
+                    report["summary"] = summary
 
             # Keep classification provenance in every report row.  This is
             # especially important when an operator explicitly confirms the

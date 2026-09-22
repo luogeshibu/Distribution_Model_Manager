@@ -1,20 +1,19 @@
 APP_NAME = "配网模型管理工具"
 APP_NAME_EN = "Distribution Model Manager"
-APP_VERSION = "4.1.39"
+APP_VERSION = "4.1.40"
 APP_DESCRIPTION = "配网 G 文件模型校验、候选选择及安全关联回写工具"
 APP_EDITION = "团队内部版"
 APP_SITE_LABEL = "吉达现场版"
 APP_SITE_LABEL_EN = "Jeddah Site Edition"
-APP_BUILD_DATE = "2026-08-31"
+APP_BUILD_DATE = "2026-09-20"
 
 WORKSPACE_RETENTION_DAYS = 30
 
 # RMU name-label spatial recognition.
 # These values are G-file coordinate units, not pixels.
-# `RMU_LABEL_SEARCH_MAX_DISTANCE` is retained for configuration/backward
-# compatibility. Selected directions are searched and each RMU keeps only its
-# nearest single Text candidate.
-RMU_LABEL_SEARCH_MAX_DISTANCE = 120.0
+# Selected directions are searched and each RMU keeps only its nearest single
+# Text candidate within this distance.
+RMU_LABEL_SEARCH_MAX_DISTANCE = 200.0
 RMU_LABEL_EDGE_TOLERANCE = 20.0
 # RMU cabinet names normally contain no spaces.  Field drawings also use a
 # narrow family such as "66 B": numeric cabinet number + one space + suffix.

@@ -1085,6 +1085,11 @@ class GParser:
                     )
                     if score is None:
                         continue
+                    # RMU names outside the configured spatial limit are not
+                    # valid candidates, even when they are on the requested
+                    # side of the frame.
+                    if float(score) > float(self.max_distance):
+                        continue
                     rank = (
                         score,
                         abs(float(gap or 0.0)),

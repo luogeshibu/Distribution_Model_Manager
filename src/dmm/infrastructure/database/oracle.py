@@ -632,13 +632,40 @@ class OracleClient:
                 f.graph_name,
                 s.name AS station_name,
                 s.bv_id AS station_bv_id,
+                CASE
+                    WHEN sc_parent.code IS NULL THEN sc.code
+                    WHEN sc.code = sc_parent.code THEN sc.code
+                    WHEN sc.code LIKE sc_parent.code || '-%' THEN
+                        TRIM(
+                            sc_parent.code || ' ' ||
+                            SUBSTR(sc.code, LENGTH(sc_parent.code) + 2)
+                        )
+                    ELSE TRIM(sc_parent.code || ' ' || sc.code)
+                END AS subcontrolarea_path,
                 TRIM(
+                    NVL(
+                        CASE
+                            WHEN sc_parent.code IS NULL THEN sc.code
+                            WHEN sc.code = sc_parent.code THEN sc.code
+                            WHEN sc.code LIKE sc_parent.code || '-%' THEN
+                                TRIM(
+                                    sc_parent.code || ' ' ||
+                                    SUBSTR(sc.code, LENGTH(sc_parent.code) + 2)
+                                )
+                            ELSE TRIM(sc_parent.code || ' ' || sc.code)
+                        END,
+                        ''
+                    ) || ' ' ||
                     NVL(s.name, '') || ' ' ||
                     NVL(f.name, '')
                 ) AS display_name
             FROM {table_name} f
             LEFT JOIN {station_table} s
               ON s.id = f.st_id
+            LEFT JOIN subcontrolarea sc
+              ON sc.id = s.subarea_id
+            LEFT JOIN subcontrolarea sc_parent
+              ON sc_parent.id = sc.father_id
             WHERE f.id = :feeder_id
             """,
             {"feeder_id": int(feeder_id)},
@@ -762,16 +789,56 @@ class OracleClient:
                 f.st_id,
                 f.graph_name,
                 s.name AS station_name,
+                CASE
+                    WHEN sc_parent.code IS NULL THEN sc.code
+                    WHEN sc.code = sc_parent.code THEN sc.code
+                    WHEN sc.code LIKE sc_parent.code || '-%' THEN
+                        TRIM(
+                            sc_parent.code || ' ' ||
+                            SUBSTR(sc.code, LENGTH(sc_parent.code) + 2)
+                        )
+                    ELSE TRIM(sc_parent.code || ' ' || sc.code)
+                END AS subcontrolarea_path,
                 TRIM(
+                    NVL(
+                        CASE
+                            WHEN sc_parent.code IS NULL THEN sc.code
+                            WHEN sc.code = sc_parent.code THEN sc.code
+                            WHEN sc.code LIKE sc_parent.code || '-%' THEN
+                                TRIM(
+                                    sc_parent.code || ' ' ||
+                                    SUBSTR(sc.code, LENGTH(sc_parent.code) + 2)
+                                )
+                            ELSE TRIM(sc_parent.code || ' ' || sc.code)
+                        END,
+                        ''
+                    ) || ' ' ||
                     NVL(s.name, '') || ' ' ||
                     NVL(f.name, '')
                 ) AS display_name
             FROM {feeder_table} f
             LEFT JOIN {station_table} s
               ON s.id = f.st_id
+            LEFT JOIN subcontrolarea sc
+              ON sc.id = s.subarea_id
+            LEFT JOIN subcontrolarea sc_parent
+              ON sc_parent.id = sc.father_id
             WHERE REGEXP_REPLACE(
                     UPPER(
                         TRIM(
+                            NVL(
+                                CASE
+                                    WHEN sc_parent.code IS NULL THEN sc.code
+                                    WHEN sc.code = sc_parent.code THEN sc.code
+                                    WHEN sc.code LIKE sc_parent.code || '-%' THEN
+                                        TRIM(
+                                            sc_parent.code || ' ' ||
+                                            SUBSTR(sc.code, LENGTH(sc_parent.code) + 2)
+                                        )
+                                    ELSE TRIM(sc_parent.code || ' ' || sc.code)
+                                END,
+                                ''
+                            ) || ' ' ||
                             NVL(s.name, '') || ' ' ||
                             NVL(f.name, '')
                         )
