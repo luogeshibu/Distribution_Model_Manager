@@ -13,13 +13,13 @@ def _cabinet(rect_id: str, x: int, y: int) -> str:
     return f'''\n    <rect id="{rect_id}" x="{x}" y="{y}" w="220" h="220"/>\n    <CBreakerDis id="117{rect_id}" x="{x+25}" y="{y+35}" w="30" h="30" p_NameString="Y1"/>\n    <ZhaiWaiJieDiDaoZha id="188{rect_id}" x="{x+25}" y="{y+80}" w="30" h="28" p_NameString="Y1D"/>\n    <BusDis id="380{rect_id}" x="{x+100}" y="{y+35}" w="6" h="150" p_NameString="BUS"/>\n    '''
 
 
-def test_selected_top_direction_searches_globally_without_120_limit(tmp_path):
+def test_selected_top_direction_allows_over_120_but_within_200(tmp_path):
     path = _write(
         tmp_path,
         _cabinet("2000001", 100, 1000)
-        + '<Text id="8000001" x="155" y="400" w="100" h="40" ts="36352" lc="255,255,255"/>',
+        + '<Text id="8000001" x="155" y="800" w="100" h="40" ts="36352" lc="255,255,255"/>',
     )
-    parser = GParser(label_regex=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", max_distance=120)
+    parser = GParser(label_regex=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", max_distance=200)
     parsed = parser.parse(path)
     frames = parser.find_rmu_frames(parsed)
     assert len(frames) == 1
@@ -28,15 +28,15 @@ def test_selected_top_direction_searches_globally_without_120_limit(tmp_path):
     key = (frames[0].frame.xml_index, frames[0].frame.xml_id)
     candidates = assigned[key]
     assert [c.text for c in candidates] == ["36352"]
-    assert candidates[0].gap > 120
+    assert 120 < candidates[0].gap <= 200
     assert not candidates[0].is_green
 
 
-def test_unselected_direction_never_participates_even_if_closer(tmp_path):
+def test_direction_selection_is_ignored_in_makkah_global_nearest_mode(tmp_path):
     path = _write(
         tmp_path,
         _cabinet("2000001", 100, 1000)
-        + '<Text id="8000001" x="155" y="400" w="100" h="40" ts="TOP-NAME"/>'
+        + '<Text id="8000001" x="155" y="800" w="100" h="40" ts="TOP-NAME"/>'
         + '<Text id="8000002" x="155" y="1225" w="100" h="40" ts="BOTTOM-NAME"/>',
     )
     parser = GParser(label_regex=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -44,10 +44,10 @@ def test_unselected_direction_never_participates_even_if_closer(tmp_path):
     frames = parser.find_rmu_frames(parsed)
     assigned = parser.assign_rmu_label_candidates_globally(parsed, frames, ["top"])
     key = (frames[0].frame.xml_index, frames[0].frame.xml_id)
-    assert [c.text for c in assigned[key]] == ["TOP-NAME"]
+    assert [c.text for c in assigned[key]] == ["BOTTOM-NAME"]
 
 
-def test_one_text_has_only_one_nearest_rmu_owner_globally(tmp_path):
+def test_bottom_stage_has_priority_over_global_nearest_owner(tmp_path):
     path = _write(
         tmp_path,
         _cabinet("2000001", 100, 500)
@@ -63,10 +63,13 @@ def test_one_text_has_only_one_nearest_rmu_owner_globally(tmp_path):
 
     by_id = {
         frame.frame.xml_id: [
-            c.text
+            (c.text, c.direction)
             for c in assigned[(frame.frame.xml_index, frame.frame.xml_id)]
         ]
         for frame in frames
     }
-    assert by_id["2000001"] == ["UPPER"]
-    assert by_id["2000002"] == ["LOWER"]
+    # LOWER is a valid BOTTOM candidate for the upper RMU.  The staged Makkah
+    # rule assigns BOTTOM before any GLOBAL nearest-distance fallback, so the
+    # lower RMU must not pre-own this Text merely because it is 20 units closer.
+    assert by_id["2000001"] == [("LOWER", "bottom")]
+    assert by_id["2000002"] == []

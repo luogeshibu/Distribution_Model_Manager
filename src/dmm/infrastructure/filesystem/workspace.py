@@ -59,11 +59,36 @@ def user_data_root() -> Path:
     return Path(base) / "DistributionModelManager"
 
 
+USER_SETTINGS_CACHE_PATH = user_data_root() / "settings.json"
 USER_ELEMENT_CATALOG_PATH = user_data_root() / "element_catalog.json"
 
 
 def ensure_user_data():
-    USER_ELEMENT_CATALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    user_data_root().mkdir(parents=True, exist_ok=True)
+
+
+def load_user_settings_cache() -> dict | None:
+    """Load the per-user local settings cache without any network access."""
+    try:
+        payload = json.loads(
+            USER_SETTINGS_CACHE_PATH.read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def save_user_settings_cache(settings: dict) -> None:
+    """Persist the complete local settings cache outside the app directory."""
+    if not isinstance(settings, dict):
+        return
+    ensure_user_data()
+    temp_path = USER_SETTINGS_CACHE_PATH.with_suffix(".json.tmp")
+    temp_path.write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temp_path.replace(USER_SETTINGS_CACHE_PATH)
 
 
 def load_user_element_catalog() -> dict | None:

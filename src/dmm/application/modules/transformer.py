@@ -1,31 +1,102 @@
 from __future__ import annotations
 
+import math
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 
 from dmm.application.modules.base import ModelModule
 from dmm.domain.gfile.parser import GParser, GObject, ParsedG
-from dmm.domain.gfile.element_catalog import (
-    classification_is,
-    resolve_element_record,
-)
+from dmm.domain.gfile.element_catalog import devref_matches_file
 from dmm.domain.rmu.validator import int_or_none, norm
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 from dmm.application.modules.pole_switch import (
+    DEFAULT_DEVICE_TEXT_MAX_DISTANCE,
     POLE_SWITCH_NAME_RE,
     PoleSwitchParser,
+    _normalized_transformer_element_files,
 )
 
 
 TRANSFORMER_TABLE_ID = 13505
 TRANSFORMER_DOMAIN = 1
-TRANSFORMER_TAG = "TransformerDis"
-TRANSFORMER_SOURCE_TAG = "CBreaker"
+TRANSFORMER_TAG_FALLBACK = "TransformerDis"
+TRANSFORMER_MODEL_TEXT_MAX_DISTANCE = 200.0
+# Kept as a compatibility alias for older callers/tests. Runtime recognition
+# now uses the operator-maintained ``transformer_element_files`` list only.
+TRANSFORMER_DIRECT_ELEMENT_FILE = "Transformer_OH.pb.icn.g"
+
+
+def resolve_transformer_graphical_name(row, db, used_text_ids=None):
+    """Resolve one Transformer_OH name using the transformer module's own rules.
+
+    Geometry produces an ordered candidate list from the whole G drawing, in any
+    direction, while retaining the transformer distance limit. Only white Text
+    is eligible. Database uniqueness in 13505 is then used to choose among those
+    geometrically valid candidates. This keeps colored annotations (for example
+    a nearby red LBS name) from becoming a transformer name.
+    """
+    used_text_ids = used_text_ids if used_text_ids is not None else set()
+    candidates = list(row.get("name_candidates") or [])
+    if not candidates and str(row.get("graphical_name") or "").strip():
+        candidates = [{
+            "text": str(row.get("graphical_name") or "").strip(),
+            "distance": row.get("name_distance", ""),
+            "direction": str(row.get("name_direction") or "").strip(),
+            "xml_id": str(row.get("name_xml_id") or "").strip(),
+        }]
+
+    trace = []
+    selected = None
+    selected_record = None
+    for candidate in candidates:
+        text = str(candidate.get("text") or "").strip()
+        text_xml_id = str(candidate.get("xml_id") or "").strip()
+        if not text:
+            continue
+        if text_xml_id and text_xml_id in used_text_ids:
+            trace.append(f"{text}:TEXT_ALREADY_USED")
+            continue
+        records = []
+        try:
+            records = db.get_transformer_devices_by_name(
+                text,
+                feeder_id=None,
+                table_id=TRANSFORMER_TABLE_ID,
+            ) or []
+        except Exception as exc:
+            trace.append(f"{text}:DB_ERROR:{exc}")
+            continue
+        trace.append(f"{text}:MATCH={len(records)}")
+        if len(records) != 1:
+            continue
+        selected = candidate
+        selected_record = records[0]
+        if text_xml_id:
+            used_text_ids.add(text_xml_id)
+        break
+
+    if selected is not None:
+        row["graphical_name"] = str(selected.get("text") or "").strip()
+        row["name_source"] = "NEAREST_GRAPHICAL_TEXT_DB_UNIQUE"
+        row["name_distance"] = selected.get("distance", "")
+        row["name_direction"] = str(selected.get("direction") or "").strip()
+        row["name_xml_id"] = str(selected.get("xml_id") or "").strip()
+        row["name_db_match_count"] = 1
+        row["name_db_device_id"] = int_or_none((selected_record or {}).get("id"))
+        row["name_db_feeder_id"] = str((selected_record or {}).get("feeder_id") or "").strip()
+        row["name_resolution_status"] = "UNIQUE_13505"
+    else:
+        row["name_db_match_count"] = 0
+        row["name_db_device_id"] = ""
+        row["name_db_feeder_id"] = ""
+        row["name_resolution_status"] = "NO_UNIQUE_13505_CANDIDATE"
+    row["name_resolution_trace"] = ";".join(trace)
+    return row
 
 
 class TransformerParser(PoleSwitchParser):
-    """Recognize only element-catalog entries marked Transformer_OH."""
+    """Recognize direct Transformer_OH.pb.icn.g first, then catalog fallback."""
 
     @staticmethod
     def _is_valid_name(text: str) -> bool:
@@ -52,102 +123,394 @@ class TransformerParser(PoleSwitchParser):
     def _text_value(obj: GObject) -> str:
         return re.sub(r"\s+", " ", str(obj.attrs.get("ts") or "")).strip()
 
+
     @staticmethod
-    def _root_int(parsed: ParsedG, attribute: str):
-        return int_or_none(parsed.root.attrib.get(attribute))
+    def _is_white_name_text(obj: GObject) -> bool:
+        """Return True only for white/default-white visible Text.
+
+        D5000 uses lc as the primary visible text color and lcc as a fallback.
+        Missing color attributes render as the default white in the supplied G
+        files, so they remain eligible.
+        """
+        raw = str(obj.attrs.get("lc") or obj.attrs.get("lcc") or "").strip()
+        normalized = re.sub(r"\s+", "", raw).upper()
+        return normalized in {
+            "",
+            "255,255,255",
+            "255,255,255,255",
+            "#FFFFFF",
+            "#FFFFFFFF",
+        }
 
     @classmethod
-    def _is_transformer_object(cls, obj: GObject, element_catalog=None) -> bool:
-        record = resolve_element_record(
-            str(obj.attrs.get("devref") or ""),
-            element_catalog,
+    def _is_transformer_model_name_text(cls, obj: GObject) -> bool:
+        """Makkah Transformer_OH name candidate.
+
+        Names are not restricted by color, background, pure-numeric style, or
+        alphanumeric composition.  Reuse the shared Makkah Text-noise filter:
+        obvious non-name annotations and pure decimal numeric values are
+        excluded, while integer/alphabetic/alphanumeric labels remain eligible.
+        """
+        return cls._global_text_is_nameable(obj)
+
+    @staticmethod
+    def _transformer_model_anchor_direction(device: GObject, text_obj: GObject) -> str:
+        """Classify TOP/RIGHT/GLOBAL from rectangle-edge relation only."""
+        if text_obj.box.bottom <= device.box.top:
+            return "top"
+        if text_obj.box.left >= device.box.right:
+            return "right"
+        if text_obj.box.top >= device.box.bottom:
+            return "bottom"
+        if text_obj.box.right <= device.box.left:
+            return "left"
+        return "near"
+
+    @classmethod
+    def _transformer_model_direction_priority(cls, device: GObject, text_obj: GObject) -> int:
+        """Jeddah priority: top first, then right, then global fallback."""
+        direction = cls._transformer_model_anchor_direction(device, text_obj)
+        if direction == "top":
+            return 0
+        if direction == "right":
+            return 1
+        return 2
+
+    @staticmethod
+    def _transformer_model_priority_label(priority: int) -> str:
+        return {0: "TOP", 1: "RIGHT", 2: "GLOBAL"}.get(int(priority), "GLOBAL")
+
+    @classmethod
+    def _transformer_recognition_source(
+        cls,
+        obj: GObject,
+        element_catalog=None,
+        name_settings=None,
+    ) -> str:
+        """Return configured devref recognition source for one pole transformer.
+
+        Makkah no longer consults Element Management classifications. Exact
+        file basenames in ``transformer_element_files`` are the sole identity
+        source.
+        """
+        del element_catalog
+        devref = str(obj.attrs.get("devref") or "")
+        for file_name in _normalized_transformer_element_files(name_settings):
+            if devref_matches_file(devref, file_name):
+                return "CONFIGURED_ELEMENT_FILE"
+        return ""
+
+    @classmethod
+    def _is_transformer_object(
+        cls,
+        obj: GObject,
+        element_catalog=None,
+        name_settings=None,
+    ) -> bool:
+        return bool(
+            cls._transformer_recognition_source(
+                obj,
+                element_catalog,
+                name_settings,
+            )
         )
-        return classification_is(record, "TRANSFORMER_OH")
 
-    @classmethod
-    def _topology_source_keyids(cls, parsed: ParsedG, element_catalog=None):
-        """Find source CBreaker keyids per TransformerDis topology branch."""
-        by_id = {
-            str(obj.xml_id): obj
+    @staticmethod
+    def _transformer_model_text_anchor_distance(device: GObject, text_obj: GObject) -> float:
+        """Shortest rectangle-edge distance used by the Makkah model.
+
+        The historical function name is kept for compatibility, but center
+        points and Text.x/Text.y anchors are no longer used.
+        """
+        return device.box.edge_distance(text_obj.box)
+
+    def discover_with_center_anchor_names(
+        self,
+        parsed: ParsedG,
+        element_catalog=None,
+        name_settings=None,
+    ):
+        """Transformer_OH name allocation using rectangle minimum-edge distance.
+
+        Legacy compatibility rule retained for callers that still need the
+        pre-v4.1.67 any-direction nearest-white-Text behavior.  FUSE no longer
+        uses this path; it now calls discover_for_transformer_model() so its
+        selected Transformer_OH follows the same Jeddah TOP -> RIGHT -> GLOBAL
+        naming rule as the standalone transformer model.
+
+        Legacy behavior:
+        1. collect every Transformer_OH in the drawing;
+        2. collect eligible white Text objects globally, with no direction rule;
+        3. create candidates within the existing 200-unit limit using
+           Transformer rectangle -> Text rectangle minimum-edge distance;
+        4. allocate Text one-to-one by global nearest distance;
+        5. database validation is performed later and never changes ownership.
+
+        This method remains deliberately separate for backward-compatible
+        internal callers; it is not used by the current FUSE model.
+        """
+        devices = [
+            obj
             for obj in parsed.objects
-            if str(obj.xml_id or "").strip()
-        }
-        graph = defaultdict(set)
-        for obj in parsed.objects:
-            xml_id = str(obj.xml_id or "").strip()
-            if not xml_id:
-                continue
-            for ref in cls._refs(obj):
-                ref = str(ref).strip()
-                if not ref or ref not in by_id:
-                    continue
-                graph[xml_id].add(ref)
-                graph[ref].add(xml_id)
-
-        breakers_by_id = {
-            xml_id: obj
-            for xml_id, obj in by_id.items()
-            if obj.tag == TRANSFORMER_SOURCE_TAG
-            and str(obj.attrs.get("keyid") or "").strip()
-        }
-        result = {}
-        for transformer in parsed.objects:
-            if not cls._is_transformer_object(transformer, element_catalog):
-                continue
-            transformer_id = str(transformer.xml_id or "").strip()
-            if not transformer_id:
-                continue
-            queue = [transformer_id]
-            visited = {transformer_id}
-            source_ids = []
-            while queue:
-                current = queue.pop(0)
-                if current in breakers_by_id:
-                    source_ids.append(
-                        str(breakers_by_id[current].attrs.get("keyid") or "").strip()
-                    )
-                    # A source CBreaker is an anchor. Do not walk through it
-                    # into another source branch.
-                    continue
-                for neighbor in graph.get(current, set()):
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        queue.append(neighbor)
-            result[transformer_id] = list(dict.fromkeys(source_ids))
-
-        all_source_keyids = [
-            str(obj.attrs.get("keyid") or "").strip()
-            for obj in breakers_by_id.values()
-            if str(obj.attrs.get("keyid") or "").strip()
+            if self._is_transformer_object(obj, element_catalog, name_settings)
         ]
-        # Sparse/legacy drawings may not expose explicit refs.  A single main
-        # CBreaker remains a safe fallback; multiple unconnected breakers are
-        # intentionally left unresolved instead of guessing.
-        if len(all_source_keyids) == 1:
-            for transformer_id, source_ids in result.items():
-                if not source_ids:
-                    result[transformer_id] = list(all_source_keyids)
-        return result, all_source_keyids
+        texts = [
+            obj
+            for obj in parsed.objects
+            if self._global_text_is_nameable(obj)
+        ]
+
+        ranked = {}
+        candidate_pairs = []
+        for device in devices:
+            items = []
+            for text_obj in texts:
+                distance = self._transformer_model_text_anchor_distance(
+                    device, text_obj
+                )
+                if distance > float(DEFAULT_DEVICE_TEXT_MAX_DISTANCE):
+                    continue
+                item = (
+                    0,
+                    0,
+                    float(distance),
+                    text_obj.xml_index,
+                    self._text_value(text_obj),
+                    text_obj,
+                )
+                items.append(item)
+                candidate_pairs.append((
+                    float(distance),
+                    text_obj.xml_index,
+                    device.xml_index,
+                    text_obj,
+                    item,
+                ))
+            items.sort(key=lambda item: (item[2], item[3]))
+            ranked[device.xml_index] = items
+
+        # Global one-to-one nearest allocation, exactly within this target
+        # family.  A device and a Text may each be consumed only once.
+        candidate_pairs.sort(key=lambda item: (item[0], item[1], item[2]))
+        owners = defaultdict(list)
+        assigned_devices = set()
+        assigned_text_ids = set()
+        for _distance, _text_order, device_xml_index, text_obj, candidate in candidate_pairs:
+            if device_xml_index in assigned_devices:
+                continue
+            if text_obj.xml_index in assigned_text_ids:
+                continue
+            owners[device_xml_index].append(candidate)
+            assigned_devices.add(device_xml_index)
+            assigned_text_ids.add(text_obj.xml_index)
+
+        rows = []
+        for obj in devices:
+            label, _candidates = self.find_nearest_name(
+                parsed,
+                obj,
+                "",
+                (),
+                owners,
+            )
+            attrs = obj.attrs
+            name_candidates = []
+            for (
+                _format_penalty,
+                _color_penalty,
+                distance,
+                _xml_index,
+                text,
+                text_obj,
+            ) in ranked.get(obj.xml_index, []):
+                name_candidates.append({
+                    "text": text,
+                    "distance": round(float(distance), 3),
+                    "direction": self._direction(obj, text_obj),
+                    "xml_id": str(text_obj.xml_id or ""),
+                })
+            rows.append({
+                "object_type": obj.tag,
+                "xml_id": obj.xml_id,
+                "x": obj.box.x,
+                "y": obj.box.y,
+                "w": obj.box.w,
+                "h": obj.box.h,
+                "devref": str(attrs.get("devref") or "").strip(),
+                "recognition_source": self._transformer_recognition_source(obj, element_catalog, name_settings),
+                "graphical_name": label.get("text", "") if label else "",
+                "name_source": "GLOBAL_NEAREST_WHITE_TEXT" if label else "",
+                "name_distance": label.get("distance", "") if label else "",
+                "name_direction": label.get("direction", "") if label else "",
+                "name_xml_id": label.get("xml_id", "") if label else "",
+                "name_candidates": name_candidates,
+                "name_distance_basis": "RECTANGLE_MIN_EDGE_DISTANCE",
+                "current_keyid1": str(attrs.get("keyid1") or "").strip(),
+                "current_keyid2": str(attrs.get("keyid2") or "").strip(),
+                "status": "",
+                "severity": "",
+                "reason": "",
+            })
+
+        return rows, {}
+
+    def discover_for_transformer_model(
+        self,
+        parsed: ParsedG,
+        element_catalog=None,
+        name_settings=None,
+    ):
+        """Discover Makkah pole transformers with global nearest Text ownership.
+
+        Rules:
+        1. collect every Transformer_OH in the current G drawing;
+        2. collect all broadly valid Text objects globally; color/background and
+           letter/digit format are not restrictions, while pure decimals are excluded;
+        3. use rectangle-to-rectangle minimum-edge distance only, max 200;
+        4. sort every device/Text pair globally by physical distance;
+        5. each device may receive one Text and each Text XML object may be consumed
+           only once. Once a Text is assigned it never re-enters the candidate pool.
+        """
+        devices = [
+            obj
+            for obj in parsed.objects
+            if self._is_transformer_object(obj, element_catalog, name_settings)
+        ]
+        texts = [
+            obj
+            for obj in parsed.objects
+            if self._is_transformer_model_name_text(obj)
+        ]
+
+        ranked = {}
+        candidate_pairs = []
+        for device in devices:
+            items = []
+            for text_obj in texts:
+                distance = self._transformer_model_text_anchor_distance(device, text_obj)
+                if distance > float(TRANSFORMER_MODEL_TEXT_MAX_DISTANCE):
+                    continue
+                direction = self._transformer_model_anchor_direction(device, text_obj)
+                item = {
+                    "priority": 0,
+                    "priority_label": "GLOBAL",
+                    "distance": float(distance),
+                    "text_order": int(text_obj.xml_index),
+                    "device_order": int(device.xml_index),
+                    "text": self._text_value(text_obj),
+                    "text_obj": text_obj,
+                    "direction": direction,
+                }
+                items.append(item)
+                candidate_pairs.append(item)
+            items.sort(key=lambda item: (item["distance"], item["text_order"]))
+            ranked[device.xml_index] = items
+
+        # Global greedy nearest one-to-one allocation. A consumed Text ID is
+        # permanently removed from the current model run and cannot be reused.
+        candidate_pairs.sort(key=lambda item: (
+            item["distance"],
+            item["text_order"],
+            item["device_order"],
+        ))
+        assigned_by_device = {}
+        assigned_text_ids = set()
+        for item in candidate_pairs:
+            device_id = item["device_order"]
+            text_id = item["text_order"]
+            if device_id in assigned_by_device or text_id in assigned_text_ids:
+                continue
+            assigned_by_device[device_id] = item
+            assigned_text_ids.add(text_id)
+
+        rows = []
+        for obj in devices:
+            selected = assigned_by_device.get(obj.xml_index)
+            attrs = obj.attrs
+            name_candidates = []
+            for item in ranked.get(obj.xml_index, []):
+                text_obj = item["text_obj"]
+                name_candidates.append({
+                    "text": item["text"],
+                    "distance": round(float(item["distance"]), 3),
+                    "direction": item["direction"],
+                    "priority": "GLOBAL",
+                    "xml_id": str(text_obj.xml_id or ""),
+                })
+
+            text_obj = selected.get("text_obj") if selected else None
+            rows.append({
+                "object_type": obj.tag,
+                "xml_id": obj.xml_id,
+                "x": obj.box.x,
+                "y": obj.box.y,
+                "w": obj.box.w,
+                "h": obj.box.h,
+                "devref": str(attrs.get("devref") or "").strip(),
+                "recognition_source": self._transformer_recognition_source(obj, element_catalog, name_settings),
+                "graphical_name": selected.get("text", "") if selected else "",
+                "name_source": "MAKKAH_GLOBAL_NEAREST_TEXT" if selected else "",
+                "name_distance": round(float(selected["distance"]), 3) if selected else "",
+                "name_direction": selected.get("direction", "") if selected else "",
+                "name_priority": "GLOBAL" if selected else "",
+                "name_xml_id": str(text_obj.xml_id or "") if text_obj else "",
+                "name_candidates": name_candidates,
+                "name_distance_basis": "RECTANGLE_MIN_EDGE_DISTANCE",
+                "name_candidate_rule": "GLOBAL_NEAREST;TEXT_ID_ONE_TO_ONE;PURE_DECIMAL_EXCLUDED;RECTANGLE_MIN_EDGE_DISTANCE;MAX_DISTANCE=200",
+                "current_keyid1": str(attrs.get("keyid1") or "").strip(),
+                "current_keyid2": str(attrs.get("keyid2") or "").strip(),
+                "status": "",
+                "severity": "",
+                "reason": "",
+            })
+
+        return rows, {}
 
     def discover(self, parsed: ParsedG, element_catalog=None, name_settings=None):
+        # Allocate names once for the complete set of Transformer_OH devices
+        # in this G file.  The pool is intentionally limited to the requested
+        # transformer devices: other modules must not reserve or consume a
+        # transformer name, but two transformers must never share one Text.
+        device_filter = lambda obj: self._is_transformer_object(
+            obj,
+            element_catalog,
+            name_settings,
+        )
         global_name_owners = self.build_global_name_owners(
             parsed,
             element_catalog,
             name_settings,
             nearest_only=True,
-            device_filter=lambda obj: self._is_transformer_object(
-                obj,
-                element_catalog,
-            ),
+            device_filter=device_filter,
+            # Transformer recognition is independent from other modules, but
+            # ownership is exclusive inside this target-device family.
+            include_shared_devices=False,
+            lock_text_ownership=True,
+            max_text_distance=DEFAULT_DEVICE_TEXT_MAX_DISTANCE,
+            allowed_directions=None,
+            text_filter=None,
+            direction_priority=None,
         )
-        # Feeder resolution is intentionally fixed-mode: use only the G-root
-        # facID (with the unique facName fallback below). No topology branch
-        # or CBreaker traversal is performed during model association.
-        source_keyids_by_transformer = {}
-        all_source_keyids = []
+        # Keep every geometrically valid white candidate in any direction as
+        # well. The transformer module (and modules that explicitly reuse its
+        # naming rule, such as FUSE) can then skip unrelated nearby labels that
+        # do not uniquely resolve in 13505.
+        all_name_candidates = self.build_global_name_owners(
+            parsed,
+            element_catalog,
+            name_settings,
+            nearest_only=True,
+            device_filter=device_filter,
+            include_shared_devices=False,
+            lock_text_ownership=False,
+            max_text_distance=DEFAULT_DEVICE_TEXT_MAX_DISTANCE,
+            allowed_directions=None,
+            text_filter=None,
+            direction_priority=None,
+        )
         rows = []
         for obj in parsed.objects:
-            if not self._is_transformer_object(obj, element_catalog):
+            if not self._is_transformer_object(obj, element_catalog, name_settings):
                 continue
 
             label, _candidates = self.find_nearest_name(
@@ -158,6 +521,14 @@ class TransformerParser(PoleSwitchParser):
                 global_name_owners,
             )
             attrs = obj.attrs
+            name_candidates = []
+            for _format_penalty, _color_penalty, distance, _xml_index, text, text_obj in all_name_candidates.get(obj.xml_index, []):
+                name_candidates.append({
+                    "text": text,
+                    "distance": round(float(distance), 3),
+                    "direction": self._direction(obj, text_obj),
+                    "xml_id": str(text_obj.xml_id or ""),
+                })
             rows.append({
                 "object_type": obj.tag,
                 "xml_id": obj.xml_id,
@@ -166,50 +537,31 @@ class TransformerParser(PoleSwitchParser):
                 "w": obj.box.w,
                 "h": obj.box.h,
                 "devref": str(attrs.get("devref") or "").strip(),
+                "recognition_source": self._transformer_recognition_source(obj, element_catalog, name_settings),
                 "graphical_name": label.get("text", "") if label else "",
                 "name_source": "NEAREST_GRAPHICAL_TEXT" if label else "",
                 "name_distance": label.get("distance", "") if label else "",
                 "name_direction": label.get("direction", "") if label else "",
                 "name_xml_id": label.get("xml_id", "") if label else "",
-                "source_cbreaker_keyids": source_keyids_by_transformer.get(
-                    str(obj.xml_id), []
-                ),
+                "name_candidates": name_candidates,
                 "current_keyid1": str(attrs.get("keyid1") or "").strip(),
                 "current_keyid2": str(attrs.get("keyid2") or "").strip(),
-                "source_cbreaker_count": 0,
-                "source_cbreaker_keyid": "",
                 "status": "",
                 "severity": "",
                 "reason": "",
             })
 
-        source_keyids = all_source_keyids
-        source_keyid = ""
-        if source_keyids:
-            source_keyid = source_keyids[0]
-        root_fac_id = self._root_int(parsed, "facID")
-        root_fac_name = str(parsed.root.attrib.get("facName") or "").strip()
-        context = {
-            "root_fac_id": root_fac_id,
-            "root_fac_name": root_fac_name,
-            "source_cbreaker_count": 0,
-            "source_cbreaker_keyid": source_keyid,
-            "source_cbreaker_keyids": source_keyids,
-            "source_cbreaker_keyids_by_transformer": source_keyids_by_transformer,
-        }
-        for row in rows:
-            row["source_cbreaker_count"] = 0
-            row["source_cbreaker_keyid"] = source_keyid
-        return rows, context
+        return rows, {}
 
 
 class TransformerModelModule(ModelModule):
     module_id = "TRANSFORMER"
     display_name = "柱上变压器模型"
     description = (
-        "只识别图元管理中标记为 Transformer_OH 的图元；被标记图元直接视为柱上变压器，"
-        "每个设备独立取最近合规 Text，馈线固定使用 G 根 facID 查询，必要时仅用唯一 facName 兜底，"
-        "按 13505 / dms_tr_device 计算双 KeyID 并安全回写。"
+        "麦加柱上变压器只识别用户维护的精确 devref 图元文件名单；名称不限制颜色、背景、纯数字或字母数字格式，"
+        "整张 G 图按矩形最小边缘距离做全局最近 Text 匹配，"
+        "最大距离 200，纯小数 Text 直接排除，Text 全局一对一。"
+        "数据库只按 13505.NAME 唯一匹配，不判断 FEEDER_ID；唯一后直接按 Domain=1 计算并回写 KeyID。"
     )
     SUPPORTED_OPERATIONS = (
         "VALIDATE",
@@ -220,14 +572,14 @@ class TransformerModelModule(ModelModule):
     @staticmethod
     def _rules():
         return {
-            TRANSFORMER_TAG: {
+            "CONFIGURED_TRANSFORMER_ELEMENT_FILES": {
                 "table_id": TRANSFORMER_TABLE_ID,
                 "domain": TRANSFORMER_DOMAIN,
-                "match_mode": "TRANSFORMERDIS_NEAREST_TEXT_AND_ROOT_FACID",
+                "match_mode": "MAKKAH_CONFIGURED_DEVREF_GLOBAL_TEXT_NAME_ONLY_NO_FEEDER",
                 "description": (
-                    "仅使用图元管理标记 Transformer_OH 的图元，直接视为柱上变压器；"
-                    "每个变压器直接解析整张 G 图中最近的 Text，不依赖现场图元文件名；"
-                    "G 根 facID 确认馈线；目标表为 13505，Domain=1"
+                    "只识别用户维护的精确 devref 图元文件名单；名称不限制颜色、背景或字母数字格式，"
+                    "矩形最小边缘距离最大200，全局一对一且已分配 Text 不再参与后续设备计算，纯小数排除。数据库只按13505.NAME唯一匹配，"
+                    "不解析、不要求、不校验FEEDER_ID。"
                 ),
             }
         }
@@ -257,28 +609,6 @@ class TransformerModelModule(ModelModule):
             "keyid1": expected,
             "keyid2": expected,
         }
-
-    @staticmethod
-    def _resolve_feeder(db, context):
-        root_fac_id = int_or_none(context.get("root_fac_id"))
-        if root_fac_id is not None:
-            feeder = db.get_feeder_info(root_fac_id)
-            if feeder:
-                return feeder, "G_ROOT_FACID"
-
-        # Last-resort label fallback remains unique-only after the fixed
-        # facID lookup. It does not inspect topology.
-        hint = str(context.get("root_fac_name") or "").strip()
-        if hint:
-            candidates = db.find_feeders_by_name_hint(hint)
-            unique = {}
-            for candidate in candidates:
-                candidate_id = int_or_none(candidate.get("id"))
-                if candidate_id is not None:
-                    unique[candidate_id] = candidate
-            if len(unique) == 1:
-                return next(iter(unique.values())), "G_ROOT_FACNAME_UNIQUE"
-        return None, "UNRESOLVED"
 
     @staticmethod
     def _current_keyids(row):
@@ -312,24 +642,15 @@ class TransformerModelModule(ModelModule):
                 if current:
                     row["current_db_name"] = norm(current.get("name"))
                     row["current_db_code"] = norm(current.get("code"))
-                    row["current_feeder_id"] = str(
-                        current.get("feeder_id") or ""
-                    ).strip()
         except Exception as exc:
             row["current_model_status"] = f"VERIFY_ERROR: {exc}"
             return
         row["current_model_status"] = "DECODED"
 
-    def _resolve_row(self, row, db, feeder, feeder_source):
+    def _resolve_row(self, row, db):
         name = str(row.get("graphical_name") or "").strip()
-        feeder_id = int_or_none((feeder or {}).get("id"))
         row.update({
             "selected_device_name": name,
-            "feeder_resolution_source": feeder_source,
-            "source_feeder_id": feeder_id or "",
-            "source_feeder_name": str((feeder or {}).get("display_name") or "").strip(),
-            "feeder_id": feeder_id or "",
-            "feeder_name": str((feeder or {}).get("display_name") or "").strip(),
             "table_id": TRANSFORMER_TABLE_ID,
             "table_name": "dms_tr_device",
             "configured_domain": TRANSFORMER_DOMAIN,
@@ -337,7 +658,6 @@ class TransformerModelModule(ModelModule):
             "db_device_id": "",
             "db_code": "",
             "db_name": "",
-            "db_feeder_id": "",
             "expected_keyid": "",
             "expected_keyid_verified": "NO",
             "model_link_correct": "NO",
@@ -348,11 +668,6 @@ class TransformerModelModule(ModelModule):
         })
         self._current_link_fields(row, db)
 
-        if feeder_id is None:
-            return self._fail(
-                row,
-                "TRANSFORMER_FEEDER_NOT_RESOLVED: G 根 facID 和唯一 facName 均未能解析到 13500 馈线。",
-            )
         if not name:
             return self._fail(
                 row,
@@ -361,7 +676,7 @@ class TransformerModelModule(ModelModule):
 
         records = db.get_transformer_devices_by_name(
             name,
-            feeder_id=feeder_id,
+            feeder_id=None,
             table_id=TRANSFORMER_TABLE_ID,
         )
         row["db_match_count"] = len(records)
@@ -369,7 +684,7 @@ class TransformerModelModule(ModelModule):
             return self._fail(
                 row,
                 "TRANSFORMER_DATABASE_NOT_UNIQUE: "
-                f"dms_tr_device NAME={name} 且 FEEDER_ID={feeder_id}；匹配数={len(records)}。",
+                f"dms_tr_device NAME={name}；匹配数={len(records)}。",
             )
 
         device = records[0]
@@ -381,7 +696,6 @@ class TransformerModelModule(ModelModule):
             "db_device_id": device_id,
             "db_code": norm(device.get("code")),
             "db_name": norm(device.get("name")),
-            "db_feeder_id": str(device.get("feeder_id") or "").strip(),
             "expected_keyid": expected,
         })
         try:
@@ -443,9 +757,29 @@ class TransformerModelModule(ModelModule):
         })
         return row
 
+    @staticmethod
+    def _log_found_device(log_callback, index, row):
+        """Write every discovered overhead-transformer device to the console."""
+        if not log_callback:
+            return
+        name = str(row.get("selected_device_name") or row.get("graphical_name") or "").strip() or "<未找到名称>"
+        xml_id = str(row.get("xml_id") or "").strip() or "-"
+        text_id = str(row.get("name_xml_id") or "").strip() or "-"
+        distance = row.get("name_distance", "")
+        distance_text = str(distance).strip() if distance not in (None, "") else "-"
+        db_id = str(row.get("db_device_id") or "").strip() or "-"
+        status = str(row.get("status") or "").strip() or "-"
+        ready = str(row.get("association_ready") or "NO").strip() or "NO"
+        reason = str(row.get("reason") or "").strip() or "-"
+        log_callback(
+            f"[柱上变压器][找到设备] #{index} 名称={name}；"
+            f"XML_ID={xml_id}；Text_ID={text_id}；距离={distance_text}；"
+            f"DB_ID={db_id}；状态={status}；可关联={ready}；原因={reason}"
+        )
+
     def _analyze_file(self, db, g_file, settings=None, log_callback=None, progress_callback=None):
         parsed = GParser().parse(g_file)
-        discovered, context = TransformerParser().discover(
+        discovered, _context = TransformerParser().discover_for_transformer_model(
             parsed,
             (settings or {}).get("element_catalog", {}),
             settings or {},
@@ -453,14 +787,10 @@ class TransformerModelModule(ModelModule):
         rows = []
         total = max(len(discovered), 1)
         for index, row in enumerate(discovered, start=1):
-            row_context = dict(context)
-            row_source_keyids = list(row.get("source_cbreaker_keyids") or [])
-            if row_source_keyids:
-                row_context["source_cbreaker_keyids"] = row_source_keyids
-            feeder, feeder_source = self._resolve_feeder(db, row_context)
-            resolved = self._resolve_row(dict(row), db, feeder, feeder_source)
+            resolved = self._resolve_row(dict(row), db)
             resolved["file_name"] = Path(g_file).name
             rows.append(resolved)
+            self._log_found_device(log_callback, index, resolved)
             if progress_callback:
                 progress_callback(
                     index,
@@ -470,9 +800,8 @@ class TransformerModelModule(ModelModule):
         if log_callback:
             log_callback(
                 f"[{Path(g_file).name}] 柱上变压器识别完成："
-                f"TransformerDis={len(discovered)}；"
-                f"主网CBreaker={context.get('source_cbreaker_count', 0)}；"
-                f"数据库可关联={sum(1 for row in rows if row.get('association_ready') == 'YES')}"
+                f"configured_transformers={len(discovered)}；"
+                f"名称唯一可关联={sum(1 for row in rows if row.get('association_ready') == 'YES')}"
             )
         return {
             "g_file": str(Path(g_file)),
@@ -521,7 +850,7 @@ class TransformerModelModule(ModelModule):
                     continue
                 change = {
                     "xml_id": row["xml_id"],
-                    "tag": row.get("object_type") or TRANSFORMER_TAG,
+                    "tag": row.get("object_type") or TRANSFORMER_TAG_FALLBACK,
                     "_source_file": report["g_file"],
                     "attributes": self._attributes_for_row(row),
                     "device_name": row.get("selected_device_name", ""),
@@ -555,7 +884,10 @@ class TransformerModelModule(ModelModule):
             "settings_snapshot": {
                 "transformer_table_id": TRANSFORMER_TABLE_ID,
                 "transformer_domain": TRANSFORMER_DOMAIN,
-                "element_catalog": settings.get("element_catalog", {}),
+                "transformer_element_files": list(
+                    settings.get("transformer_element_files")
+                    or _normalized_transformer_element_files(settings)
+                ),
             },
         }
 
@@ -579,15 +911,7 @@ class TransformerModelModule(ModelModule):
         for source_file, changes in changes_by_file.items():
             for change in changes:
                 base = dict(change.get("validated_row", {}) or {})
-                current = self._resolve_row(
-                    dict(base),
-                    db,
-                    {
-                        "id": base.get("feeder_id"),
-                        "display_name": base.get("feeder_name"),
-                    },
-                    base.get("feeder_resolution_source", "G_ROOT_FACID"),
-                )
+                current = self._resolve_row(dict(base), db)
                 if current.get("association_ready") != "YES" or current.get("writeback_needed") != "YES":
                     current["_execution_result"] = "SKIPPED"
                     execution_rows.append((change, current))

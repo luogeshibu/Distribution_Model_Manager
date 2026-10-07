@@ -26,7 +26,10 @@ if ([string]::IsNullOrWhiteSpace($AppVersion)) {
 }
 
 $BuildScriptVersion = $AppVersion
-$AppName = "Distribution_Model_Manager_v$AppVersion"
+# Site tag is intentionally part of every packaged artifact name so Makkah
+# builds cannot be confused with Jeddah/Madinah or generic distributions.
+$SiteTag = "makkah"
+$AppName = "Distribution_Model_Manager_${SiteTag}_v$AppVersion"
 
 $VenvDir = Join-Path $ProjectRoot ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"

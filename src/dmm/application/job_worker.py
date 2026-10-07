@@ -10,6 +10,10 @@ from dmm.infrastructure.database.oracle import OracleClient
 from dmm.infrastructure.reporting.writer import export_csv_bundle, export_html_bundle
 from dmm.config.settings import save_settings
 from dmm.domain.gfile.xml_diagnostics import GFileXmlParseError
+from dmm.domain.feeder.ring_discovery import (
+    attach_makkah_ring_feeder_inventory,
+    compare_makkah_ring_feeders_for_files,
+)
 
 class JobWorker(QThread):
     log = Signal(str)
@@ -35,6 +39,16 @@ class JobWorker(QThread):
             self.log.emit(db.test_connection())
             self.log.emit("Oracle 预检查：通过")
             self.progress.emit(5, "Oracle 数据库预检查通过")
+
+            # Makkah-wide report inventory: every model report must contain
+            # every feeder shown by the current drawing plus its DB result.
+            self.log.emit("正在整理当前图形馈线及数据库对比结果……")
+            ring_feeder_inventory = compare_makkah_ring_feeders_for_files(
+                db,
+                self.files,
+                self.settings,
+                lambda msg: self.log.emit(str(msg)),
+            )
 
             if not self.module.supports(self.operation):
                 raise RuntimeError(
@@ -77,11 +91,17 @@ class JobWorker(QThread):
                             str(message),
                         ),
                     )
+
             else:
                 raise RuntimeError(
                     "当前后台任务只接受模型校验；模型关联由工作区中"
                     "已经校验并勾选的结果直接执行。"
                 )
+
+            attach_makkah_ring_feeder_inventory(
+                reports,
+                ring_feeder_inventory,
+            )
 
             report_context = {
                 "VALIDATE": ("validation", "validation_report"),

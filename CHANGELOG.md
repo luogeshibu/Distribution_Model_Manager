@@ -1,3 +1,718 @@
+## v4.1.135：主网入口背景标签自动扩框 / 两行居中排版
+
+- “主网入口背景标签修正”在替换括号外主网名称后，会按修正后的文字长度重新计算标签宽度。
+- 自动调整承载背景的 Poke / Rect / RoundRect 或其它可见填充对象大小，避免新主网名称超出背景框。
+- 两段式标签统一排版为“主网名称”在上、“(目标RMU)”在下；两行水平居中，并作为整体在背景内垂直居中。
+- 背景对象以原中心点为锚点扩展，尽量保持原跳转线与标签位置关系；原始 G 文件仍不覆盖，只输出安全副本。
+- 即使文字内容已经是正确主网名称（UNCHANGED），也会继续检查并修正旧背景尺寸和两行对齐。
+- HTML/CSV 修正报告新增原/新背景几何与两行文字几何信息。
+
+## v4.1.134：整图馈线源唯一性收紧 / NOP 两侧唯一主站名称
+
+- 整图馈线拓扑分析新增“馈线源唯一性”硬规则：一个主站出线有且只能有一个馈线名字。
+- 主网 Bay/CBreaker + 馈线标题继续作为权威源；如果现场没有主站设备、只在线路末端写 `TRUB-BH21` 这类主站/馈线名称，则仅允许在“无主网设备源 + 拓扑末端”区域作为文字兜底源。
+- 沿线名字不再全部直接作为馈线锚点：中段文字、已有主网设备源区域中的文字、重复同名源都会被排除，不参与传播。
+- 同一个主站/馈线名称若出现多个同等级文字源候选，直接报 `SOURCE_NAME_DUPLICATE_ERROR`；同一个源端拓扑区域出现多个不同主站名字，报 `SOURCE_COMPONENT_MULTIPLE_NAMES_ERROR`，不再让多个名字同时扩散成设备多馈线冲突。
+- 同名文字重复时，如果只有一个候选直接位于 NOP 另一侧的源端区域，优先保留该唯一 NOP 侧候选，其余重复文字仅报告并排除。
+- NOP 两侧判断同步收紧：每一个物理侧必须最终得到且只能得到一个主站/馈线名称；0 个报告 `ERROR_SOURCE_NOT_FOUND_ON_SIDE`，多个报告 `ERROR_MULTI_SOURCE_ON_SIDE`。
+- HTML 报告新增“馈线源唯一性检查”表，区分权威主网源、仅文字主站源、被排除重复源和源唯一性错误；最终馈线锚点表只展示真正参与传播的唯一源。
+- 继续强制排除“有背景色 + (目标环网柜名称)”跳转标签，不得成为馈线候选。
+- 既有“环网柜馈线拓扑分析”和“馈线段所属馈线分析”逻辑不修改。
+
+## v4.1.133：主网入口背景跳转标签修正 + 整图馈线候选强制排除
+
+- 新增图形工作区模块 `主网入口背景标签修正`。
+- 识别“有背景色 + 馈线样式文字 + `(目标环网柜名称)`”的跳转标签；在唯一主网 CBreaker 300G 范围内，将括号外文字修正为主网已确认馈线名，括号目标保持不变。
+- 背景识别不绑定固定 RGB，支持填充 Poke/Rect 和 Text 背景属性。
+- 多主网候选不自动处理；原 G 不覆盖，只生成安全副本和 HTML/CSV 报告。
+- 整图馈线拓扑分析新增强制排除：上述背景跳转标签在 Bay/沿线馈线锚点识别前即加入排除集，永远不能参与馈线计算。
+- 新增整图 HTML 表 `已排除的背景跳转标签（绝不作为馈线锚点）` 及顶部计数。
+
+## v4.1.132：整图拓扑图独立缩放 / 全屏查看
+
+- “整图馈线拓扑分析”HTML 报告中的“修复前拓扑图”和“修复后拓扑图”各自增加独立控制：缩小、当前缩放比例、放大、重置、适应窗口、全屏查看。
+- 缩放范围为 20%～400%，每次调整 20%；两张图状态互不影响。
+- 图像区域支持 `Ctrl + 鼠标滚轮` 缩放，放大后保留横向/纵向滚动查看能力。
+- 全屏模式保留当前图的标题、图例和缩放按钮，按 Esc 或再次点击“全屏查看”退出。
+- 本次仅修改 HTML 报告交互与版本信息，不改变整图拓扑识别、NOP、自动补链、安全修复 G，也不修改既有“环网柜馈线拓扑分析”和“馈线段所属馈线分析”业务逻辑。
+
+## v4.1.131：整图拓扑断点诊断、前后图谱与安全修复 G
+
+- 整图拓扑分析新增断点诊断：从无馈线孤立区反查与唯一馈线区之间的线端点小间隙。
+- 自动修复范围限定为 `3G < distance <= 4.5G`，并要求端点双方候选唯一。
+- 自动修复前先模拟传播，只有错误减少且不新增多馈线冲突时才接受。
+- 自动补链写入 `link` 与 `node_area` 双向引用，原始 G 不覆盖。
+- 输出修复版 `*.topology-fixed...g`，并在生成后再次完整复核；复核不通过自动删除修复版。
+- HTML 同时嵌入修复前 / 修复后两张 SVG 拓扑图，红色 × 标断点，绿色标已修复连接。
+- 新增 `whole_graph_topology_repairs.csv` 记录断点对象、端点索引、距离、影响节点、修复前后错误数量和判定依据。
+- 样例修复验证：`34000376 ↔ 35001786`，3.162G，`NO_FEEDER_ERROR 177 -> 5`，`MULTI_FEEDER_ERROR 0 -> 0`。
+- 测试：498 passed，46 个既有历史失败，1 skipped；本次定向新增/相关测试 16 项通过。
+
+## v4.1.130：环网柜馈线拓扑纳入 Pole 显式连接节点
+
+- 修复【环网柜馈线拓扑分析】中 FeedLine 经 `Pole.node_area/link` 连续转接时，Pole 被旧基础网络过滤导致主网馈线传播中断的问题。
+- 仅在 RMU 拓扑模块中新增 `Pole` 显式拓扑节点；只读取 G 文件已有 `link/node_area` 关系，不做 Pole 几何邻近猜测。
+- 典型 `TNM-AH324 -> FeedLine -> Pole -> FeedLine -> Pole -> FeedLine -> 9002.Y2` 链路现在可以完整传播。
+- NOP 规则保持不变：`9002.Y1` 仍作为 `MKN-AH341` 的红色 NOP 截止点；同柜非 NOP `Y2/Q1` 唯一到达 `TNM-AH324` 后，RMU 9002 所属馈线判为 `TNM-AH324`。
+- 新增 Pole 链路回归测试；不修改【馈线段所属馈线分析】业务代码。
+- 【整图馈线拓扑分析】原本已支持 Pole 显式节点，本次保持该逻辑不变。
+
+## v4.1.129：红色 NOP 改为颜色范围识别
+
+- 修复现场红色 NOP 使用 `#ff2b05 / 255,43,5` 等非纯红颜色时无法识别的问题。
+- `_is_red_nop_text` 从精确 `#ff0000` 白名单升级为 HSV + RGB 双重判定：H 0~20° 或 340~360°、S≥45%、V≥30%，且 R 分量必须分别大于 G/B 的 1.5 倍。
+- 绿色、黄绿色、黄色、青色、蓝色、白色继续严格排除，不会因为放宽红色范围被误判为 NOP。
+- 兼容 `lc=R,G,B`、`R,G,B,A`、`lcc=#RRGGBB` 和历史 8 位 ARGB/RGBA 颜色格式。
+- 仅改变红色 NOP 的颜色识别入口；RMU/NOP 归属、Y/Q 开关匹配、拓扑断点和馈线传播逻辑保持不变。
+
+## v4.1.128：RMU 端口严格几何补链修复
+
+- 修复 Makkah 环网柜馈线拓扑中视觉连接存在、但 `link/node_area` 缺失导致 `SOURCE_ENTRY_NOT_FOUND` / `UNRESOLVED_NON_NOP_PORTS` 的问题。
+- 新增严格端子补链：只允许线对象端点与 RMU 内命名 Y*/Q* `CBreakerDis`、RMU `BusDis`、主站 Bay 唯一 `CBreaker` 在 <= 6 G 单位范围内建立缺失边。
+- 线端点若位于图元内部深处不连接；多个候选同距时不自动猜测。
+- `9002` 类 NOP 柜场景：NOP 端口继续截断来向馈线，非 NOP 端口可通过修复后的几何拓扑确认另一主网馈线，并据此确定 RMU 所属馈线。
+- 整图馈线拓扑分析复用同一严格端子补链。
+- 馈线段所属馈线分析模块保持不变。
+- 新增 v4.1.128 回归测试覆盖缺失 `link/node_area` 的 RMU Y/Q、BusDis、主站出线几何连接，以及深度穿入图元时禁止误补链。
+
+## v4.1.127：整图拓扑强校验 + RMU 所属馈线独立表
+
+- 只修改新【整图馈线拓扑分析】，不改既有 RMU-only / FeedLine-only 拓扑模块。
+- 除 NOP 开关外，所有电气对象必须且只能属于一条 feeder：0 条为 `NO_FEEDER_ERROR`，>1 条为 `MULTI_FEEDER_ERROR`，均进入 HTML 拓扑异常表。
+- 新增 RMU 汇总：同柜非 NOP Y*/Q* 端口必须各自唯一且全部一致；NOP 端口不参与归属；不允许多数投票兜底。
+- HTML 新增 RMU 所属馈线独立表、异常设备独立表；新增 `whole_graph_rmu_feeders.csv`。
+
+## v4.1.126：新增整图馈线拓扑分析（纯图形 / 单 G 文件）
+
+- 【图形工作区】新增全新独立任务【整图馈线拓扑分析】；既有环网柜馈线拓扑分析和馈线段所属馈线分析代码保持不变。
+- 一次只处理一个 G 文件，只分析图形，不访问 Oracle、不做模型表校验、不修改 G。
+- 主网 Bay CBreaker + 标题继续作为馈线锚点；新增 FeedLine 沿线完整馈线名识别，例如 `TURB-BH-04`，解决主站只在线路上标一个馈线名称的场景。
+- 为避免把 `SLBS-2002` / `SAR-2216` 等设备名误当 feeder，沿线名称必须贴近 FeedLine，且不能更贴近柱上开关/设备。
+- 红色 NOP 能归属 RMU 时复用现有 Y*/Q* 端口断点识别；未归属 RMU 的红色 NOP 全部按柱上开关 NOP 处理。
+- NOP 开关本身不分配 feeder；对每个 NOP 分别输出 LEFT/RIGHT/TOP/BOTTOM 邻接侧的 feeder 归属，传播不穿过 NOP。
+- 新整图图构建额外纳入 `Pole` 和其它显式 `link/node_area` 电气节点，修复线路经 Pole 转接时旧图构建器无法继续传播的问题；严格几何补链仍保持端点≤3G、端点到线段≤2G。
+- 输出 `whole_graph_topology_report.html`、`whole_graph_device_feeders.csv`、`whole_graph_nop_boundaries.csv`、`whole_graph_feeder_anchors.csv`。
+
+## v4.1.125：RMU 拓扑馈线硬约束 + 已关联 RMU FEEDER_ID 可控修正
+
+- RMU 模型正式复用环网柜馈线拓扑分析结果；未关联 RMU 只在所属 13500 FEEDER_ID 下查 13501。
+- 新增【强制修正已关联 RMU 所属馈线】复选开关，默认关闭。
+- 已关联且设备 KeyID 能证明 13501 身份时，允许在开关开启后把错误 `dms_combined_device.FEEDER_ID` 修正为拓扑馈线 ID。
+- 修正 SQL 带旧 FEEDER_ID 条件、影响行数校验、更新后回查及事务回滚保护。
+- 新增 DB-only 的 `RMU_FEEDER_ID` 可选择修正项，因此即使 G 图设备已经全部正确关联，也可以单独执行所属馈线修正。
+- 新增 3 项 RMU 馈线保护定向测试并通过；原 v4.1.124 馈线段拓扑相关定向测试继续通过。
+
+## v4.1.124：馈线模型按 FeedLine 拓扑所属馈线分别复用/创建 13503
+
+- 馈线模型不再把本图所有已确认馈线下的 13503 合并成统一资源池。
+- 直接复用 v4.1.123【馈线段所属馈线分析】的主网源、link/node_area、严格几何补链与红色 NOP 支路级断点逻辑，先得到每条 FeedLine 的唯一 `primary_feeder`。
+- 图形所属馈线再映射到 13500/dms_feeder_device；只有唯一数据库馈线匹配时才允许关联。
+- 已有关联必须满足 `13503.FEEDER_ID == FeedLine 拓扑所属 FEEDER_ID`；跨馈线旧关联进入 RELINK，不再因为“属于本图任意已确认馈线”而被误判为正确。
+- 未关联/失效/跨馈线 FeedLine 只从自己所属馈线的空闲 13503 中分配；不足部分在该馈线下按既有 SECnnn / BV_ID / SECTION_TYPE 规则创建。
+- 同一个 G 图可以同时为多条馈线分别创建缺失 13503；执行阶段按 `FEEDER_ID` 分组并分别调用数据库创建。
+- `CONFLICT` / `UNRESOLVED` FeedLine 阻断自动建库和模型关联，不做跨馈线兜底猜测。
+- 修复执行阶段跨分组重关联：同一源文件中已选择迁移的 FeedLine，其旧 13503 不再被其它 FEEDER_ID 分组错误保护。
+- 馈线段 HTML/CSV 明细新增拓扑所属馈线、拓扑候选馈线、拓扑目标 FEEDER_ID 等字段。
+
+## v4.1.123：新增馈线段所属馈线分析模块
+
+- 【图形工作区】新增独立任务【馈线段所属馈线分析】。
+- 保持 v4.1.122 已验证的【环网柜馈线拓扑分析】核心逻辑不变；新模块只复用其已验证的主网馈线源、严格拓扑补链、红色 NOP 及端口级支路停止规则。
+- FeedLine 所属 feeder 通过“从主网 CBreaker 是否能沿真实电气拓扑到达该 FeedLine”判断；碰到红色 NOP 对应 Y*/Q* 开关的支路立即停止，其它分支继续。
+- `CONFIRMED`=唯一 feeder 可达；`CONFLICT`=多 feeder 可达；`UNRESOLVED`=没有 feeder 可达。
+- 新增独立 HTML/CSV 审计报告；模块只读 G 文件，不访问 Oracle。
+
+## v4.1.122：RMU-only 拓扑传播 + NOP 支路级停止
+
+- 环网柜馈线拓扑分析只输出 RMU 所属 feeder，不再把 FeedLine 当业务归属对象。
+- FeedLine / ConnectLine / Bus / BusDis 只作为网络路径参与搜索。
+- 每条主网 feeder 独立 BFS 传播，只有当前路径碰到红色 NOP Y*/Q* 开关才停止，其它分支继续。
+- 移除“首柜 NOP 导致 feeder 全局删除”的传播语义，首柜 NOP 只表示对应入口支路当场截止。
+
+## v4.1.121：NOP 水平对齐识别 + 支路级传播断点
+
+- 【图形工作区 → 环网柜馈线拓扑分析】只处理红色 NOP，非红色 NOP 继续全部忽略。
+- NOP 仍先归属最近 RMU，但对应开关只允许从该 RMU 框内的 Y*/Q* CBreakerDis 中选择；绝不跨柜。
+- NOP 位于 RMU 左/右侧时，优先按中心 Y 的水平对齐程度选择开关；同一水平行有多个开关时再按实际几何距离选择最近者。NOP 位于上/下侧时镜像按中心 X 对齐。
+- 修复 Q1 场景：即使 Y1 的矩形边缘距离更近，只要 Q1 与 NOP 明显处于同一水平行，Q1 就会被识别为 NOP 开关。
+- 馈线传播按支路执行：只有真正经过 NOP 开关的支路在该开关处停止，同一 RMU 的其它非 NOP 端口和其它支路继续传播；首柜入线开关本身就是 NOP 时才排除该主网馈线。
+- 删除“FeedLine 外接矩形中心落入 RMU 就作为 feeder 证据”的旧补充逻辑，避免长折线经过附近时给无关 RMU 制造 CONFLICT；RMU 归属只使用真实 Y*/Q* 电气端口拓扑证据。
+- NOP HTML 汇总增加 NOP 相对 RMU 方位、对齐轴和对齐差，便于现场审计为什么选中某个 Y/Q 开关。
+
+## v4.1.120：环网柜馈线拓扑分析只认红色 NOP
+
+- 麦加【图形工作区 → 环网柜馈线拓扑分析】改为严格红色白名单：只有可见文字颜色为红色（`lc=255,0,0` / `lcc=#ff0000` 等等价格式）的 `NOP / N.O.P / N-O-P / N_O_P` 才参与拓扑。
+- 绿色、黄绿色（例如 `#55ff00`）以及其它所有非红色 NOP 全部忽略：不归属 RMU、不匹配 Y*/Q* 开关、不形成断点、不触发主网首柜馈线排除，也不进入 NOP 汇总。
+- 主网首柜规则、NOP 最近 RMU/最近 Y-Q 开关规则、NOP 柜非 NOP 端口归属规则保持不变。
+- 修复 `#55ff00` 这类现场绿色 NOP 未被 v4.1.119 的纯绿色过滤识别，导致拓扑被错误切断的问题。
+
+## v4.1.119：环网柜馈线拓扑分析忽略绿色 NOP
+
+- 麦加【图形工作区 → 环网柜馈线拓扑分析】中，所有绿色 `NOP / N.O.P / N-O-P / N_O_P` Text 直接忽略，不再归属 RMU、不匹配 Y*/Q* 开关、不形成拓扑断点，也不会触发主网首柜馈线排除。
+- 非绿色 NOP 继续按现有规则：先归属最近 RMU，再在柜内按实际几何距离选择最近的唯一 Y*/Q* `CBreakerDis`；该开关作为馈线传播断点。
+- 主网首柜规则保持不变：只有主网实际接入的 Y*/Q* 开关正好是有效 NOP 开关时，才排除该主网馈线。
+- NOP 边界柜归属规则保持不变：NOP 侧馈线在开关处截止，RMU 所属馈线由同柜非 NOP 端口的唯一一致馈线决定。
+- HTML 报告中的 NOP 数量和 “NOP所属RMU / 开关汇总” 只统计有效的非绿色 NOP。
+
+## v4.1.118：NOP边界RMU所属馈线按非NOP端口确定
+
+- NOP 开关连接的馈线在该开关处截止；该馈线仅作为边界/截止馈线记录，不再参与整个 RMU 的所属馈线判定。
+- 同柜非 NOP Y*/Q* 端口若解析出唯一一致馈线，则该馈线作为 RMU 所属馈线；不唯一时保持 CONFLICT/UNRESOLVED，不猜测。
+- 报告新增 RMU 所属馈线、NOP 截止馈线和归属判定依据。
+
+## v4.1.117：源端 NOP 馈线排除与 NOP 归属汇总
+
+- 环网柜馈线拓扑分析新增主网源端门控：仅当首个直连 RMU 的**实际入线 Y*/Q*** 同时也是 NOP 所属开关时，整条主网馈线才不参与任何配网设备候选。
+- 首柜其它开关存在 NOP 不会误伤主网馈线；`MNA4-AH332 → 17296/Y1`、NOP=`Y3` 的场景继续参与。
+- NOP→开关改为同柜内几何最近的唯一 Y*/Q* `CBreakerDis`。
+- HTML 新增 `NOP所属RMU / 开关汇总`，并在主网源表列出首柜、入线端口、NOP命中与候选状态。
+- 只读属性保持不变：不修改 G，不连接/查询/写入 Oracle。
+
+## v4.1.116：麦加主网馈线标题保留 _X / _Y 后缀
+
+- 主网 Bay 框外馈线标题现在支持 `SHM1-AH341_X`、`SHM1-AH341_Y`、`HRM2-AH308_X` 这类现场命名。
+- `_X` / `_Y` 被视为馈线编号的一部分：`SHM1-AH341_X` 固定解析为变电站 `SHM1`、馈线 `AH341_X`，数据库查询时不会丢掉后缀。
+- 颜色不限、无背景、Bay 距离、全局一对一、主站设备关联、馈线模型与拓扑分析的其余规则全部保持 v4.1.115 不变。
+
+## v4.1.115：麦加 RMU / 主站名称颜色完全不参与识别
+
+- RMU 环网柜名称：红色、绿色、白色及其它颜色全部等价，颜色不再参与候选过滤、自动聚类样式评分或单柜兜底选择；仍严格执行 RIGHT → BOTTOM → GLOBAL、最大 300 G、柜外 Text、一柜一名 / 一 Text 一柜。
+- 配网主站设备关联：主网 Bay 附近馈线标题取消“必须白色”限制；只保留无背景、标题格式、最大距离和 Bay/Text 全局一对一约束。
+- 馈线模型、主网 Poke、环网柜馈线拓扑分析共用同一主网 Bay 标题识别器，因此同步支持任意文字颜色。
+- 界面帮助与只读说明同步更新，明确“颜色不限”。
+
+# Changelog
+
+## v4.1.114
+
+- 图形工作区新增“环网柜馈线拓扑分析”独立模块，使用主网 Bay 馈线源、`link/node_area`、严格几何补链和 NOP 断点分析 RMU 所属馈线。
+- NOP 不再按“最近距离+20G”同时切多个开关；先归属最近 RMU，再按左右侧和中心 Y 对齐精确选择唯一 Y*/Q* `CBreakerDis` 作为传播边界。
+- 普通 RMU 输出唯一所属馈线；NOP 边界柜保留两侧馈线及 NOP 端口，不强行归为单一馈线；冲突与无证据分别标记 `CONFLICT` / `UNRESOLVED`。
+- 分析模块严格只读：不修改源 G、不生成改写 G、不写数据库；输出 HTML 总报告以及 RMU、端口、FeedLine 审计 CSV。
+- 使用麦加实际 `OSLA-08-MNA2-35-MNA4-32-MNA3-29-MNA4-12-ARF2-0` 图验证：9 条主网馈线、84 个 RMU，其中 76 个唯一归属、8 个 NOP 边界柜、0 冲突、0 未确定；97 条 FeedLine 中 94 条拓扑确认。
+
+## v4.1.113
+- 同步麦加馈线模型只读说明到 v4.1.112 的真实集合校验逻辑。
+- 页面明确显示 7 步流程：全部主网馈线识别、405/13500 唯一确认、已有 FeedLine 合法集合校验、空闲 13503 资源池、优先复用、缺少才创建、HTML 全量报告。
+- 固定规则提示改为“优先复用本图有效馈线下空闲馈线段，不足时仅创建缺少数量”。
+- 本版本不改变 v4.1.112 馈线关联业务算法。
+
+## v4.1.112：麦加多馈线集合校验 + HTML 全量馈线清单
+
+- 麦加馈线模型校验不再要求已有 FeedLine 必须属于扫描顺序第一条馈线；只要当前 13503 的 `FEEDER_ID` 属于本 G 图主网 Bay 已确认馈线集合，即判定为正确关联并原样保留。
+- Domain 错误但 13503/FEEDER_ID 正确时，仅保持原 13503.ID 并修复 Domain/KeyID。
+- 未关联、失效或归属图外馈线的 FeedLine，优先从本图所有已确认馈线下的未占用 13503 组成的统一资源池中稳定分配。
+- 资源池全部耗尽后，仅创建实际短缺数量；创建目标在本图已确认馈线中按主网 Bay 顺序稳定选择第一条具备有效命名前缀和 BV_ID 的馈线。
+- 馈线模型 HTML 新增“本图识别馈线（全部）”表，完整显示主网 Bay 找出的每个馈线标题及 13500 数据库匹配结果；未匹配/不唯一项也保留显示。
+- 馈线段明细增加目标馈线 ID / 名称，便于核对跨多馈线资源池的实际分配结果。
+
+# v4.1.111 - 麦加 FeedLine 相邻对齐 / 跨距外扩轨道
+
+- `馈线避让调整` 改为按 RMU 列做全局轨道规划，不再逐条把碰撞馈线吸附到同一个 X。
+- 同一 RMU 列中，相邻环网柜之间且 Y 范围不重叠的 FeedLine 复用同一条内侧轨道，保持视觉对齐。
+- 跨越其它 RMU 区间的长 FeedLine 因与相邻区间重叠，会按层级依次分配到更外侧轨道；右侧向 +X 外扩，左侧向 -X 镜像外扩。
+- 仍只处理压住 RMU 名称或 `NOP / N.O.P` 的 FeedLine；RMU、名称、NOP、设备、连接端点和 `link / node_area / keyid` 均保持不变。
+- 新增可配置参数：文字安全间距、错落轨道间距、同列判定范围、最大外移、处理右侧馈线、处理左侧馈线；配置保存到当前用户设置。
+- 现场样例 `OSLA-08-MNA2-35-MNA4-32-MNA3-29-MNA4-12-ARF2-0...g` 验证：短的相邻 RMU 馈线统一到 X=4400，跨越多柜的长馈线自动放到外层 X=4450（默认轨道间距 50 G），40 条碰撞馈线全部完成调整，0 条未解决。
+- 版本升级至 `v4.1.111`。
+
+# v4.1.110 - 馈线错落防重叠初版
+
+- 在 v4.1.109 文字避让基础上增加馈线最小间距，避免多条已移动竖直主干完全重合。
+- 该版本仍按逐段顺序寻找安全 X；v4.1.111 已进一步替换为相邻对齐 / 跨距外扩的全局轨道规划。
+
+# v4.1.109 - 麦加 FeedLine 文字避让
+
+- 图形工作区新增独立处理项 `馈线避让调整`，专门处理 FeedLine 压住环网柜名称或 `NOP / N.O.P` 文字的问题。
+- 硬规则：只移动 `FeedLine`；环网柜名称、NOP、RMU 本体、设备和其它图元均保持原位。没有文字碰撞的 FeedLine 完全不修改。
+- 识别保护文字时复用麦加 RMU 名称 `RIGHT -> BOTTOM -> GLOBAL` 一对一解析，并额外收集 `NOP / N.O.P` Text。
+- 当近似竖直 FeedLine 线段与保护文字相交时，保留原线段两端连接点，在右侧插入正交绕行主干；默认文字安全间距 `20 G`，默认最大右移 `500 G`。
+- 仅修改 Workspace 安全副本中的 `FeedLine.d` 和对应 `x/y/w/h` 包围框；`link / node_area / keyid` 等拓扑关联属性保持不变。
+- 仅靠向右避让无法安全解决的水平/非正交碰撞标记为未解决，不做猜测；CSV/HTML 报告记录碰撞馈线、移动线段、最大右移和未解决数量。
+- 使用现场样例 `OSLA-08-MNA2-35-MNA4-32-MNA3-29-MNA4-12-ARF2-0...g` 实测：97 条 FeedLine 中识别 40 条文字碰撞馈线，40 条均成功向右避让，0 条未解决。
+- 版本升级至 `v4.1.109`。
+
+# v4.1.108 - RMU 名称强制框外 + 用户选择图元直接认定
+
+- 麦加 RMU 名称新增硬规则：名称 Text 的中心点必须位于所有已识别 RMU 外框之外；只要 Text 中心落入任意 RMU 框内，就在 RIGHT / BOTTOM / GLOBAL 三个阶段之前直接排除，GLOBAL 兜底也不能使用柜内文字。
+- 保持 `RIGHT -> BOTTOM -> GLOBAL fallback` 三阶段一对一分配和 `<=300 G` 最大距离不变；允许外部大字体 Text 的外接框轻微触碰/重叠边框，只要 Text 中心仍在所有 RMU 框外。
+- 柱上开关设备识别改为完全服从用户维护的图元文件名单：移除 `RMU_*` 前缀安全排除，也不再因为同一 devref 同时出现在柱上变压器名单中而否决柱上开关；XML 标签、颜色、几何形状、内部结构均不参与设备身份判断。
+- 柱上变压器继续以用户维护的 `transformer_element_files` 为唯一设备身份依据，具体 XML 标签不构成限制。设备名称 Text 的现有距离、噪声过滤、一对一分配和数据库唯一性规则保持不变。
+- 版本升级至 `v4.1.108`。
+
+# v4.1.107 - 麦加环网柜名称三阶段一对一分配
+
+- 麦加环网柜名称分配改为真正的三阶段一对一规则：第一阶段全图先分配 RIGHT（<=300），第二阶段仅未命中的 RMU 分配 BOTTOM（<=300），第三阶段才对剩余 RMU/Text 做 GLOBAL 最近距离兜底（<=300）。
+- 移除 RIGHT/BOTTOM 阶段之前的“Text 必须先属于全局最近 RMU”前置限制，修复名称位于某 RMU 右侧、但几何上更靠近下一只 RMU 左侧时被错误抢走的问题。
+- 同一个 Text 仍只允许分配一次，同一个 RMU 仍只允许获得一个名称；NOP、Poke 同步移动及柱上开关原名精确查库规则保持不变。
+
+## v4.1.106 - 麦加环网柜名称识别距离扩大到 300
+
+- 麦加 RMU 名称识别硬距离上限由 `200 G` 调整为 `300 G`。
+- `RIGHT -> BOTTOM -> GLOBAL fallback` 三个阶段统一使用 `RMU_LABEL_SEARCH_MAX_DISTANCE = 300.0`。
+- 超过 300 G 单位的 Text 不参与 RMU 名称识别；全局最近 RMU 的 Text 一对一所有权规则保持不变。
+- 图形位置调整、Poke 跟随、NOP 与 Y*/Q* 水平中心对齐以及其它模型的名称距离均保持不变。
+- 版本升级至 `v4.1.106`。
+
+# v4.1.105 - 麦加柱上开关名称原样查询数据库
+
+- 麦加柱上开关查询 13501 / `dms_combined_device.NAME` 时，直接使用 G 文件 `Text.ts` 原始名称。
+- 不再删除或替换名称中的空格、横线 `-`、点号 `.` 等字符，也不做大小写或格式标准化。
+- 13501 SQL 改为 `WHERE name = :device_name`，不再对柱上开关 NAME 使用 `TRIM(name)`。
+- 图上名称选择仍保留现有几何/一对一规则；仅数据库查询值改为原始 Text，其他柱上开关 13501 唯一、13502 唯一、Domain=40、安全副本规则不变。
+- 版本升级至 `v4.1.105`。
+
+# v4.1.104 - 环网柜名称优先级与 Poke 同步移动
+
+- 麦加环网柜名称识别固定为 `RIGHT -> BOTTOM -> GLOBAL fallback`，不再使用纯全局最近作为第一选择。
+- 每个名称 Text 仍只归属其全局最近的 RMU，再在该 RMU 内按 RIGHT、BOTTOM、GLOBAL 顺序选择，避免相邻柜抢占名称。
+- “NOP / 环网柜名称位置调整”移动 RMU 名称时，同时移动与该 Text 绑定的 Poke 点击区域，X/Y 位移与名称完全一致。
+- Poke 绑定优先识别 `gfs_rmu_text_id` / `dmm_rmu_text_id` / `dmm_source_text_id`；对旧 G 文件增加 `ahref + 高重合几何区域`兼容兜底。
+- CSV/HTML 位置报告增加“名称 Poke 找到/移动”统计。
+- NOP 与 Y*/Q* 开关水平中心对齐规则保持不变。
+- 版本升级至 `v4.1.104`。
+
+# v4.1.103 - NOP 与环网柜名称位置调整
+
+- 图形工作区新增 `NOP / 环网柜名称位置调整` 独立处理项。
+- NOP 对应设备限定为当前 RMU 内可识别为 `Y*` / `Q*` 的 `CBreakerDis`；优先读取 `p_NameString`，缺失时复用现有可见开关名称解析。
+- NOP 配对以中心 Y 差为第一排序条件；移动后 NOP 中心 Y 与对应开关中心 Y 完全一致，只允许放在柜体左/右侧。
+- NOP 位置支持自动保持原左右侧、强制左侧、强制右侧。
+- 环网柜名称按现有麦加全局一对一名称识别，支持外框上/右/下/左四边中点布局。
+- 处理继续遵守安全副本原则：源 G 文件不改，输出写入 Workspace `g_output`，同时生成 CSV/HTML 报告。
+- 版本升级至 `v4.1.103`。
+
+# v4.1.102 - RMU 逻辑说明补充 Channel Status 状态图元写入
+
+- RMU 自动关联只读说明新增 Channel Status 独立步骤，完整展示柜内状态图元识别、数据库唯一查询、KeyID 校验和回写字段。
+- 固定数据库规则新增 Channel Status：表 13566 / Domain 40。
+- 明确 `Status` + `channel_status.zt.icn.g` 必须在当前已唯一确定的 RMU 框内且最多 1 个。
+- 明确 `dms_terminal_info.COMBINED_ID → dms_channel_info` 联查、排除 `CHAN_NAME` 以 `DR` 结尾、候选唯一、`ID + (40 << 32)` 构造 Expected KeyID。
+- 明确状态图元写入 `app=6600000, voltype=-1, p_ReportType=1, state=39, keyid=Expected KeyID`，并清理历史 `app1/voltype1/p_ReportType1/state1/keyid1`。
+- 原 v4.1.101 实际关联逻辑不变，本版主要让界面中的业务逻辑说明与真实执行逻辑完全一致。
+
+# v4.1.101 - 麦加 RMU 复用积攒 Channel Status 关联逻辑
+
+- 保持麦加 RMU 框识别、名称分配和 RMU 数据库唯一解析不变；新增柜内 `Status` + `channel_status.zt.icn.g` 精确识别。
+- 复用积攒 v4.1.63 的数据库查询：通过 RMU 13501 ID 匹配 `dms_terminal_info.COMBINED_ID`，联查 `dms_channel_info` 并排除 `CHAN_NAME` 以 `DR` 结尾的记录。
+- 仅数据库唯一 channel 可关联；使用 `dms_channel_info.ID + (40 << 32)` 构造 KeyID，并验证 table=13566、domain=40。
+- Channel Status 精确回写 `app=6600000, voltype=-1, p_ReportType=1, state=39, keyid=<Expected KeyID>`，并支持删除历史 `app1/voltype1/p_ReportType1/state1/keyid1` 残留字段。
+- 多个 Channel Status 图元、数据库 0/多条、KeyID 校验失败均阻断；执行阶段再次实时查询并验证后才写入 Workspace 安全副本。
+- 麦加仍不引入积攒的图级 FEEDER_ID 校验；Channel Status 从“已唯一确定的麦加 RMU”开始复用积攒后续逻辑。
+
+# v4.1.100 - 熔断器改为用户维护 devref 图元名单
+
+- 新增 `fuse_element_files` 本地配置，熔断器识别只按用户维护的 devref 文件 basename 精确匹配，不再读取图元管理 FUSE 分类。
+- 默认麦加熔断器图元：`Fuse_arrow.zwk.icn.g`、`Fuse_NON_SMART.zwk.icn.g`。
+- 熔断器配置页复用柱上开关/柱上变压器交互：动态名单、服务器只读搜索、勾选批量添加、搜索面板收起、删除/恢复默认。
+- 熔断器名单修改后自动写入 per-user settings 缓存，也支持显式“保存到本地用户缓存”。
+- 熔断器数据库、最近柱上变压器、名称派生、KeyID、安全副本逻辑保持不变；报告/帮助同步改为 devref 名单识别表述。
+
+# v4.1.99 - 柱上设备图元名单显式保存到本地用户缓存
+
+- 柱上变压器配置新增“保存到本地用户缓存”按钮；服务器搜索添加、删除、恢复默认后仍会自动保存，也可由用户手动再次保存确认。
+- 柱上开关配置同步新增同样的“保存到本地用户缓存”入口，两个模型的配置交互保持一致。
+- 保存使用现有 per-user settings 缓存（Windows 下位于当前用户 APPDATA 的 DistributionModelManager/settings.json），替换程序目录后仍可加载；Workspace/config.json 继续作为兼容副本。
+- 配置区增加保存状态提示，明确当前名单已写入本地用户缓存以及图元数量。
+
+# v4.1.98 - 柱上变压器配置与柱上开关统一
+
+- 柱上变压器图元名单改为动态高度，减少单个图元时的大块空白；最多直接显示 12 行，超出后内部滚动。
+- 新增共享图元服务器只读搜索，复用【图元管理】SSH 配置；搜索区域默认收起，可按需展开。
+- 搜索结果使用复选框，支持全选/全部取消、批量添加和双击单项添加；加入名单后直接作为柱上变压器识别图元。
+- 移除柱上变压器手工文本输入添加框，使柱上开关/柱上变压器两个模型的配置交互和视觉结构保持一致。
+
+# v4.1.97 - 柱上开关服务器搜索区域支持收起
+
+- “从图元服务器搜索并添加”改为可折叠区域，默认收起，避免服务器搜索框/结果列表一直占据模型配置页面。
+- 新增“展开服务器搜索 / 收起服务器搜索”切换按钮，并在展开区域内提供“收起搜索”快捷按钮。
+- 收起搜索不会删除柱上开关名单或服务器配置；重新展开即可继续使用只读 SSH 搜索。
+- 原有复选框批量添加、双击添加、RMU_* 安全排除和动态名单高度保持不变。
+
+# v4.1.96 - 图元服务器搜索结果改为勾选添加
+
+- 柱上开关图元服务器搜索结果新增明确的复选框，用户勾选后再加入柱上开关图元名单。
+- 新增“全选可添加 / 全部取消”，批量添加更直观。
+- “添加选中到柱上开关名单”改为“添加勾选到柱上开关名单”；未勾选时按钮保持禁用。
+- RMU_* 搜索结果仍显示但不可勾选、不可添加；双击普通图元仍可直接添加。
+- 柱上开关正式识别规则、数据库唯一性规则和动态名单高度保持不变。
+
+# v4.1.95 - 柱上开关从图元服务器搜索添加
+
+- 柱上开关图元名单新增图元服务器只读搜索：复用【图元管理】SSH 主机、账号和 element_directory，按关键字递归检索 `.g` 图元。
+- 搜索结果支持多选/双击添加，列表展示服务器相对路径，实际保存仍为 devref 文件名；RMU_* 图元继续禁止加入。
+- 柱上开关名单改为按项目数量动态增高：少量图元不留大块空白，增多时逐行长高，超过 12 行后内部滚动。
+
+# v4.1.94 - 柱上开关图元名单取消 AR/LBS/SEC 分类
+
+- 柱上开关模型配置改为纯 devref 文件名名单：用户加入的每个图元都直接视为柱上开关，不再选择或维护 AR/LBS/SEC。
+- UI 删除设备族下拉框与设备族说明，图元列表压缩为紧凑高度，默认 4 行直接可见，避免大块空白。
+- 识别与名称分配均不再使用设备族；`RMU_*` 安全排除和柱上变压器优先排除保持不变。
+- 13501 按 NAME 唯一命中后，13502 子设备必须恰好 1 条；0 条或多条均阻断关联，不再按设备族消歧。
+- 普通名称继续做既有标准化；合法 `前缀+数字-数字` 复合名称由图上名称本身识别并保留横杠，不依赖设备族配置。
+- 自动兼容/迁移 v4.1.93 `pole_switch_element_rules`，只提取 `file_name`。
+
+# v4.1.93 - 麦加柱上开关 / 柱上变压器改为用户维护图元名单
+
+- 柱上开关模型不再依赖【图元管理】LBS / SEC / AR 分类；改为用户维护精确 devref 图元文件名单，每个图元同时配置 AR/LBS/SEC 设备族用于 13502 多子设备消歧。
+- 麦加默认柱上开关图元：`SEC_S.zwk.icn.g`、`SEC_NON.zwk.icn.g`、`SEC_NON_H.zwk.icn.g`、`AR_NON_H.zwk.icn.g`。
+- 柱上变压器模型不再依赖【图元管理】TRANSFORMER_OH 分类；改为用户维护精确 devref 图元文件名单，默认 `Transformer_OH.pb.icn.g`。
+- 两个模型配置页新增图元名单维护，可添加、删除、恢复麦加默认；配置保存到本地用户设置。
+- 柱上开关硬排除 `RMU_*` 图元，避免环网柜内部 LBS/Breaker 因误配置进入柱上开关模型。
+- FUSE 的最近柱上变压器识别同步复用用户维护的柱上变压器图元名单。
+- 原有名称距离、Text 一对一、数据库 NAME 唯一性、KeyID 与安全副本回写规则保持不变。
+
+# v4.1.92 - 麦加柱上变压器固定图元优先识别
+
+- 柱上变压器优先精确识别 `Transformer_OH.pb.icn.g`，命中后直接作为柱上变压器。
+- `TRANSFORMER_OH` 图元分类调整为第二级兜底。
+- 柱上开关模型显式排除该固定图元，即使旧图元管理配置误标为 LBS/SEC/AR 也不会重复识别。
+- 跨模型名称 Text 锁同步认可固定图元，保证柱上变压器与柱上开关不重复占用同一个 Text。
+
+# v4.1.91 - channel_status 距边数值完整显示
+
+- 修复 channel_status “距边” SpinBox 在高 DPI / 大字体环境下后缀 `px` 被裁切、只显示为 `p` 的问题。
+- 单功能 channel_status 移动页和组合处理页统一把距边输入框宽度从 100 调整为 140，确保 `0~1000 px` 均可完整显示。
+- 保留 v4.1.90 的深绿色高对比上下按钮和全局禁用滚轮改值规则。
+
+# v4.1.91 - SpinBox 上下按钮高对比优化
+
+- 优化全程序 QSpinBox 的上/下微调按钮：由浅灰背景改为与应用统一的深绿色按钮，现场显示器和 Windows 高 DPI 下更清晰。
+- 上/下按钮使用白色箭头图标，并补充 hover/pressed 状态；按钮宽度和输入区右侧留白同步调整，避免数值与按钮重叠。
+- 仅调整视觉和可点击性；v4.1.88 起的“鼠标滚轮不修改 ComboBox/SpinBox 值、继续滚动页面”规则保持不变。
+
+# v4.1.89 - 组合处理 Poke 参数补充全选 / 全部取消
+
+- 「图形工作区 → 组合处理（一键）」的 `Poke 参数` 区新增“全选”和“全部取消”。
+- “全选”同时勾选主网馈线标题 Poke 与 SMART / SMR 智能 RMU Poke；“全部取消”同时取消两项。
+- 组合任务运行期间这两个批量选择按钮会与其它处理参数一起禁用，避免执行过程中修改配置。
+- 原有组合处理步骤区的“全选 / 全部取消”保持不变，两组勾选区域现在都有一致的批量选择操作。
+
+# v4.1.88 - 图形组合处理流水线 + 全局禁用控件滚轮修改
+
+- 图形工作区新增“组合处理（一键）”：可勾选环网柜网络图元清理、channel_status 移动、Poke 跳转，按固定顺序作用于同一份 Workspace 安全副本。
+- 每个 G 文件只有全部勾选步骤成功后才发布到最终 g_output；单文件失败不生成半成品，并继续处理其它文件。
+- 组合处理生成统一 HTML/CSV 总报告，同时保留每个文件各步骤的详细报告。
+- 全程序拦截 QComboBox / QAbstractSpinBox 的鼠标滚轮修改；滚轮继续用于页面滚动，点击和键盘编辑不受影响。
+
+# v4.1.87 - 图形工作区本地文件源自适应高度
+
+- 修复图形工作区选择“本地文件 / 目录”时仍按隐藏 SSH 页面高度预留空间、产生大块空白的问题。
+- 文件来源页改为只根据当前可见页计算 `sizeHint/minimumSizeHint`：本地模式自动收缩为单行路径选择；切到 SSH 时再自动展开完整 SSH 参数、远程文件表。
+- Windows 高 DPI 下切换本地/SSH来源后主动刷新布局几何，避免残留旧高度。
+- 仅调整图形工作区文件来源布局；Poke、网络图元清理、channel_status 移动和文件处理逻辑不变。
+
+# v4.1.86 - 图形工作区运行修复与导航顺序调整
+
+- 修复图形工作区多个任务在文件准备阶段调用已删除 `_refresh_poke_source_summary()` 所导致的运行时异常。
+- 图形任务文件准备完成后统一调用现有 `_sync_poke_source_from_workspace(rebuild_remote=False)`，本地与 SSH 两种来源均可正常继续执行。
+- 左侧菜单将“图形工作区”移动到“模型工作区”正下方；数据库、图元管理顺延。
+- 同步修复模型工作区“数据库设置”按钮的导航行号。
+
+# v4.1.85 - 麦加环网柜 channel_status 状态点移动
+
+- 图形工作区新增“环网柜 channel_status 移动”，与 Poke 跳转、环网柜网络图元清理并列在“图形处理类型”中。
+- 处理算法直接复用用户提供的 G File Studio v2.18.244 现场逻辑：只认有效 RMU 外框（BusDis + CBreakerDis + ZhaiWaiJieDiDaoZha），优先取中心位于外框内的 `channel_status.zt.icn.g:channel_status` Status；兼容旧图时允许外框扩展 40 像素；多个候选取距 BusDis 中心最近者，同一 Status 只允许归属一个 RMU。
+- 支持 8 个框内目标位置：左上、上中、右上、左中、右中、左下、下中、右下，并支持 0~1000 px 距边设置；默认左下角、5 px，与 G File Studio 默认保持一致。
+- 只对 channel_status Status 做刚体平移，更新其 `x/x1/x2/cx/mergex`、`y/y1/y2/cy/mergey` 和 `d` 路径坐标；不修改 ID、devref、颜色、尺寸、RMU 外框、母线、设备、文字或连接线。
+- 已用用户提供的 4 个麦加现场 G 文件与 G File Studio v2.18.244 做逐 Status 坐标对比，结果完全一致；原始 G 文件 SHA256 保持不变。
+- 仍采用图形工作区共用的本地/SSH只读来源，只写 Workspace `g_output` 安全副本，并输出 HTML/CSV 移动报告。
+
+# v4.1.84 - 麦加环网柜网络图元清理
+
+- 图形工作区新增“环网柜网络图元清理”任务，与 Poke 跳转并列在“图形处理类型”下。
+- 固定删除 `<Status>` 图元的三类 devref：`NariPd_Generator.zt.icn.g`、`NariPd_Temporary_Cable.zt.icn.g`、`NariPd_General_Note.zt.icn.g`；兼容现场需求中出现的 `General_Note.zt.icg.g` 旧拼写。
+- 规则不做距离、RMU 名称或数据库推断。对用户提供的 4 个麦加样本核对后，三类图元数量与 RMU 数量逐文件完全一致：125/74/41/16，每个 RMU 各一组 G/L/N。
+- 图形工作区的本地/SSH只读文件来源提升为所有图形任务共用；原始 G 文件不修改，清理结果只写 Workspace `g_output` 安全副本，并输出 HTML/CSV 清理报告。
+
+# v4.1.83
+
+- 将左侧“图形处理”改为与模型工作区一致的一级“图形工作区”，使用标准侧栏配色、对齐和选中状态。
+- 删除左侧 Poke 二级菜单和折叠分组，避免导航层级继续膨胀。
+- 图形工作区新增“图形任务 / 图形处理类型”下拉编排，当前提供“Poke 跳转处理”，并预留后续其它图形操作。
+- 新增“当前图形帮助”，Poke 文件源、执行逻辑、SSH 只读和 Workspace 安全副本规则保持不变。
+
+# v4.1.82
+
+- 【图形处理】左侧导航最终采用“可折叠一级分组 + 缩进二级功能”的结构，视觉层级参考现场批处理工具。
+- 一级分组增加 `▾ / ▸` 箭头、绿色同主题圆角边框；不使用蓝黑色卡片，整体配色继续与现有主侧栏保持一致。
+- 【Poke 跳转】保持二级缩进，当前功能仍使用原金色选中态；运行历史/设置/帮助继续位于分组之后。
+- 分组自定义行设置显式高度，避免 Windows 高 DPI 下出现重叠覆盖。
+- 本版只调整左侧导航视觉与折叠行为，不改变 Poke、主网设备、Bus 或数据库关联逻辑。
+
+# v4.1.81
+
+- 配网主站设备安全回写统一采用现场既有主网规则：CBreaker / Disconnector / GroundDisconnector / Bus 的 `app` 均固定为 `100000`；CBreaker `state=41`，Disconnector / GroundDisconnector `state=31`，Bus `state=10`；`voltype` 使用数据库最新 `BV_ID`，`p_ReportType=1`，`keyid=Expected KeyID`。
+- 执行【模型关联】前会对每个文件重新运行主网数据库/上下文校验；只有执行前解析出的 table/domain/device/Expected KeyID 与用户校验阶段确认的目标完全一致时才允许写回。目标变化、目标消失或不再唯一时直接跳过并报告，不会静默改绑到新目标。
+- 左侧导航按现场要求简化为普通一级“图形处理” + 缩进二级“Poke 跳转”；“图形处理”与模型工作区/数据库/图元管理保持完全相同的一级对齐、颜色和高度，不再使用单独卡片或整体缩进。
+
+# v4.1.80
+
+- 左侧【图形处理】分组整体向右缩进，不再与一级菜单保持同一横向基线；视觉参考现场批处理分组。
+- 【Poke 跳转】在分组内部再次缩进，形成清晰的“一级分组 → 二级功能”层级。
+- 颜色继续使用主侧栏绿色体系；分组标题使用同色系深绿圆角块，Poke 选中态继续使用全局金色。
+
+
+- 图形处理二级导航统一回主侧栏配色：父级/子级使用 `#004E3D / #006650`，选中 Poke 子项使用与主导航一致的金色 `#B58A36`。
+- 删除蓝黑色 `navGroupButton` 卡片视觉，父级只承担展开/收起，不与子页同时高亮。
+- 复合导航背后的 QListWidgetItem 不再绘制可见标题，修复 Windows 高 DPI 下的文字叠层/露底。
+- 业务逻辑不变。
+
+# v4.1.78
+
+- 主网 `Bus` 保持固定使用 `410 / busbarsection`、Domain=`40`，但关联范围从 `BAY_ID` 改为 **只检查变电站 `ST_ID`**；Bus 不再校验或要求 410 记录的 `BAY_ID` 与当前主网框一致。
+- 同一主网框有多个 Bus 时，从该 `ST_ID` 下未使用的 410 记录中任意一对一分配；已有正确的 410/Domain 40 关联优先保留。为保证重复运行稳定，实际实现使用 G XML 顺序 + 数据库 ID 顺序作为“任意”配对顺序。
+- 只要同站 410 可用记录数不少于图形 Bus 数即可处理；数据库同站记录多于图形 Bus 时只取所需数量，少于图形 Bus 时阻断并报告记录不足。
+- CBreaker / Disconnector / GroundDisconnector 仍保持现有 BAY_ID 关联规则不变；Bus 回写属性继续使用 `app=100000`、`p_ReportType=1`、`state=10`、数据库 `BV_ID` 和 410/Domain 40 KeyID。
+
+# v4.1.77
+
+- 修复左侧【图形处理】二级菜单在 Windows / 高 DPI 下发生重叠、覆盖【运行历史】的问题。
+- 【图形处理】分组标题与【Poke 跳转】改为同一个 QListWidget 复合行，由单一高度统一管理，不再使用两个独立 setItemWidget 行。
+- 展开时固定为“圆角分组标题 + 缩进子菜单”，收起时只保留分组标题；切换语言或缩放后同步重算组高度。
+- 右侧 Poke 页面、Bus 关联、数据库访问及所有模型业务逻辑均保持 v4.1.76 不变。
+
+# v4.1.76
+
+- 左侧“图形处理”改为可折叠的分组式二级菜单，视觉参考现场批处理工具：圆角分组标题 + 展开/收起箭头 + 下方缩进子功能，不再把“图形处理”和“Poke 跳转”渲染成两个同级大按钮。
+- “图形处理”分组标题只负责展开/收起；点击“Poke 跳转”进入现有右侧全宽 Poke 页面，右侧业务界面与处理逻辑保持不变。
+- 当前进入 Poke 功能时，分组采用轻量激活态，不再出现大面积金色父菜单块；后续新增图形处理小功能可继续按同一分组结构向下扩展。
+- 主网 Bus、Poke、模型校验、数据库关联和安全回写规则均保持 v4.1.75 不变。
+
+# v4.1.75
+
+- 主网 `Bus` 继续固定使用 `410 / busbarsection`、Domain=`40`，但关联方式调整为 **Bay 内按数量一对一任意配对**：同一主网框内有 N 个 Bus，数据库该 BAY_ID 下有 N 条 410 记录时即可关联，不再要求 410 唯一。
+- “任意配对”使用稳定顺序实现（优先保留已经正确的 410/Domain 40 关联，其余按 G XML 顺序与数据库 ID 顺序配对），避免同一文件重复校验时结果随机变化。
+- 如果 G 图 Bus 数量与数据库 410 数量不一致，则阻断 Bus 自动关联并报告数量差异，不猜测、不复用同一 410 记录。
+- 参考现场既有已关联 G 文件，主网 Bus 安全副本回写使用 `app=100000`、`p_ReportType=1`、`state=10`、`voltype=busbarsection.BV_ID`、`keyid=410/Domain40 Expected KeyID`。
+
+# v4.1.74
+
+- 图形处理改为真正的主侧栏二级菜单：`Poke 跳转` 直接显示在 `图形处理` 下方，右侧仍保持全宽 Poke 工作页，不再增加页面内嵌导航。
+- 配网主站设备关联新增主网 `Bus`：固定使用 `410 / busbarsection`，Domain=`40`。
+- `Bus` 与 `CBreaker` 共用已确认的主网 Bay 上下文：通过白色馈线标题确定 405 站点与唯一 406 `BAY_ID`，再按该 `BAY_ID` 查询 410；只有唯一 busbarsection 才允许关联。
+- 同一个主网 Bay 内如果 G 图由多个 `Bus` 图形片段表示同一物理母线段，允许这些 Bus 图元写入同一个 410 设备 KeyID；数据库同一 Bay 存在多条 410 时不按顺序/距离猜测，直接阻断。
+- Bus 回写继续使用 `app=6500000`、`p_ReportType=1`、`state=10`、数据库 `BV_ID -> voltype`，KeyID 按 `410 + Domain 40` 校验后写入 Workspace 安全副本。
+
+# v4.1.73
+
+- 【图形处理】页面取消左侧嵌套二级绿色导航，Poke 跳转改为整页全宽布局，避免“画中画”视觉。
+- 将模型工作区的本地/SSH只读文件来源能力直接加入 Poke 跳转页面：来源切换、SSH 参数、测试/保存、刷新远程 G 列表、搜索、选择、下载均可在当前页面完成。
+- Poke 页面与模型工作区共用同一份文件来源和远程文件选择状态；两边选择保持同步，不改变 SSH 只读安全策略。
+- 远程 G 文件表在图形处理页面按需刷新，隐藏页面不重复重建大表，避免无意义的 UI 性能损耗。
+- Poke 处理逻辑、主网馈线跳转规则、智能 RMU Poke 规则及 Workspace 安全副本策略保持不变。
+
+# v4.1.72
+
+- 麦加现场版新增左侧一级【图形处理】模块，二级功能新增【Poke 跳转】。
+- 主网馈线标题（如 GVCM-AH304）通过 405 / SUBSTATION.NAME 精确站名匹配读取 GRAPH_NAME，生成 `<GRAPH_NAME>?locateLabel=AH304&&scaleFlag=true`；名称上没有相关 Poke 时自动新增，已有相关 Poke 时复用/修复并清理重复项。
+- Poke 几何严格包住已识别的馈线标题 Text，Poke 运行属性复制 G File Studio v2.18.240 的 RMU Poke 基线。
+- 智能 RMU（SMART / SMR）同步加入 Poke 跳转：复用麦加 RMU 识别，按 `DMS_COMBINED_DEVICE.NAME -> FEEDER_ID -> DMS_FEEDER_DEVICE -> SUBSTATION -> SUBCONTROLAREA` 生成 `<区域>-<站>-<馈线>-<RMU>.com.pic.g`。
+- 图形处理沿用模型工作区的本地/SSH只读文件来源；任何 Poke 修改只写入 Workspace `g_output` 安全副本，并生成 HTML / CSV Poke 报告。
+
+# v4.1.71
+
+- 麦加所有模型的 HTML 报告统一新增“图形馈线”结果表，直接列出当前 G 图中识别到的全部馈线及 13500 / dms_feeder_device 数据库匹配结果。
+- 所有模型导出 CSV 时同步生成独立的 `*_图形馈线.csv`（英文环境为 `*_graph_feeders.csv`），字段仅保留 G 文件、图形馈线、数据库 FEEDER_ID/CODE/NAME/ST_ID 和匹配结果。
+- 图形馈线即使数据库未找到或出现多条，也会保留在报告中并显示 NOT_FOUND / MULTIPLE 等结果，不再因为数据库未确认而从报告中消失。
+- 馈线模型 HTML/CSV 隐藏识别方式、判定依据、拓扑归属证据等内部算法字段，只展示结果；“任选一条馈线创建/关联 13503 馈线段”的执行规则保持不变。
+- 模型校验和模型关联完成后的最终报告均携带相同的图形馈线结果。
+
+# v4.1.70
+
+- 麦加环网图馈线识别改为严格主网链路：最内层含 CBreaker 的 Bay 框 → 最近主网标题 → substation.NAME → substation.ID → dms_feeder_device.ST_ID → 馈线 NAME/CODE。
+- 主网标题支持 GVCM-AH304 / ARF4-AH348 / ARF4-AH3101 这类完整馈线编码。
+- 每次执行任意模型时，Console 统一输出当前 G 图全部数据库确认馈线（标题、变电站、ST_ID、馈线名、FEEDER_ID）。
+- 馈线模型从完整馈线列表中取第一条作为整图目标；全部 FeedLine 归入该馈线，缺少的 13503 仍必须全部创建后再关联。
+- 文件名 token、根 facID、自由 Text 不再作为麦加环网图主网馈线清单的权威来源。
+
+# v4.1.69 - 2026-09-29
+
+- 麦加馈线模型放宽环网图识别：当前 G 图只要能唯一确认任意 1 条真实馈线，就足以作为整张图的目标馈线。
+- 馈线识别证据按当前 G 图主网 Bay、当前 G 文件名中的馈线 token、当前 G 图严格格式 Text 依次尝试；不再要求识别环网图内全部馈线。
+- 一旦找到 1 条馈线，当前 G 图全部 FeedLine 都归入该馈线；优先使用该馈线已有未占用 13503，数量不足时仅创建缺少数量，再执行关联。
+- `MAKKAH_RING_FEEDER_NOT_FOUND` 仅在当前 G 图通过以上三种证据仍无法唯一确认任何馈线时出现。
+
+# v4.1.68 - 2026-09-29
+
+- 修复模型类型切换时“上一模型/上一说明样式短暂闪现”的问题。
+- 模型切换流程恢复为与吉达 v4.1.96 一致：解除旧高度 → 切换 QStackedWidget 页面 → 激活新页面布局 → 下一事件循环校准最终高度。
+- 移除 v4.1.67 新增的 QStackedWidget `setUpdatesEnabled(False/True)` 冻结重绘逻辑，避免同步 `currentChanged` 高度计算与二次强制重绘叠加造成闪烁。
+- 仅修改界面切换时序，不改变麦加任何模型识别、数据库匹配、关联和安全回写规则。
+
+# v4.1.67 - 2026-09-29
+
+- 模型关联逻辑说明区的显示结构、卡片最大高度、边距和间距对齐吉达 v4.1.96。
+- 模型切换改为原子式页面切换：切换期间暂停 QStackedWidget 重绘，完成新页面布局和高度计算后再一次性显示，避免短暂闪回上一模型。
+- 仅调整 UI 显示与切换行为，麦加既有识别、数据库关联和安全回写规则不变。
+
+# v4.1.66 - 2026-09-29
+
+- UI only: restored the model workflow explanation cards to the exact Jeddah v4.1.93 QLabel layout behavior.
+- Removed CompactLogicLabel from RMU, pole-switch, pole-transformer, fuse, feeder and master-station explanation panels.
+- Workflow cards now use normal word-wrapped QLabel + QSizePolicy.Maximum so each row follows its natural text height without large blank gaps.
+- Makkah business rules and association algorithms are unchanged.
+
+# v4.1.65 - 2026-09-29
+
+- 修复模型“自动关联完整逻辑”说明卡片在宽屏下文字只有一行但卡片仍保留多行高度的问题。
+- 新增 CompactLogicLabel：卡片按当前实际宽度重新计算 WordWrap 所需高度，单行说明只保留文字高度和少量内边距，多行内容才自动增高。
+- RMU、配网主站、柱上开关、柱上变压器、熔断器、馈线说明卡片统一使用紧凑自适应高度；业务识别和关联逻辑不变。
+
+# v4.1.64 - 2026-09-29
+
+- 麦加模型工作区的只读“自动关联完整逻辑”说明区显示样式与吉达 v4.1.93 对齐：说明框按工作区宽度横向展开，不再使用居中固定最大宽度。
+- 柱上开关、柱上变压器、熔断器说明控件直接采用吉达相同的 QGroupBox 结构；卡片边距、间距与 padding 同步吉达。
+- 配网主站设备、馈线说明区移除居中限宽；RMU 双栏说明区按吉达比例和卡片样式显示。
+- 本版本仅调整界面展示，不改变麦加现有设备识别、名称匹配、数据库关联及安全回写逻辑。
+
+# v4.1.63 - 2026-09-29
+
+- 修复模型逻辑说明面板因仅设置 maximumWidth 而被 Qt 压缩成狭窄竖条的问题。
+- 柱上开关、柱上变压器、熔断器、配网主站、馈线说明面板改为 900~1180 px 的可扩展居中布局；RMU 双栏说明区同步扩大到 680~900 px。
+- 本次仅调整 UI 布局，不改变任何设备识别、数据库匹配、KeyID 或写回逻辑。
+
+# v4.1.62 - 2026-09-29
+
+- 移除 RMU 多名称方向选择时的提示弹窗；保存设置时不再打断用户操作。
+- RMU 实际名称匹配、全局最近距离、Text 一次性占用和 200 距离规则保持不变。
+
+# v4.1.61 - 2026-09-28
+
+- Makkah device-name matching is now global-nearest within each model: RMU, pole switch and pole transformer all use rectangle-to-rectangle minimum-edge distance only, with a hard 200-unit limit.
+- Text ownership is strictly one-to-one. Once a Text XML ID is assigned to one device in the current model run, it is removed from the candidate pool and cannot be reused by another device. Identical text content with different Text IDs remains independently assignable.
+- RMU keeps its dedicated noise exclusions (pure decimals, phone-like values, hyphenated strings, NOP/SFI/DAS/OK and descriptive RMU/SMART labels); the old pure-integer priority and TOP/RIGHT/GLOBAL priority no longer affect ownership.
+- Main-network Bay captions also use one-to-one nearest ownership and a 200-unit maximum while retaining their white/no-background feeder-title rule.
+- RMU internal breaker visible-label distance now uses rectangle minimum-edge distance instead of center-point distance.
+- Read-only workflow panels are narrower and more compact so they do not occupy the full work-area width.
+
+# v4.1.59 - 2026-09-28
+
+- 修复熔断器模型校验完成后导出 HTML 报告时报 `NameError: _table_interaction_script is not defined` 的问题。
+- 恢复公共 HTML 表格筛选/行选择脚本，熔断器报告可正常生成并打开。
+- 不修改任何 RMU、柱上开关、柱上变压器、熔断器、馈线的识别或关联业务逻辑。
+
+# v4.1.58 - 2026-09-28
+
+- Unified all Makkah model workflow explanations to the same read-only step-card layout used by the reference Jeddah screen.
+- RMU and main-station descriptions were split from long paragraphs into separate numbered cards; pole switch, transformer, fuse and feeder cards now use the same spacing/padding.
+- This release changes presentation only; model discovery, database association and writeback logic remain unchanged from v4.1.57.
+
+# v4.1.57 - 2026-09-28
+
+- Makkah unified all device-to-name geometry to rectangle minimum-edge distance; removed center/anchor distance from RMU, pole switch, pole transformer, fuse-derived transformer naming and main-station Bay captions.
+- Makkah feeder model simplified: select the first database-unique feeder actually present in the current ring drawing, assign every FeedLine in that G file to that feeder, create missing 13503 sections as needed, and relink old cross-feeder section links to the selected feeder.
+- Rewrote model pages with explicit read-only step-by-step association rules.
+
+# v4.1.56 - Makkah pole-device alignment with Jeddah
+
+- Pole switch recognition/name allocation follows Jeddah rules; Makkah DB association remains NAME-only and does not validate FEEDER_ID.
+- Pole transformer recognition/name allocation follows Jeddah TRANSFORMER_OH rules (numeric white/no-background, TOP→RIGHT→GLOBAL, max 300); DB association uses unique 13505.NAME only.
+- Added FUSE model based on Jeddah nearest-Transformer_OH exclusive assignment; Makkah uses unique 13505.NAME and 13513.NAME without FEEDER_ID validation.
+- Added FUSE UI selection, reports, CSV/HTML export, execution workflow, and read-only rule descriptions.
+
+## v4.1.54
+
+- Added root-level `setup.ps1` for Windows local setup.
+- `setup.ps1` detects Python 3.11+, creates or reuses `.venv`, upgrades pip, installs `requirements.txt`, and starts the application by default.
+- Use `./setup.ps1 -NoRun` to prepare the environment without launching the application.
+
+## [4.1.50] - 2026-09-27
+
+### Makkah pole-switch exact NAME association
+- Pole-switch graphical names now match only `dms_combined_device.NAME` (table 13501) by exact trimmed string.
+- Removed the previous `CODE` fallback; `FEEDER_ID` is not queried or validated for Makkah pole-switch association.
+- Exactly one NAME match continues to the existing 13502 child-device resolution and KeyID association; zero or multiple NAME matches are blocked.
+- Existing pole-switch device discovery, name format/color/background filters, 300-unit distance limit, and Text-ID one-time assignment remain unchanged.
+
+## [4.1.48] - 2026-09-27
+
+### Makkah central configuration parity with Jeddah
+- Ported only the Jeddah v4.1.65 central-configuration ownership/save/sync workflow into the Makkah build; RMU, feeder, main-station, pole-device, EFI and other site-specific business logic remain unchanged.
+- Startup is local-cache only and performs no central/Oracle/SSH connection. A central pull occurs only after the operator explicitly clicks `连接并同步中央配置`.
+- Central shared files use `/home/up8000/nari-international/distribution-model-manager/config` with `element_marks.json`, `database.json`, `file_server.json`, and `instance.json`.
+- Normal clients may edit/test/refresh and save local database, SSH/file-server and element-mark settings. Only publishing shared configuration to the central repository is Admin-gated.
+- Any machine may explicitly take over Admin. Takeover changes only `instance.json`; it does not automatically pull or publish database/file-server/element configuration.
+- Active Admin sessions check only `instance.json` every 10 seconds. If another client takes ownership, the old Admin session automatically downgrades while retaining local edit/save/sync rights.
+- Admin ownership is protected by `admin_machine_id` + `admin_epoch`; publish/release revalidate ownership server-side to block stale sessions.
+- Central writes use a lock directory, temporary JSON files, server-side atomic replacement, directory reuse, and mode 0600 for shared config files.
+- Complete local settings are persisted in the per-user cache outside the application/workspace, while `workspace/config.json` remains a compatibility copy.
+- Element Management now exposes the same three independent Jeddah actions: local-cache save, Admin publish to central, and manual central pull.
+
+## [4.1.47] - 2026-09-27
+
+### Makkah RMU numeric-name priority
+- RMU cabinet-name selection now prefers a pure integer label over pure-letter or alphanumeric candidates on the same configured side of the same cabinet.
+- The existing geometry rules still apply first: candidates must be in the configured direction and within the 200-unit RMU name-distance limit.
+- Decimal numeric annotations such as `21.449047` and `39.555820` remain hard-excluded; telephone-like long numbers beginning with `0` and hyphenated labels remain excluded as before.
+- Example: for nearby labels `902`, `RMU`, `21.449047`, and `39.555820`, the resolved RMU name is `902`.
+- The new priority is enabled only by the RMU model and does not change pole-switch, pole-transformer, feeder, or generic parser behavior.
+
+## [4.1.46] - 2026-09-27
+
+### Makkah RMU name noise filtering
+- RMU cabinet-name discovery now rejects telephone-like long pure-numeric labels that start with `0` (for example `0551491216`).
+- RMU cabinet-name discovery now rejects any candidate containing `-`, so engineering labels such as `V2-W-H-0008` and `V2-W-M-H-0009` cannot be selected as RMU names.
+- Normal numeric cabinet names such as `42213` remain valid.
+- The new rules are scoped to the RMU model cabinet-name recognition and do not change feeder, pole-switch, or pole-transformer name rules.
+
+## [4.1.45] - 2026-09-27
+
+### RMU PWBH EFI discovery
+- Replaced the hard-coded `NariPd_Normal.pwbh.icn.g` discovery rule with the Element Management classification `RMU_PWBH_EFI`.
+- At runtime the RMU module first reads element-catalog records carrying `RMU_PWBH_EFI`, then uses those marked definition file names/paths to recognize `pwbh` instances in the current G drawing.
+- Only matching `pwbh` instances already inside the current RMU frame are treated as EFI; matching symbols outside the RMU are ignored.
+- The downstream EFI association logic is unchanged: current RMU ownership, table 13533 by default, exact `CODE=EFI INDICATOR`, Domain 40 by default, KeyID verification, and `keyid1` writeback remain intact.
+- Removed the old hard-coded filename fallback: without an `RMU_PWBH_EFI` mark, the file is not auto-classified as EFI.
+- Added focused regression tests for classified-file matching, no legacy fallback, non-EFI classification rejection, and RMU-frame scoping.
+
+## [4.1.44] - 2026-09-27
+
+### Packaging
+- Makkah build artifacts now include the site tag `makkah` in the PyInstaller application name, dist folder, EXE name, and release ZIP name.
+- `build_exe.ps1` now produces `Distribution_Model_Manager_makkah_v<version>.zip` to avoid mixing site-specific releases.
+
+# v4.1.43
+
+- Pole-switch and pole-transformer name resolution no longer uses global device/Text ownership during discovery. Target devices are processed one by one.
+- Name format, configured color class, configured background state, and module distance limit are hard candidate gates before nearest-name selection (pole switch <= 300 G units; pole transformer <= 200 G units).
+- Text allocation identity is the Text XML id (with xml_index fallback only when no id exists): once a Text id is assigned, it is removed from all later device calculations.
+- Equal visible name content may still be assigned multiple times when it comes from different Text ids, matching drawings that legitimately contain repeated device names.
+- Persisted module-specific name settings (`pole_switch_name_*` / `transformer_name_*`) are honored as a fallback when generic active-panel `name_*` values are absent.
+- Updated the pole-switch and pole-transformer settings descriptions to document one-device-at-a-time matching and one-time Text-id allocation.
+- The previously discarded Element Management `.g`-only display requirement remains excluded.
+
+# v4.1.42
+
+- Added hard name-distance limits in G-file coordinate units: RMU cabinet name <= 200, pole-switch name <= 300, and pole-transformer name <= 200.
+- Candidates beyond the corresponding limit are removed before nearest-name ranking, so a far-away label can never be selected as a fallback.
+- RMU selected-direction recognition now enforces `RMU_LABEL_SEARCH_MAX_DISTANCE`; the optional auto-cluster path is capped by the same limit.
+- Pole switch and pole transformer share the same global Text resolver but use independent hard limits (300 / 200).
+- No Element Management `.g`-only filtering change is included; that discarded requirement remains excluded.
+
+# v4.1.41
+
+- Reworked Makkah main-network Bay recognition around the actual drawing structure: only the innermost rectangle containing a `CBreaker` is considered a main-network Bay frame.
+- Bay captions must be the nearest feeder-like `Text` within 120 G units, with white visible text color and no background. Labels such as `MNA4-12` / `ARF2-07` are parsed into station and feeder hints; red/background/far-away captions are rejected instead of borrowed from adjacent Bays.
+- Added explicit station -> feeder -> Bay resolution. Station table 405 is resolved from the station prefix, feeder table 13500 is matched only inside that station, and Bay table 406 is matched from the resolved feeder identity.
+- The unique breaker row in table 407 is used to cross-check the resolved station/BAY_ID. A missing or non-unique breaker blocks automatic association.
+- Main-network devices inside a confirmed frame are now associated by the same BAY_ID: CBreaker -> 407, Disconnector -> 408, GroundDisconnector -> 409. `key_name` is no longer required when the Bay contains a unique row of that device type; ambiguous same-type Bay records are blocked instead of guessed.
+- Objects outside a qualified CBreaker frame are ignored by the main-station module, avoiding accidental association of ring-side switches that are not part of a main-network Bay.
+- Feeder source-anchor discovery now uses the same CBreaker-frame + white/no-background title rule, so source-feeder counting and main-station association share one visual business rule.
+- Added focused v4.1.41 regression tests for frame qualification, white/no-background caption filtering, direct BAY_ID association without `key_name`, ambiguity blocking, and far-caption rejection.
+
+# v4.1.40
+
+- Added Makkah multi-feeder ring **Feeder Ownership Resolution** for composite G drawings.
+- Main-station `CBreaker` + nearby feeder title is resolved against feeder table 13500 and used as a strong source anchor. Duplicate source breakers for the same database feeder are deduplicated by FEEDER_ID when counting feeders.
+- Trusted already-associated RMU / pole-switch / pole-transformer devices provide local FEEDER_ID evidence. Global nearest-device distance is no longer the primary ownership rule for multi-feeder drawings.
+- NOP labels are converted into propagation barriers. Different feeders may exist on opposite sides of a NOP without becoming a conflict.
+- Missing XML connectivity is repaired conservatively: explicit `link/node_area` first, then only endpoint-to-endpoint <= 3 G units and endpoint-to-segment <= 2 G units.
+- A strict connected component with more than one feeder becomes `CONFLICT`; a component with no reliable feeder evidence becomes `UNRESOLVED`. Both are blocked from automatic write-back.
+- Composite drawings continue to leave root `facID` untouched; each FeedLine is grouped under its resolved FEEDER_ID and shares that feeder's section pool.
+- Feeder reports now expose ownership status/method/evidence, candidate FEEDER_IDs, confirmed source-feeder count, NOP boundary count, and strict geometry repair count.
+- Added focused v4.1.40 tests for NOP splitting, conflict blocking, strict endpoint repair, ownership-based validation without global nearest-device dependency, and multi-feeder grouping.
+
 # v4.1.39
 
 - 馈线识别来源 UI 改为按当前模式显示：FACID 仅显示 FACID 相关状态；文件名模式仅显示批量变电站输入；人工模式仅显示人工目标馈线输入。

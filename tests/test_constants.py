@@ -6,7 +6,7 @@ from dmm.config.constants import (
 
 
 def test_rmu_label_defaults():
-    assert RMU_LABEL_SEARCH_MAX_DISTANCE == 120.0
+    assert RMU_LABEL_SEARCH_MAX_DISTANCE == 300.0
     assert RMU_LABEL_EDGE_TOLERANCE == 20.0
 
 

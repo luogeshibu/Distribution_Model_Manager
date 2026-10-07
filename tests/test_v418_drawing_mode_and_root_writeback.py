@@ -171,9 +171,10 @@ def test_apply_root_candidate_ignores_blocked_feedline_region(tmp_path):
     assert result['database_created_count'] == 0
 
 
-def test_feeder_settings_ui_exposes_explicit_drawing_type_choice():
+def test_feeder_settings_ui_uses_fixed_makkah_ring_workflow_without_drawing_mode_choice():
     src = Path('src/dmm/ui/widgets/feeder_settings.py').read_text(encoding='utf-8')
-    assert '图纸类型确认' in src
-    assert '强制单馈线图（本次文件/目录）' in src
-    assert '强制组合图（本次文件/目录）' in src
-    assert 'feeder_drawing_mode' in src
+    assert '麦加馈线自动关联逻辑（只读说明）' in src
+    assert '图纸类型确认' not in src
+    assert '强制单馈线图（本次文件/目录）' not in src
+    assert '强制组合图（本次文件/目录）' not in src
+    assert '列出本图全部已确认馈线' in src

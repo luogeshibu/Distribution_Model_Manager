@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
+import math
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -57,6 +58,17 @@ class Box:
             and self.right + tolerance >= other.right
             and self.bottom + tolerance >= other.bottom
         )
+
+    def edge_distance(self, other: "Box") -> float:
+        """Shortest Euclidean distance between the two rectangle edges.
+
+        Overlapping/touching rectangles have distance 0.  This is the only
+        device-to-name distance metric used by the Makkah models; center-point
+        and Text-anchor distances are intentionally not used.
+        """
+        dx = max(other.left - self.right, self.left - other.right, 0.0)
+        dy = max(other.top - self.bottom, self.top - other.bottom, 0.0)
+        return math.hypot(dx, dy)
 
 
 @dataclass
@@ -155,10 +167,13 @@ class GParser:
         self,
         required_rmu_tags: Iterable[str] | None = None,
         label_regex: str = r"^\d+$",
-        max_distance: float = 120.0,
+        max_distance: float = 200.0,
         overlap_tolerance: float = 20.0,
         excluded_rmu_name_strings: Iterable[str] | str | None = None,
         exclude_numeric_decimal_rmu_names: bool = False,
+        exclude_phone_like_rmu_names: bool = False,
+        exclude_hyphenated_rmu_names: bool = False,
+        prefer_pure_numeric_rmu_names: bool = False,
     ):
         self.required_rmu_tags = set(required_rmu_tags or {
             "CBreakerDis", "ZhaiWaiJieDiDaoZha", "BusDis"
@@ -180,6 +195,25 @@ class GParser:
         # parser users keep their existing lexical rules.
         self.exclude_numeric_decimal_rmu_names = bool(
             exclude_numeric_decimal_rmu_names
+        )
+        # Makkah RMU labels are cabinet identifiers. Long pure-numeric labels
+        # beginning with 0 are telephone-like annotations (for example
+        # 0551491216), not cabinet names. Hyphenated engineering labels such
+        # as V2-W-M-H-0009 are also not RMU names. Both gates are opt-in so
+        # other parser users keep their existing lexical behavior.
+        self.exclude_phone_like_rmu_names = bool(
+            exclude_phone_like_rmu_names
+        )
+        self.exclude_hyphenated_rmu_names = bool(
+            exclude_hyphenated_rmu_names
+        )
+        # Makkah cabinet labels can be accompanied by words such as ``RMU``
+        # or other alphanumeric annotations on the same visual side.  When
+        # enabled, an integer-only Text is authoritative over alphabetic or
+        # alphanumeric candidates for the same cabinet.  Decimal numbers are
+        # still rejected by the independent decimal-noise gate above.
+        self.prefer_pure_numeric_rmu_names = bool(
+            prefer_pure_numeric_rmu_names
         )
 
     def parse(self, path: str | Path) -> ParsedG:
@@ -677,6 +711,15 @@ class GParser:
         ):
             return False
 
+        if (
+            self.exclude_phone_like_rmu_names
+            and re.fullmatch(r"0\d{8,14}", value.strip())
+        ):
+            return False
+
+        if self.exclude_hyphenated_rmu_names and "-" in value:
+            return False
+
         if not self.label_re.fullmatch(value):
             return False
         compact = re.sub(r"\s+", "", value).upper()
@@ -690,9 +733,21 @@ class GParser:
         if status_token == "NOP":
             return False
 
-        if compact in {"SMART", "SMR", "G", "I"}:
+        if compact in {"SMART", "SMR", "RMU", "G", "I"}:
             return False
         return True
+
+    def _rmu_name_candidate_priority(self, value: str) -> int:
+        """Return lexical priority for one already-valid RMU name candidate.
+
+        The priority is deliberately opt-in and only enabled by the Makkah
+        RMU module.  Pure integers outrank alphabetic/alphanumeric labels;
+        all other valid candidates keep the existing nearest-distance order.
+        """
+        if not self.prefer_pure_numeric_rmu_names:
+            return 0
+        text = str(value or "").strip()
+        return 0 if re.fullmatch(r"\d+", text) else 1
 
     @staticmethod
     def _rmu_name_pattern(value: str) -> str:
@@ -717,40 +772,37 @@ class GParser:
 
     @staticmethod
     def _auto_name_relation(rect: Box, text_box: Box, direction: str, projection_tolerance: float, max_distance: float):
-        """Return ``(score, gap, axis_offset)`` for one visual side.
+        """Return ``(distance, directional_gap, projection_gap)`` for one side.
 
-        The relation is intentionally based on the text box edge and projected
-        axis, not on rectangle center distance.  This avoids assigning a label
-        in the gap between two adjacent RMUs to the wrong row.
+        Makkah uses rectangle-to-rectangle minimum edge distance only.  The
+        direction check uses rectangle edges/projections and never center-point
+        distance.
         """
+        horizontal_gap = max(rect.left - text_box.right, text_box.left - rect.right, 0.0)
+        vertical_gap = max(rect.top - text_box.bottom, text_box.top - rect.bottom, 0.0)
+        distance = rect.edge_distance(text_box)
+
         if direction == "top":
+            valid = text_box.top < rect.top and horizontal_gap <= projection_tolerance
             gap = rect.top - text_box.bottom
-            axis_offset = abs(text_box.cx - rect.cx)
-            valid = text_box.cy < rect.top and axis_offset <= projection_tolerance
+            projection_gap = horizontal_gap
         elif direction == "bottom":
+            valid = text_box.bottom > rect.bottom and horizontal_gap <= projection_tolerance
             gap = text_box.top - rect.bottom
-            axis_offset = abs(text_box.cx - rect.cx)
-            valid = text_box.cy > rect.bottom and axis_offset <= projection_tolerance
+            projection_gap = horizontal_gap
         elif direction == "left":
+            valid = text_box.left < rect.left and vertical_gap <= projection_tolerance
             gap = rect.left - text_box.right
-            axis_offset = abs(text_box.cy - rect.cy)
-            valid = text_box.cx < rect.left and axis_offset <= projection_tolerance
+            projection_gap = vertical_gap
         elif direction == "right":
+            valid = text_box.right > rect.right and vertical_gap <= projection_tolerance
             gap = text_box.left - rect.right
-            axis_offset = abs(text_box.cy - rect.cy)
-            valid = text_box.cx > rect.right and axis_offset <= projection_tolerance
+            projection_gap = vertical_gap
         else:
             return None
-        if not valid:
+        if not valid or distance > float(max_distance):
             return None
-        # Keep the edge distance bounded, but allow overlapping text boxes.  A
-        # large label can overlap the frame in XML while remaining visually on
-        # the correct side.
-        effective_gap = max(0.0, float(gap))
-        score = effective_gap + float(axis_offset) * 0.08
-        if score > max_distance + projection_tolerance * 0.08:
-            return None
-        return score, float(gap), float(axis_offset)
+        return float(distance), float(gap), float(projection_gap)
 
     def _auto_rmu_candidates(
         self,
@@ -763,7 +815,13 @@ class GParser:
             [max(frame.box.w, frame.box.h) for frame in cabinets],
             220.0,
         )
-        max_distance = max(160.0, min(320.0, base_size * 1.10))
+        # Site safety rule: an RMU name farther than the configured hard
+        # limit must never participate in ownership/name selection.  The
+        # dynamic GFileStudio-style radius may be smaller, but never larger.
+        max_distance = min(
+            float(self.max_distance),
+            max(160.0, min(320.0, base_size * 1.10)),
+        )
         projection_tolerance = max(60.0, min(140.0, base_size * 0.45))
         texts = [
             obj for obj in parsed.objects
@@ -862,8 +920,10 @@ class GParser:
         return clusters
 
     @staticmethod
-    def _auto_style_rank(style, cluster, direction, candidates_by_frame):
-        pattern, color = style
+    def _auto_style_rank(pattern, cluster, direction, candidates_by_frame):
+        # Makkah field rule: Text color is never part of RMU-name ownership.
+        # Cluster learning may use the engineering-name pattern and geometry,
+        # but red/green/white/other colors are treated identically.
         matched = [
             (frame_key, item)
             for frame_key in cluster
@@ -873,21 +933,15 @@ class GParser:
         covered = {
             frame_key
             for frame_key, item in matched
-            if item.pattern == pattern and item.color == color
-        }
-        pattern_covered = {
-            frame_key
-            for frame_key, item in matched
             if item.pattern == pattern
         }
         style_items = [
             item for _frame_key, item in matched
-            if item.pattern == pattern and item.color == color
+            if item.pattern == pattern
         ]
-        green_bonus = 1 if any(item.is_green for item in style_items) else 0
         average_score = sum(item.score for item in style_items) / max(1, len(style_items))
         average_axis = sum(item.axis_offset for item in style_items) / max(1, len(style_items))
-        return (len(covered), green_bonus, len(pattern_covered), -average_score, -average_axis, pattern, color)
+        return (len(covered), -average_score, -average_axis, pattern)
 
     def _auto_assign_cluster(self, cluster, candidates_by_frame):
         cluster_size = len(cluster)
@@ -899,14 +953,14 @@ class GParser:
                 for item in candidates_by_frame.get(key, [])
                 if item.direction == direction
             ]
-            styles = {(item.pattern, item.color) for item in directional if item.pattern}
-            if styles:
+            patterns = {item.pattern for item in directional if item.pattern}
+            if patterns:
                 style, style_rank = max(
-                    ((style, self._auto_style_rank(style, cluster, direction, candidates_by_frame)) for style in styles),
+                    ((pattern, self._auto_style_rank(pattern, cluster, direction, candidates_by_frame)) for pattern in patterns),
                     key=lambda item: item[1],
                 )
             else:
-                style, style_rank = None, (0, 0, 0, float("-inf"), float("-inf"), "", "")
+                style, style_rank = None, (0, float("-inf"), float("-inf"), "")
             options.append((style_rank, direction, style, directional))
         best_rank, direction, dominant_style, directional = max(
             options,
@@ -914,18 +968,16 @@ class GParser:
         )
         if best_rank[0] < max(2, (cluster_size + 1) // 2):
             return {}
-        preferred_pattern = dominant_style[0] if dominant_style else ""
+        preferred_pattern = dominant_style or ""
         edges = []
         for frame_key in cluster:
             for item in candidates_by_frame.get(frame_key, []):
                 if item.direction != direction:
                     continue
-                if dominant_style and (item.pattern, item.color) == dominant_style:
+                if preferred_pattern and item.pattern == preferred_pattern:
                     level = 0
-                elif preferred_pattern and item.pattern == preferred_pattern:
-                    level = 1
                 else:
-                    level = 2
+                    level = 1
                 edges.append((level, item.score, item.axis_offset, item.obj.xml_index, frame_key, item))
         edges.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
         assigned = {}
@@ -958,11 +1010,9 @@ class GParser:
             ]
             if not candidates:
                 continue
-            # For irregular/single cabinets use geometry, with green as a weak
-            # tie-breaker only.  Cluster style is never invented for a singleton.
-            greens = [item for item in candidates if item.is_green]
-            pool = greens or candidates
-            chosen = min(pool, key=lambda item: (item.score, item.axis_offset, item.obj.xml_index, item.text))
+            # For irregular/single cabinets use geometry only. Color must not
+            # influence RMU-name selection in Makkah.
+            chosen = min(candidates, key=lambda item: (item.score, item.axis_offset, item.obj.xml_index, item.text))
             used_texts.add((chosen.obj.xml_index, chosen.obj.xml_id))
             result[frame_key] = [chosen]
         return result
@@ -974,192 +1024,139 @@ class GParser:
         positions: Sequence[str],
         use_auto_cluster: bool = False,
     ) -> Dict[tuple[int, str], List[LabelCandidate]]:
-        """Globally assign RMU name Text objects to RMU frames.
+        """Assign Makkah RMU names with RIGHT -> BOTTOM -> GLOBAL fallback.
 
-        The caller must provide the visual direction(s) selected by the user.
-        The historical selected-direction resolver is intentionally used by
-        default because automatic direction learning is not reliable across
-        all field layouts.  The GFileStudio-style cluster resolver remains an
-        explicit internal option only.  Text is always read from ``Text.ts``;
-        ``DText`` and XML naming attributes are not used.
+        The Makkah field rule is intentionally staged instead of pure global
+        nearest-distance matching:
+
+        1. first consume valid Text objects on the RIGHT side of an RMU;
+        2. only unresolved RMUs may then consume BOTTOM-side Text objects;
+        3. any still-unresolved RMU finally falls back to the globally nearest
+           remaining valid Text within ``max_distance``.
+
+        A cabinet name must be outside RMU frames: if the Text centre lies
+        inside any recognised RMU frame, that Text is excluded before all
+        three stages and can never be used as a cabinet name.
+
+        Ownership remains one-to-one across the whole drawing: one RMU receives
+        at most one name Text and one Text XML object can be consumed by only one
+        RMU.  ``positions`` and ``use_auto_cluster`` are retained for API
+        compatibility; the Makkah priority above is authoritative.
         """
-        normalized_positions = tuple(
-            str(position).strip().lower()
-            for position in positions
-            if str(position).strip().lower()
-            in {"top", "bottom", "left", "right"}
-        )
-        if not normalized_positions:
-            return {}
-
-        # Cluster learning is opt-in only.  Normal validation always follows
-        # the directions explicitly selected by the user.
-        if use_auto_cluster and set(normalized_positions) == {"top", "bottom", "left", "right"}:
-            return self._assign_rmu_names_auto_cluster(parsed, frames)
-
-        tol = self.overlap_tolerance
-
-        def relation(r: Box, b: Box, direction: str):
-            score = None
-            gap = None
-            axis_offset = None
-
-            if direction == "top":
-                gap = r.top - b.bottom
-                axis_offset = abs(b.cx - r.cx)
-                if (
-                    r.left - tol <= b.cx <= r.right + tol
-                    and b.cy < r.top
-                ):
-                    if gap >= -tol:
-                        score = max(0.0, gap) + axis_offset * 0.08
-                    else:
-                        # Large-font Text objects may report a bounding box
-                        # that overlaps the RMU even though the visible label
-                        # and its center are clearly above the frame (e.g.
-                        # BABJ 38995).  Preserve the legacy edge-gap score for
-                        # normal labels and use center-gap only for this overlap
-                        # fallback.
-                        gap = r.top - b.cy
-                        score = max(0.0, gap) + axis_offset * 0.08
-
-            elif direction == "bottom":
-                gap = b.top - r.bottom
-                axis_offset = abs(b.cx - r.cx)
-                if (
-                    r.left - tol <= b.cx <= r.right + tol
-                    and b.cy > r.bottom
-                ):
-                    if gap >= -tol:
-                        score = max(0.0, gap) + axis_offset * 0.08
-                    else:
-                        gap = b.cy - r.bottom
-                        score = max(0.0, gap) + axis_offset * 0.08
-
-            elif direction == "left":
-                gap = r.left - b.right
-                axis_offset = abs(b.cy - r.cy)
-                if (
-                    r.top - tol <= b.cy <= r.bottom + tol
-                    and b.cx < r.left
-                ):
-                    if gap >= -tol:
-                        score = max(0.0, gap) + axis_offset * 0.08
-                    else:
-                        gap = r.left - b.cx
-                        score = max(0.0, gap) + axis_offset * 0.08
-
-            elif direction == "right":
-                gap = b.left - r.right
-                axis_offset = abs(b.cy - r.cy)
-                if (
-                    r.top - tol <= b.cy <= r.bottom + tol
-                    and b.cx > r.right
-                ):
-                    if gap >= -tol:
-                        score = max(0.0, gap) + axis_offset * 0.08
-                    else:
-                        gap = b.cx - r.right
-                        score = max(0.0, gap) + axis_offset * 0.08
-
-            return score, gap, axis_offset
+        del positions, use_auto_cluster
 
         result: Dict[tuple[int, str], List[LabelCandidate]] = {
             (frame.frame.xml_index, frame.frame.xml_id): []
             for frame in frames
         }
+        # RMU cabinet names are external labels. A Text whose centre falls
+        # inside *any* recognised RMU frame is an internal device/status
+        # annotation and must never be used as an RMU name, including the
+        # final GLOBAL fallback.  Centre-based exclusion tolerates a large
+        # external label box slightly touching the cabinet border while still
+        # enforcing that the actual label anchor is outside every RMU.
+        frame_boxes = [frame.frame.box for frame in frames]
+        texts = [
+            obj for obj in parsed.objects
+            if obj.tag.lower() == "text"
+            and self._valid_rmu_name_text(obj)
+            and not any(box.center_contains(obj.box) for box in frame_boxes)
+        ]
 
-        for obj in parsed.objects:
-            if obj.tag.lower() != "text":
-                continue
+        # A directional candidate should genuinely belong to that frame edge,
+        # not merely be globally close.  Reuse the same rectangle-edge relation
+        # used by the field-proven auto resolver, but cap the projection
+        # tolerance by the configured RMU-name search radius.
+        base_size = self._median(
+            [max(frame.frame.box.w, frame.frame.box.h) for frame in frames],
+            220.0,
+        )
+        projection_tolerance = min(
+            float(self.max_distance),
+            max(60.0, min(140.0, base_size * 0.45)),
+        )
 
-            text = self._text_value(obj)
-            if not self._valid_rmu_name_text(obj):
-                continue
+        assigned_frames: set[tuple[int, str]] = set()
+        assigned_texts: set[tuple[int, str]] = set()
 
-            b = obj.box
-            if b.w <= 0:
-                b = Box(b.x, b.y, 1.0, max(b.h, 1.0))
-            if b.h <= 0:
-                b = Box(b.x, b.y, max(b.w, 1.0), 1.0)
+        # Makkah staged ownership rule (field requirement): directional
+        # priority is stronger than global nearest-distance ownership.  In
+        # particular, a Text on the RIGHT side of one RMU must not be rejected
+        # merely because another RMU happens to be geometrically closer from
+        # its LEFT side.  RIGHT is assigned first across all RMUs, then BOTTOM
+        # for unresolved RMUs, and only the final GLOBAL stage uses nearest
+        # distance among the still-unassigned RMUs/Text objects.
 
-            is_green = _is_green_text(obj)
-            color = _text_primary_color(obj)
+        def candidate_relation(frame: RmuFrame, obj: GObject, stage: str):
+            distance = float(frame.frame.box.edge_distance(obj.box))
+            if distance > float(self.max_distance):
+                return None
+            if stage in {"right", "bottom"}:
+                relation = self._auto_name_relation(
+                    frame.frame.box,
+                    obj.box,
+                    stage,
+                    projection_tolerance,
+                    float(self.max_distance),
+                )
+                if relation is None:
+                    return None
+                rel_distance, gap, axis_offset = relation
+                return float(rel_distance), float(gap), float(axis_offset), stage
+            return distance, distance, 0.0, "global"
 
-            # Keep one best selected direction PER RMU for this text.
-            per_frame = []
+        for stage in ("right", "bottom", "global"):
+            pairs = []
             for frame in frames:
-                best = None
-                for direction_index, direction in enumerate(normalized_positions):
-                    score, gap, axis_offset = relation(
-                        frame.frame.box,
-                        b,
-                        direction,
-                    )
-                    if score is None:
+                frame_key = (frame.frame.xml_index, frame.frame.xml_id)
+                if frame_key in assigned_frames:
+                    continue
+                for obj in texts:
+                    text_key = (obj.xml_index, obj.xml_id)
+                    if text_key in assigned_texts:
                         continue
-                    rank = (
-                        score,
-                        abs(float(gap or 0.0)),
-                        float(axis_offset or 0.0),
-                        direction_index,
-                    )
-                    candidate = (
-                        rank,
+                    relation = candidate_relation(frame, obj, stage)
+                    if relation is None:
+                        continue
+                    distance, gap, axis_offset, direction = relation
+                    pairs.append((
+                        float(distance),
+                        float(axis_offset),
+                        int(obj.xml_index),
+                        int(frame.frame.xml_index),
+                        frame_key,
                         frame,
+                        obj,
                         direction,
-                        float(score),
-                        float(gap or 0.0),
+                        float(gap),
+                    ))
+
+            # Resolve one-to-one ownership inside the current stage by the
+            # smallest valid rectangle-edge distance.  Because stages run in
+            # RIGHT -> BOTTOM -> GLOBAL order, a later-stage candidate can never
+            # steal a Text or RMU already resolved by an earlier stage.
+            pairs.sort(key=lambda item: item[:4])
+            for distance, axis_offset, _text_order, _frame_order, frame_key, frame, obj, direction, gap in pairs:
+                text_key = (obj.xml_index, obj.xml_id)
+                if frame_key in assigned_frames or text_key in assigned_texts:
+                    continue
+                text = self._text_value(obj)
+                result[frame_key] = [
+                    LabelCandidate(
+                        text=text,
+                        direction=direction,
+                        score=float(distance),
+                        obj=obj,
+                        is_green=_is_green_text(obj),
+                        color=_text_primary_color(obj),
+                        gap=float(gap),
+                        axis_offset=float(axis_offset),
+                        pattern=self._rmu_name_pattern(text),
                     )
-                    if best is None or rank < best[0]:
-                        best = candidate
-                if best is not None:
-                    per_frame.append(best)
+                ]
+                assigned_frames.add(frame_key)
+                assigned_texts.add(text_key)
 
-            if not per_frame:
-                continue
-
-            # Global one-owner rule: each text belongs to ONE nearest RMU.
-            owner = min(
-                per_frame,
-                key=lambda item: (
-                    item[0],
-                    item[1].frame.xml_index,
-                    item[1].frame.xml_id,
-                ),
-            )
-            _rank, owner_frame, direction, score, gap = owner
-            owner_key = (
-                owner_frame.frame.xml_index,
-                owner_frame.frame.xml_id,
-            )
-            result.setdefault(owner_key, []).append(
-                LabelCandidate(
-                    text=text,
-                    direction=direction,
-                    score=score,
-                    obj=obj,
-                    is_green=is_green,
-                    color=color,
-                    gap=gap,
-                    axis_offset=float(abs(gap) if gap is not None else 0.0),
-                    pattern=self._rmu_name_pattern(text),
-                )
-            )
-
-        for key, candidates in result.items():
-            candidates.sort(
-                key=lambda c: (
-                    c.score,
-                    c.obj.xml_index,
-                    c.text,
-                    c.direction,
-                )
-            )
-            # RMU cabinet names are singular: after the selected-direction
-            # filter, retain only the nearest Text for each frame.
-            if candidates:
-                result[key] = candidates[:1]
         return result
 
     def find_label_candidates(
@@ -1226,8 +1223,6 @@ class GParser:
         fail closed: no label, reused label or near-tie ambiguity is reported rather
         than guessed.
         """
-        import math
-
         texts = []
         for obj in self._text_objects_in_frame(parsed, frame):
             text = self._text_value(obj).strip()
@@ -1243,10 +1238,9 @@ class GParser:
         pair_candidates = []
         per_breaker = {}
         for br in breakers:
-            bx, by = br.box.cx, br.box.cy
             candidates = []
             for txt_obj, text in texts:
-                dist = math.hypot(bx - txt_obj.box.cx, by - txt_obj.box.cy)
+                dist = br.box.edge_distance(txt_obj.box)
                 if dist <= max_distance:
                     candidates.append((dist, txt_obj, text))
                     pair_candidates.append((dist, br, txt_obj, text))

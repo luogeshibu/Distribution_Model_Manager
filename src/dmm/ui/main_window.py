@@ -15,7 +15,7 @@ import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEventLoop
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEventLoop, QEvent
 from PySide6.QtGui import QIcon, QPixmap, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox as QtMessageBox,
@@ -23,10 +23,20 @@ from PySide6.QtWidgets import (
     QPushButton, QComboBox, QPlainTextEdit, QFrame, QStackedWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QListWidget, QListWidgetItem, QGroupBox, QTabWidget, QScrollArea, QSizePolicy,
-    QProgressBar, QSplitter, QDialog, QTextBrowser, QDialogButtonBox
+    QProgressBar, QSplitter, QDialog, QTextBrowser, QDialogButtonBox, QCheckBox, QSpinBox, QAbstractSpinBox, QAbstractScrollArea
 )
 
 from dmm.application.job_worker import JobWorker
+from dmm.application.poke_worker import PokeProcessingWorker
+from dmm.application.graphics_cleanup_worker import GraphicsCleanupWorker
+from dmm.application.channel_status_worker import ChannelStatusRepositionWorker
+from dmm.application.rmu_annotation_position_worker import RmuAnnotationPositionWorker
+from dmm.application.feeder_avoidance_worker import FeederAvoidanceWorker
+from dmm.application.rmu_feeder_topology_worker import RmuFeederTopologyWorker
+from dmm.application.feedline_feeder_topology_worker import FeedlineFeederTopologyWorker
+from dmm.application.whole_graph_topology_worker import WholeGraphTopologyWorker
+from dmm.application.main_station_background_label_worker import MainStationBackgroundLabelWorker
+from dmm.application.graphics_pipeline_worker import GraphicsPipelineWorker
 from dmm.application.registry import get_model_modules
 from dmm.ui.registry import create_settings_widget
 from dmm.ui.widgets.element_management_page import ElementManagementWidget
@@ -35,9 +45,36 @@ from dmm.config.constants import (
     APP_SITE_LABEL, APP_SITE_LABEL_EN, APP_BUILD_DATE,
     WORKSPACE_RETENTION_DAYS,
 )
-from dmm.config.settings import load_settings, save_settings
+from dmm.config.defaults import (
+    DEFAULT_RMU_NAME_EXCLUSIONS,
+    DEFAULT_RMU_NAME_POSITIONS,
+)
+from dmm.config.settings import (
+    load_settings,
+    publish_central_settings,
+    read_central_admin_state,
+    release_central_admin,
+    save_settings,
+    sync_central_settings,
+    takeover_central_admin,
+)
 from dmm.i18n import normalize_language, tr, translate_runtime_text, retranslate_qt_tree
 from dmm.infrastructure.database.oracle import OracleClient
+from dmm.domain.graphics_cleanup.channel_status import CHANNEL_STATUS_POSITIONS
+from dmm.domain.graphics_cleanup.rmu_annotation_position import (
+    NOP_HORIZONTAL_POSITIONS,
+    RMU_NAME_POSITIONS,
+)
+from dmm.domain.graphics_cleanup.feeder_avoidance import (
+    DEFAULT_CORRIDOR_TOLERANCE,
+    DEFAULT_TEXT_CLEARANCE,
+    DEFAULT_FEEDER_SPACING,
+    DEFAULT_MAX_RIGHT_SHIFT,
+)
+from dmm.domain.feeder.ring_discovery import (
+    attach_makkah_ring_feeder_inventory,
+    compare_makkah_ring_feeders_for_files,
+)
 from dmm.infrastructure.reporting.writer import (
     flatten_device_rows, flatten_rmu_rows,
     export_csv_bundle, export_html_bundle,
@@ -91,6 +128,42 @@ class NoWheelComboBox(QComboBox):
 
     def wheelEvent(self, event):
         event.ignore()
+
+
+class CurrentPageStackedWidget(QStackedWidget):
+    """Size the stack from the visible page instead of the largest hidden page.
+
+    QStackedWidget normally reports a size hint large enough for every page.
+    The graphics workspace shares one source selector between a one-row LOCAL
+    page and a much taller SSH page, so the default behavior leaves a large
+    empty area when LOCAL is selected.  This stack deliberately follows only
+    the current page and asks the parent layout to recalculate on page changes.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.currentChanged.connect(self._refresh_current_page_geometry)
+
+    def sizeHint(self):
+        current = self.currentWidget()
+        if current is not None:
+            return current.sizeHint()
+        return super().sizeHint()
+
+    def minimumSizeHint(self):
+        current = self.currentWidget()
+        if current is not None:
+            return current.minimumSizeHint()
+        return super().minimumSizeHint()
+
+    def _refresh_current_page_geometry(self, *_args):
+        current = self.currentWidget()
+        if current is not None:
+            current.updateGeometry()
+        self.updateGeometry()
+        parent = self.parentWidget()
+        if parent is not None:
+            parent.updateGeometry()
 
 
 class QMessageBox(QtMessageBox):
@@ -217,6 +290,27 @@ class AssociationExecutionWorker(QThread):
                 db.close()
 
 
+class CentralAdminOwnershipWorker(QThread):
+    """One-shot lightweight Admin ownership probe.
+
+    Reads only central instance.json; shared business configuration is never
+    pulled by this background check.
+    """
+
+    checked = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, settings_snapshot: dict, parent=None):
+        super().__init__(parent)
+        self.settings_snapshot = settings_snapshot
+
+    def run(self):
+        try:
+            self.checked.emit(read_central_admin_state(self.settings_snapshot))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -224,7 +318,7 @@ class MainWindow(QMainWindow):
         ensure_workspace()
         cleanup_workspace(WORKSPACE_RETENTION_DAYS)
 
-        self.cfg = load_settings()
+        self.cfg = load_settings(sync_central=False)
         self.language = normalize_language(self.cfg.get("language", "zh_CN"))
         self.cfg["language"] = self.language
         self.modules = get_model_modules()
@@ -236,6 +330,26 @@ class MainWindow(QMainWindow):
         self.current_report_dir = self.cfg.get("last_run_dir", "")
         self.current_task_type = ""
         self.worker = None
+        self.poke_worker = None
+        self.poke_artifacts = {}
+        self.graphics_cleanup_worker = None
+        self.graphics_cleanup_artifacts = {}
+        self.channel_status_worker = None
+        self.channel_status_artifacts = {}
+        self.rmu_annotation_worker = None
+        self.rmu_annotation_artifacts = {}
+        self.feeder_avoidance_worker = None
+        self.feeder_avoidance_artifacts = {}
+        self.rmu_feeder_topology_worker = None
+        self.rmu_feeder_topology_artifacts = {}
+        self.feedline_feeder_topology_worker = None
+        self.feedline_feeder_topology_artifacts = {}
+        self.whole_graph_topology_worker = None
+        self.whole_graph_topology_artifacts = {}
+        self.main_station_background_label_worker = None
+        self.main_station_background_label_artifacts = {}
+        self.graphics_pipeline_worker = None
+        self.graphics_pipeline_artifacts = {}
         self.current_source_info = {}
         self.current_snapshot_files = []
         self.remote_file_rows = []
@@ -243,6 +357,10 @@ class MainWindow(QMainWindow):
         self._remote_table_populating = False
         self._remote_row_by_name = {}
         self._remote_visible_count = 0
+        self._poke_remote_visible_count = 0
+        self._poke_remote_table_dirty = True
+        self._poke_remote_table_populating = False
+        self._poke_remote_row_by_name = {}
         self._remote_filter_timer = QTimer(self)
         self._remote_filter_timer.setSingleShot(True)
         self._remote_filter_timer.setInterval(120)
@@ -256,6 +374,17 @@ class MainWindow(QMainWindow):
             self._update_remote_refresh_wait_status
         )
 
+        # Admin ownership is session-scoped. Startup is strictly local-first;
+        # only a proven Admin session performs the lightweight 10-second
+        # instance.json ownership check.
+        self._admin_session_epoch = None
+        self._central_admin_check_worker = None
+        self._central_admin_timer = QTimer(self)
+        self._central_admin_timer.setInterval(10000)
+        self._central_admin_timer.timeout.connect(
+            self._schedule_central_admin_ownership_check
+        )
+
         self.setWindowTitle(
             f"{APP_NAME} v{APP_VERSION} - {APP_EDITION} · {APP_SITE_LABEL}"
         )
@@ -266,20 +395,67 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(ICON_PATH)))
 
         self._build_ui()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         self._apply_style()
         self._restore_ui_state()
         self._apply_language(save=False)
         self._check_saved_input_path_on_startup()
+        self._central_admin_timer.start()
 
         self.log(f"{APP_NAME} v{APP_VERSION} 已启动。")
         self.log("工作流：模型校验 → 勾选可关联对象 → 执行模型关联。")
         self.log("安全模式：原始 G 文件永不修改；执行关联时只处理 Workspace 中的安全副本。")
 
+    def eventFilter(self, watched, event):
+        """Prevent wheel edits while keeping normal page scrolling.
+
+        A wheel gesture over any QComboBox/QAbstractSpinBox must never alter
+        the control value.  When the control lives inside a scroll area, the
+        same gesture is forwarded to that page's vertical scrollbar instead.
+        """
+        if event is not None and event.type() == QEvent.Wheel:
+            widget = watched if isinstance(watched, QWidget) else None
+            control = None
+            probe = widget
+            for _ in range(6):
+                if probe is None:
+                    break
+                if isinstance(probe, (QComboBox, QAbstractSpinBox)):
+                    control = probe
+                    break
+                probe = probe.parentWidget()
+            if control is not None:
+                parent = control.parentWidget()
+                while parent is not None:
+                    if isinstance(parent, QAbstractScrollArea):
+                        bar = parent.verticalScrollBar()
+                        pixel_delta = event.pixelDelta().y()
+                        angle_delta = event.angleDelta().y()
+                        if pixel_delta:
+                            bar.setValue(bar.value() - int(pixel_delta))
+                        elif angle_delta:
+                            steps = angle_delta / 120.0
+                            distance = max(1, bar.singleStep()) * 3
+                            bar.setValue(int(bar.value() - steps * distance))
+                        break
+                    parent = parent.parentWidget()
+                event.ignore()
+                return True
+        return super().eventFilter(watched, event)
+
     # ------------------------------------------------------------
     # Theme
     # ------------------------------------------------------------
     def _apply_style(self):
-        self.setStyleSheet("""
+        if getattr(sys, "frozen", False):
+            resource_dir = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)) / "dmm" / "resources"
+        else:
+            resource_dir = Path(__file__).resolve().parents[1] / "resources"
+        spin_up_icon = (resource_dir / "spin_up.png").as_posix()
+        spin_down_icon = (resource_dir / "spin_down.png").as_posix()
+        style_sheet = """
         QMainWindow {
             background: #F1F6F3;
         }
@@ -384,14 +560,29 @@ class MainWindow(QMainWindow):
         }
 
         QScrollArea#workspaceScroll,
-        QScrollArea#workspaceOuterScroll {
+        QScrollArea#workspaceOuterScroll,
+        QScrollArea#graphicsOuterScroll {
             background: transparent;
             border: none;
         }
 
         QScrollArea#workspaceScroll > QWidget > QWidget,
-        QScrollArea#workspaceOuterScroll > QWidget > QWidget {
+        QScrollArea#workspaceOuterScroll > QWidget > QWidget,
+        QScrollArea#graphicsOuterScroll > QWidget > QWidget {
             background: transparent;
+        }
+
+        #graphicsFunctionBar {
+            background: #E8F7F1;
+            border: 1px solid #B8DDCF;
+            border-radius: 8px;
+        }
+
+        #graphicsFunctionTitle {
+            color: #006B52;
+            font-weight: 700;
+            font-size: 11pt;
+            padding-right: 8px;
         }
 
         QScrollBar:vertical {
@@ -438,22 +629,47 @@ class MainWindow(QMainWindow):
             border: 1px solid #B58A36;
         }
 
-        /* 保留 QSpinBox 原生上下按钮，保证按钮可点击 */
+        /* SpinBox 上/下按钮使用与整套界面一致的深绿色高对比样式。
+           之前浅灰按钮在现场显示器和高 DPI 下几乎看不清。 */
+        QSpinBox {
+            padding-right: 34px;
+        }
+
         QSpinBox::up-button,
         QSpinBox::down-button {
-            width: 26px;
-            border-left: 1px solid #B7CCC4;
-            background: #F3F8F6;
+            width: 28px;
+            border-left: 1px solid #005640;
+            background: #006B52;
+        }
+
+        QSpinBox::up-button {
+            border-top-right-radius: 5px;
+        }
+
+        QSpinBox::down-button {
+            border-bottom-right-radius: 5px;
         }
 
         QSpinBox::up-button:hover,
         QSpinBox::down-button:hover {
-            background: #DFF2EA;
+            background: #00966E;
         }
 
         QSpinBox::up-button:pressed,
         QSpinBox::down-button:pressed {
-            background: #BFE5D6;
+            background: #004D3A;
+        }
+
+        QSpinBox::up-arrow {
+            image: url("__SPIN_UP_ICON__");
+            width: 14px;
+            height: 10px;
+        }
+
+        QSpinBox::down-arrow {
+            image: url("__SPIN_DOWN_ICON__");
+            width: 14px;
+            height: 10px;
         }
 
         QPushButton {
@@ -605,7 +821,9 @@ class MainWindow(QMainWindow):
             background: #B58A36;
             color: white;
         }
-        """)
+        """
+        style_sheet = style_sheet.replace("__SPIN_UP_ICON__", spin_up_icon).replace("__SPIN_DOWN_ICON__", spin_down_icon)
+        self.setStyleSheet(style_sheet)
 
     # ------------------------------------------------------------
     # Common widgets
@@ -718,8 +936,24 @@ class MainWindow(QMainWindow):
         self.nav = QListWidget()
         self.nav.setObjectName("navList")
 
-        for label in ("模型工作区", "数据库", "图元管理", "运行历史", "设置", "帮助"):
-            self.nav.addItem(QListWidgetItem(label))
+        # 图形工作区与模型工作区保持同一级导航样式。
+        # 具体图形操作不再放在左侧二级菜单，而是在右侧工作区通过
+        # “图形处理类型”统一编排，便于后续继续增加其它图形处理任务。
+        nav_specs = (
+            ("模型工作区", 0),
+            ("图形工作区", 3),
+            ("数据库", 1),
+            ("图元管理", 2),
+            ("运行历史", 4),
+            ("设置", 5),
+            ("帮助", 6),
+        )
+        for label, page_index in nav_specs:
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, page_index)
+            item.setData(Qt.UserRole + 1, "primary")
+            item.setData(Qt.UserRole + 2, label)
+            self.nav.addItem(item)
 
         self.nav.setCurrentRow(0)
         sidebar_layout.addWidget(self.nav)
@@ -727,12 +961,14 @@ class MainWindow(QMainWindow):
 
         # 每个功能模块自带日志/结果，不再设置独立的全局“报告”一级菜单。
         self.pages = QStackedWidget()
-        self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
+        self.nav.currentRowChanged.connect(self._on_nav_row_changed)
 
         self.pages.addWidget(self._build_workspace_page())
         self.pages.addWidget(self._build_database_page())
         self.element_management_page = self._build_element_management_page()
         self.pages.addWidget(self.element_management_page)
+        self.graphics_processing_page = self._build_graphics_processing_page()
+        self.pages.addWidget(self.graphics_processing_page)
         self.pages.addWidget(self._build_history_page())
         self.pages.addWidget(self._build_settings_page())
         self.pages.addWidget(self._build_help_page())
@@ -748,7 +984,3226 @@ class MainWindow(QMainWindow):
         page.catalogChanged.connect(
             lambda: self._invalidate_validation_snapshot("图元标记配置已修改")
         )
+        page.centralSyncRequested.connect(self.sync_central_configuration)
         return page
+
+    def _on_nav_row_changed(self, row):
+        item = self.nav.item(int(row)) if hasattr(self, "nav") and int(row) >= 0 else None
+        if item is None:
+            return
+        page_index = item.data(Qt.UserRole)
+        if page_index is None:
+            return
+        try:
+            page_index = int(page_index)
+        except (TypeError, ValueError):
+            return
+        if hasattr(self, "pages"):
+            self.pages.setCurrentIndex(page_index)
+        self._on_primary_nav_changed(page_index)
+
+    def _on_primary_nav_changed(self, index):
+        # 图形工作区当前仅提供 Poke 处理。进入该工作区时同步公共文件源；
+        # 以后新增其它图形处理类型时仍复用这一工作区级公共输入状态。
+        if int(index) != 3 or not hasattr(self, "poke_input_source_combo"):
+            return
+        rebuild = (
+            getattr(self, "_poke_remote_table_dirty", False)
+            or self.poke_remote_file_table.rowCount() != len(self.remote_file_rows)
+        )
+        self._sync_poke_source_from_workspace(rebuild_remote=rebuild)
+
+    # ------------------------------------------------------------
+    # Graphics processing / Poke jump
+    # ------------------------------------------------------------
+    def _build_graphics_processing_page(self):
+        """Build the Graphics Workspace using the same task-orchestration pattern
+        as the Model Workspace.
+
+        The left navigation contains only one first-level ``图形工作区`` entry.
+        Concrete graphics operations are selected from ``图形处理类型`` on the
+        right, so future operations can be added without growing a second menu.
+        """
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("graphicsOuterScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        content = QWidget()
+        content.setObjectName("graphicsContent")
+        outer = QVBoxLayout(content)
+        outer.setContentsMargins(28, 22, 28, 22)
+        outer.setSpacing(12)
+        outer.addWidget(
+            self._page_header(
+                "图形工作区",
+                "图形配置、处理进度和运行日志集中在当前工作区；后续图形处理功能统一通过图形处理类型进行编排。",
+            )
+        )
+
+        # Keep the top-level task selector consistent with Model Workspace.
+        job_box = QGroupBox("图形任务")
+        grid = QGridLayout(job_box)
+        grid.setContentsMargins(14, 18, 14, 12)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(9)
+        grid.setColumnStretch(1, 1)
+
+        grid.addWidget(QLabel("图形处理类型"), 0, 0)
+        self.graphics_operation_combo = NoWheelComboBox()
+        self.graphics_operation_combo.addItem("Poke 跳转处理", "POKE")
+        self.graphics_operation_combo.addItem("环网柜网络图元清理", "RMU_NETWORK_CLEANUP")
+        self.graphics_operation_combo.addItem("环网柜 channel_status 移动", "RMU_CHANNEL_STATUS_REPOSITION")
+        self.graphics_operation_combo.addItem("NOP / 环网柜名称位置调整", "RMU_ANNOTATION_REPOSITION")
+        self.graphics_operation_combo.addItem("馈线避让调整", "FEEDER_AVOIDANCE")
+        self.graphics_operation_combo.addItem("环网柜馈线拓扑分析", "RMU_FEEDER_TOPOLOGY")
+        self.graphics_operation_combo.addItem("馈线段所属馈线分析", "FEEDLINE_FEEDER_TOPOLOGY")
+        self.graphics_operation_combo.addItem("主网入口背景标签修正", "MAIN_STATION_BACKGROUND_LABEL")
+        self.graphics_operation_combo.addItem("整图馈线拓扑分析", "WHOLE_GRAPH_TOPOLOGY")
+        self.graphics_operation_combo.addItem("组合处理（一键）", "GRAPHICS_PIPELINE")
+        self.graphics_operation_combo.currentIndexChanged.connect(
+            self.on_graphics_operation_changed
+        )
+        grid.addWidget(self.graphics_operation_combo, 0, 1, 1, 2)
+
+        graphics_actions = QHBoxLayout()
+        self.graphics_operation_help_btn = QPushButton("当前图形帮助")
+        self.graphics_operation_help_btn.setMinimumWidth(112)
+        self.graphics_operation_help_btn.clicked.connect(
+            self.show_current_graphics_operation_help
+        )
+        graphics_actions.addWidget(self.graphics_operation_help_btn)
+        graphics_actions.addStretch()
+        grid.addLayout(graphics_actions, 0, 3)
+        outer.addWidget(job_box)
+
+        # 图形工作区内所有处理任务共用同一套本地/SSH只读文件来源。
+        # 保留既有 poke_* 控件命名以避免破坏已验证的远程文件选择状态。
+        outer.addWidget(self._build_poke_source_box())
+
+        self.graphics_operation_stack = QStackedWidget()
+        poke_page = QWidget()
+        poke_layout = QVBoxLayout(poke_page)
+        poke_layout.setContentsMargins(0, 0, 0, 0)
+        poke_layout.addWidget(self._build_poke_processing_panel())
+        self.graphics_operation_stack.addWidget(poke_page)
+
+        cleanup_page = QWidget()
+        cleanup_layout = QVBoxLayout(cleanup_page)
+        cleanup_layout.setContentsMargins(0, 0, 0, 0)
+        cleanup_layout.addWidget(self._build_rmu_network_cleanup_panel())
+        self.graphics_operation_stack.addWidget(cleanup_page)
+
+        channel_status_page = QWidget()
+        channel_status_layout = QVBoxLayout(channel_status_page)
+        channel_status_layout.setContentsMargins(0, 0, 0, 0)
+        channel_status_layout.addWidget(self._build_rmu_channel_status_panel())
+        self.graphics_operation_stack.addWidget(channel_status_page)
+
+        annotation_page = QWidget()
+        annotation_layout = QVBoxLayout(annotation_page)
+        annotation_layout.setContentsMargins(0, 0, 0, 0)
+        annotation_layout.addWidget(self._build_rmu_annotation_position_panel())
+        self.graphics_operation_stack.addWidget(annotation_page)
+
+        feeder_avoidance_page = QWidget()
+        feeder_avoidance_layout = QVBoxLayout(feeder_avoidance_page)
+        feeder_avoidance_layout.setContentsMargins(0, 0, 0, 0)
+        feeder_avoidance_layout.addWidget(self._build_feeder_avoidance_panel())
+        self.graphics_operation_stack.addWidget(feeder_avoidance_page)
+
+        rmu_feeder_topology_page = QWidget()
+        rmu_feeder_topology_layout = QVBoxLayout(rmu_feeder_topology_page)
+        rmu_feeder_topology_layout.setContentsMargins(0, 0, 0, 0)
+        rmu_feeder_topology_layout.addWidget(self._build_rmu_feeder_topology_panel())
+        self.graphics_operation_stack.addWidget(rmu_feeder_topology_page)
+
+        feedline_feeder_topology_page = QWidget()
+        feedline_feeder_topology_layout = QVBoxLayout(feedline_feeder_topology_page)
+        feedline_feeder_topology_layout.setContentsMargins(0, 0, 0, 0)
+        feedline_feeder_topology_layout.addWidget(self._build_feedline_feeder_topology_panel())
+        self.graphics_operation_stack.addWidget(feedline_feeder_topology_page)
+
+        main_station_background_label_page = QWidget()
+        main_station_background_label_layout = QVBoxLayout(main_station_background_label_page)
+        main_station_background_label_layout.setContentsMargins(0, 0, 0, 0)
+        main_station_background_label_layout.addWidget(self._build_main_station_background_label_panel())
+        self.graphics_operation_stack.addWidget(main_station_background_label_page)
+
+        whole_graph_topology_page = QWidget()
+        whole_graph_topology_layout = QVBoxLayout(whole_graph_topology_page)
+        whole_graph_topology_layout.setContentsMargins(0, 0, 0, 0)
+        whole_graph_topology_layout.addWidget(self._build_whole_graph_topology_panel())
+        self.graphics_operation_stack.addWidget(whole_graph_topology_page)
+
+        pipeline_page = QWidget()
+        pipeline_layout = QVBoxLayout(pipeline_page)
+        pipeline_layout.setContentsMargins(0, 0, 0, 0)
+        pipeline_layout.addWidget(self._build_graphics_pipeline_panel())
+        self.graphics_operation_stack.addWidget(pipeline_page)
+
+        outer.addWidget(self.graphics_operation_stack)
+
+        outer.addStretch()
+        scroll.setWidget(content)
+        page_layout.addWidget(scroll)
+        return page
+
+    def on_graphics_operation_changed(self, index):
+        if not hasattr(self, "graphics_operation_stack"):
+            return
+        index = max(0, min(int(index), self.graphics_operation_stack.count() - 1))
+        self.graphics_operation_stack.setCurrentIndex(index)
+
+    def show_current_graphics_operation_help(self):
+        operation_id = str(
+            self.graphics_operation_combo.currentData()
+            if hasattr(self, "graphics_operation_combo")
+            else "POKE"
+        ).upper()
+        if operation_id == "POKE":
+            title = "Poke Jump Help" if self.language == "en_US" else "Poke 跳转处理帮助"
+            text = (
+                "Adds or repairs Poke jumps for main-network feeder labels and SMART/SMR RMUs. "
+                "Source G files remain read-only; results are written to Workspace safe copies."
+                if self.language == "en_US"
+                else "为主网馈线标题和 SMART/SMR 智能环网柜新增或修复 Poke 跳转。"
+                "原始 G 文件保持只读，处理结果写入 Workspace 安全副本。"
+            )
+            QMessageBox.information(self, title, text)
+            return
+        if operation_id == "RMU_NETWORK_CLEANUP":
+            title = "RMU Network Graphic Cleanup" if self.language == "en_US" else "环网柜网络图元清理帮助"
+            text = (
+                "Removes the fixed Generator(G), Temporary Cable(L), and General Note(N) Status icons "
+                "from selected Makkah G files. Source files remain read-only and only Workspace safe copies are changed."
+                if self.language == "en_US"
+                else "删除麦加 G 图中固定的 Generator(G)、Temporary Cable(L)、General Note(N) 三类 Status 图元。"
+                "规则按 devref 写死，不做位置猜测；原始 G 文件保持只读，只修改 Workspace 安全副本。"
+            )
+            QMessageBox.information(self, title, text)
+            return
+        if operation_id == "RMU_CHANNEL_STATUS_REPOSITION":
+            title = "RMU channel_status Reposition" if self.language == "en_US" else "环网柜 channel_status 移动帮助"
+            text = (
+                "Moves each RMU channel_status Status icon to the selected anchor inside its RMU frame, using the same field-proven logic as G File Studio v2.18.244. "
+                "Only the Status icon is moved; source files stay read-only."
+                if self.language == "en_US"
+                else "完全复用 G File Studio v2.18.244 的 channel_status 定位与移动规则：识别有效 RMU 外框，"
+                "为每个柜体寻找唯一 channel_status Status，并移动到所选框内位置。只移动该 Status 本身，"
+                "不移动环网柜、母线、设备、文字或连接线；原始 G 文件保持只读。"
+            )
+            QMessageBox.information(self, title, text)
+            return
+        if operation_id == "RMU_ANNOTATION_REPOSITION":
+            title = "RMU NOP / Name Position" if self.language == "en_US" else "NOP / 环网柜名称位置调整帮助"
+            text = (
+                "NOP is placed only on the left/right side of the RMU and its vertical center is aligned exactly with the corresponding Y*/Q* switch center. RMU names can be placed at the midpoint of the top/right/bottom/left frame edge. Source G files stay read-only."
+                if self.language == "en_US"
+                else "NOP 只在环网柜左侧或右侧显示，并且必须与柜内对应的 Y*/Q* 开关设备（如 Y1/Y2/Y3/Q1/Q2/Q3）水平中心对齐：NOP 中心 Y = 开关中心 Y。"
+                "环网柜名称只从 RMU 框外 Text 中识别（Text 中心落在任意 RMU 框内即排除），固定按 RIGHT → BOTTOM → GLOBAL fallback；名称位置仍可选择上、右、下、左四个边框的正中位置。若名称已有 Poke 跳转，移动名称时 Poke 会使用相同位移同步移动。原始 G 文件保持只读，只修改 Workspace 安全副本。"
+            )
+            QMessageBox.information(self, title, text)
+            return
+        if operation_id == "FEEDER_AVOIDANCE":
+            title = "Feeder Text Avoidance" if self.language == "en_US" else "馈线避让调整帮助"
+            text = (
+                "Only FeedLine geometry is changed. In the same RMU column, adjacent non-overlapping RMU-to-RMU feeder spans share the same inner lane, while longer spans that cross them are assigned progressively farther outer lanes. Right-side lanes expand right and left-side lanes mirror left. RMU names/NOP text, endpoints and topology attributes never move."
+                if self.language == "en_US"
+                else "只移动 FeedLine，不移动环网柜名称、NOP / N.O.P、环网柜本体或其它设备。"
+                "同一 RMU 列内，相邻环网柜之间、Y 范围不重叠的馈线共用同一条内侧轨道并保持对齐；"
+                "跨越其它环网柜的长馈线按重叠层级依次放到更外侧轨道。右侧向右外扩，左侧向左镜像外扩。"
+                "轨道间距、同列判定范围、最大外移和左右侧处理均可配置。原连接端点与 link / node_area / keyid 等拓扑属性保持不变。"
+            )
+            QMessageBox.information(self, title, text)
+            return
+        if operation_id == "RMU_FEEDER_TOPOLOGY":
+            title = "RMU Feeder Topology Analysis" if self.language == "en_US" else "环网柜馈线拓扑分析帮助"
+            text = (
+                "Read-only topology analysis for Makkah ring drawings. It discovers all main-network feeder sources from Bay CBreakers and nearby feeder labels, builds the electrical graph from link/node_area with only strict endpoint repairs, maps each NOP to the corresponding Y*/Q* switch by RMU side and center-Y alignment, and stops feeder propagation at that switch. Normal RMUs receive one feeder; NOP boundary RMUs keep both side feeders instead of being forced into one. No G file or database is modified."
+                if self.language == "en_US"
+                else "麦加环网图只读拓扑分析：先从主网 Bay 的 CBreaker 与附近馈线标题识别全部馈线源，再使用 link / node_area 建立电气连接图；只有 XML 缺链时才允许极小误差的严格几何补链。NOP 先归属最近 RMU，并且只在该 RMU 框内寻找 Y*/Q* 开关：NOP 位于左/右侧时优先按水平中心 Y 对齐，同一水平行有多个开关时再取离 NOP 最近者；位于上/下侧时镜像按中心 X 对齐。线路允许多路传播，只有真正走到 NOP 开关的支路在该开关处停止，其它非 NOP 端口继续传播。普通 RMU 给出唯一所属馈线；NOP 边界柜由非 NOP 端口侧唯一一致馈线决定所属。不会修改 G 文件，也不会写数据库。"
+            )
+            QMessageBox.information(self, title, text)
+            return
+        if operation_id == "FEEDLINE_FEEDER_TOPOLOGY":
+            title = "FeedLine Feeder Topology Analysis" if self.language == "en_US" else "馈线段所属馈线分析帮助"
+            text = (
+                "Read-only Makkah FeedLine ownership analysis. It reuses the already validated feeder-source, link/node_area, strict geometry-repair and red-NOP port-boundary rules from the RMU topology analysis, without changing that module. Each FeedLine is CONFIRMED only when exactly one main feeder can reach it without crossing a red NOP switch; multiple reachable feeders are CONFLICT and no reachable feeder is UNRESOLVED. No G file or Oracle data is modified."
+                if self.language == "en_US"
+                else "独立判断每一条 FeedLine 属于哪条主网馈线，不修改已经验证通过的环网柜馈线拓扑分析逻辑。"
+                "分析复用相同的主网馈线源、link/node_area、严格几何补链和红色 NOP 端口级断点规则：线路可以多路传播，只有真正碰到红色 NOP 对应 Y*/Q* 开关的那一路停止。"
+                "一条 FeedLine 只能由一条有效主网馈线到达时判定 CONFIRMED；多馈线同时可达为 CONFLICT；无馈线可达为 UNRESOLVED。只读 G 文件，不修改 G，也不连接、不查询、不写入 Oracle。"
+            )
+            QMessageBox.information(self, title, text)
+            return
+        if operation_id == "MAIN_STATION_BACKGROUND_LABEL":
+            title = "Main-station Background Label Repair" if self.language == "en_US" else "主网入口背景标签修正帮助"
+            text = (
+                "Repairs colored jump labels near a confirmed main-station CBreaker. A label group must have a visible background and a nearby parenthesized target such as (33359). The parenthesized target is preserved; only the other feeder-like text is replaced with the confirmed main-station feeder name. Candidates farther than 300 G units or with multiple main-station matches are never auto-modified. Source G files stay read-only and safe copies are written to Workspace."
+                if self.language == "en_US"
+                else "修正主网开关附近的带背景跳转标签：候选必须具有可见背景色，并且同一背景内存在形如 (33359) 的目标环网柜名称。括号目标绝不修改，只把另一段馈线样式文字替换成该主网 CBreaker 已确认的馈线名称。距离超过 300G 或 300G 内存在多个主网候选时不自动修改。原始 G 文件不覆盖，只输出 Workspace 安全副本。此类背景跳转标签在整图馈线拓扑分析中会被强制排除，绝不作为馈线锚点。"
+            )
+            QMessageBox.information(self, title, text)
+            return
+        if operation_id == "WHOLE_GRAPH_TOPOLOGY":
+            title = "Whole-Graph Feeder Topology Analysis" if self.language == "en_US" else "整图馈线拓扑分析帮助"
+            text = (
+                "Read-only topology analysis for exactly one G file. It does not use Oracle or model tables. Main-station Bay labels and feeder names written directly on FeedLine (for example TURB-BH-04) both become feeder anchors. Red NOPs owned by an RMU keep the existing Y*/Q* boundary rule; all other red NOPs are treated as pole-switch NOPs. Feeder propagation never crosses an NOP switch, and the NOP switch itself is not assigned a feeder; both sides are reported independently."
+                if self.language == "en_US"
+                else "针对单个 G 文件做整张图的纯图形只读拓扑分析，不访问 Oracle，也不做任何模型表校验。一个主站出线有且只能有一个馈线名字：主网 Bay/CBreaker 标题优先；若没有主站设备而只在线路末端写 TRUB-BH21 这类名字，则仅在无设备源的末端区域选中唯一文字源。同名重复或同一源端多个名字都不会同时传播。带背景跳转标签会在馈线识别前强制排除。红色 NOP 按既有规则作为硬边界，NOP 每一侧也必须最终只得到一个主站/馈线名字，否则直接报告源唯一性/NOP拓扑异常。"
+            )
+            QMessageBox.information(self, title, text)
+            return
+        if operation_id == "GRAPHICS_PIPELINE":
+            title = "Graphics Pipeline" if self.language == "en_US" else "组合处理（一键）帮助"
+            text = (
+                "Runs selected graphics operations serially on the same safe copy. A final G file is published only after all selected steps for that file succeed."
+                if self.language == "en_US"
+                else "将勾选的图形处理步骤按固定顺序串行作用于同一份 Workspace 安全副本："
+                "网络图元清理 → channel_status 移动 → Poke 跳转。单个文件任一步骤失败时不发布最终 G，"
+                "但会继续处理其它文件。"
+            )
+            QMessageBox.information(self, title, text)
+
+    def _build_poke_processing_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            "主网馈线标题按 405 / SUBSTATION.GRAPH_NAME 生成跳转；"
+            "智能 RMU 复用 G File Studio 的 RMU Poke 属性和数据库命名链。"
+            "只修改本次运行目录中的安全副本。"
+        )
+        description.setWordWrap(True)
+        description.setObjectName("pageSub")
+        layout.addWidget(description)
+
+        option_box = QGroupBox("Poke 跳转类型")
+        option_layout = QVBoxLayout(option_box)
+        self.poke_enable_main_feeder = QCheckBox(
+            "主网馈线标题跳转：GVCM-AH304 → 405.GRAPH_NAME?locateLabel=AH304&&scaleFlag=true"
+        )
+        self.poke_enable_main_feeder.setChecked(True)
+        self.poke_enable_smart_rmu = QCheckBox(
+            "智能 RMU 跳转：仅 SMART / SMR 环网柜，复制 G File Studio 的 RMU Poke 处理"
+        )
+        self.poke_enable_smart_rmu.setChecked(True)
+        option_layout.addWidget(self.poke_enable_main_feeder)
+        option_layout.addWidget(self.poke_enable_smart_rmu)
+        note = QLabel(
+            "主网馈线 Poke 直接包住图中的馈线名称 Text；如果该名称已有相关 Poke 则复用/修复，"
+            "没有则新增。智能 RMU 也只对识别为智能的柜体名称加 Poke。"
+        )
+        note.setWordWrap(True)
+        note.setObjectName("moduleDescription")
+        option_layout.addWidget(note)
+        layout.addWidget(option_box)
+
+        actions = QHBoxLayout()
+        self.poke_run_btn = QPushButton("开始 Poke 跳转处理")
+        self.poke_run_btn.setObjectName("primary")
+        self.poke_run_btn.clicked.connect(self.start_poke_processing)
+        self.poke_open_output_btn = QPushButton("打开 G 输出目录")
+        self.poke_open_output_btn.setEnabled(False)
+        self.poke_open_output_btn.clicked.connect(self._open_poke_output_dir)
+        self.poke_open_report_btn = QPushButton("打开 Poke 报告")
+        self.poke_open_report_btn.setEnabled(False)
+        self.poke_open_report_btn.clicked.connect(self._open_poke_report)
+        actions.addWidget(self.poke_run_btn)
+        actions.addWidget(self.poke_open_output_btn)
+        actions.addWidget(self.poke_open_report_btn)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        self.poke_progress = QProgressBar()
+        self.poke_progress.setRange(0, 100)
+        self.poke_progress.setValue(0)
+        layout.addWidget(self.poke_progress)
+        self.poke_progress_message = QLabel("等待处理")
+        self.poke_progress_message.setObjectName("pageSub")
+        layout.addWidget(self.poke_progress_message)
+
+        log_box = QGroupBox("Poke 运行日志")
+        log_layout = QVBoxLayout(log_box)
+        log_actions = QHBoxLayout()
+        copy_btn = QPushButton("复制日志")
+        copy_btn.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(
+                self.poke_log_edit.toPlainText()
+            )
+        )
+        clear_btn = QPushButton("清空日志")
+        clear_btn.clicked.connect(lambda: self.poke_log_edit.clear())
+        log_actions.addWidget(copy_btn)
+        log_actions.addWidget(clear_btn)
+        log_actions.addStretch()
+        log_layout.addLayout(log_actions)
+        self.poke_log_edit = QPlainTextEdit()
+        self.poke_log_edit.setReadOnly(True)
+        log_layout.addWidget(self.poke_log_edit, 1)
+        layout.addWidget(log_box, 1)
+
+        self._sync_poke_source_from_workspace(rebuild_remote=True)
+        return panel
+
+    def _build_rmu_network_cleanup_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            "删除麦加环网柜下方固定的 G / L / N 网络状态图元。"
+            "识别规则直接按 Status.devref 写死，不依赖 RMU 名称、坐标、数据库或拓扑。"
+            "只修改本次运行目录中的 Workspace 安全副本。"
+        )
+        description.setWordWrap(True)
+        description.setObjectName("pageSub")
+        layout.addWidget(description)
+
+        target_box = QGroupBox("固定清理目标")
+        target_layout = QVBoxLayout(target_box)
+        for text in (
+            "NariPd_Generator.zt.icn.g  （G）",
+            "NariPd_Temporary_Cable.zt.icn.g  （L）",
+            "NariPd_General_Note.zt.icn.g  （N）",
+        ):
+            label = QLabel(text)
+            label.setObjectName("moduleDescription")
+            target_layout.addWidget(label)
+        note = QLabel(
+            "现场样本实际使用 NariPd_General_Note.zt.icn.g；同时兼容旧拼写 "
+            "NariPd_General_Note.zt.icg.g。只删除 <Status> 元素，不删除其它图元。"
+        )
+        note.setWordWrap(True)
+        note.setObjectName("moduleDescription")
+        target_layout.addWidget(note)
+        layout.addWidget(target_box)
+
+        actions = QHBoxLayout()
+        self.graphics_cleanup_run_btn = QPushButton("开始环网柜网络图元清理")
+        self.graphics_cleanup_run_btn.setObjectName("primary")
+        self.graphics_cleanup_run_btn.clicked.connect(self.start_rmu_network_cleanup)
+        self.graphics_cleanup_open_output_btn = QPushButton("打开 G 输出目录")
+        self.graphics_cleanup_open_output_btn.setEnabled(False)
+        self.graphics_cleanup_open_output_btn.clicked.connect(
+            self._open_graphics_cleanup_output_dir
+        )
+        self.graphics_cleanup_open_report_btn = QPushButton("打开清理报告")
+        self.graphics_cleanup_open_report_btn.setEnabled(False)
+        self.graphics_cleanup_open_report_btn.clicked.connect(
+            self._open_graphics_cleanup_report
+        )
+        actions.addWidget(self.graphics_cleanup_run_btn)
+        actions.addWidget(self.graphics_cleanup_open_output_btn)
+        actions.addWidget(self.graphics_cleanup_open_report_btn)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        self.graphics_cleanup_progress = QProgressBar()
+        self.graphics_cleanup_progress.setRange(0, 100)
+        self.graphics_cleanup_progress.setValue(0)
+        layout.addWidget(self.graphics_cleanup_progress)
+        self.graphics_cleanup_progress_message = QLabel("等待处理")
+        self.graphics_cleanup_progress_message.setObjectName("pageSub")
+        layout.addWidget(self.graphics_cleanup_progress_message)
+
+        log_box = QGroupBox("环网柜网络图元清理日志")
+        log_layout = QVBoxLayout(log_box)
+        log_actions = QHBoxLayout()
+        copy_btn = QPushButton("复制日志")
+        copy_btn.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(
+                self.graphics_cleanup_log_edit.toPlainText()
+            )
+        )
+        clear_btn = QPushButton("清空日志")
+        clear_btn.clicked.connect(lambda: self.graphics_cleanup_log_edit.clear())
+        log_actions.addWidget(copy_btn)
+        log_actions.addWidget(clear_btn)
+        log_actions.addStretch()
+        log_layout.addLayout(log_actions)
+        self.graphics_cleanup_log_edit = QPlainTextEdit()
+        self.graphics_cleanup_log_edit.setReadOnly(True)
+        log_layout.addWidget(self.graphics_cleanup_log_edit, 1)
+        layout.addWidget(log_box, 1)
+        return panel
+
+    def _build_rmu_channel_status_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            "移动麦加环网柜中的 channel_status.zt.icn.g 红色状态点。"
+            "定位、RMU 归属和移动算法直接复用 G File Studio v2.18.244 的现场逻辑；"
+            "只移动 channel_status Status 本身，不移动环网柜、母线、设备、文字或连接线。"
+        )
+        description.setWordWrap(True)
+        description.setObjectName("pageSub")
+        layout.addWidget(description)
+
+        option_box = QGroupBox("channel_status 移动设置")
+        option_layout = QHBoxLayout(option_box)
+        option_layout.setContentsMargins(14, 18, 14, 12)
+        option_layout.setSpacing(10)
+        option_layout.addWidget(QLabel("框内位置"))
+        self.channel_status_position_combo = NoWheelComboBox()
+        self.channel_status_position_combo.setMinimumWidth(150)
+        for value, label in CHANNEL_STATUS_POSITIONS.items():
+            self.channel_status_position_combo.addItem(label, value)
+        default_index = self.channel_status_position_combo.findData("bottom_left")
+        if default_index >= 0:
+            self.channel_status_position_combo.setCurrentIndex(default_index)
+        option_layout.addWidget(self.channel_status_position_combo)
+        option_layout.addWidget(QLabel("距边"))
+        self.channel_status_margin_spin = QSpinBox()
+        self.channel_status_margin_spin.setRange(0, 1000)
+        self.channel_status_margin_spin.setValue(5)
+        self.channel_status_margin_spin.setSuffix(" px")
+        self.channel_status_margin_spin.setFixedWidth(140)
+        option_layout.addWidget(self.channel_status_margin_spin)
+        option_layout.addStretch(1)
+        layout.addWidget(option_box)
+
+        note = QLabel(
+            "支持左上角、上边中点、右上角、左边中点、右边中点、左下角、下边中点、右下角 8 个位置。"
+            "状态点中心优先在 RMU 框内查找；兼容旧图时允许在外框扩展 40 像素范围内寻找，"
+            "多个候选时取距离本柜 BusDis 中心最近的一点，同一个 Status 不会分配给多个柜体。"
+        )
+        note.setWordWrap(True)
+        note.setObjectName("moduleDescription")
+        layout.addWidget(note)
+
+        actions = QHBoxLayout()
+        self.channel_status_run_btn = QPushButton("开始移动 channel_status")
+        self.channel_status_run_btn.setObjectName("primary")
+        self.channel_status_run_btn.clicked.connect(self.start_rmu_channel_status_reposition)
+        self.channel_status_open_output_btn = QPushButton("打开 G 输出目录")
+        self.channel_status_open_output_btn.setEnabled(False)
+        self.channel_status_open_output_btn.clicked.connect(
+            self._open_channel_status_output_dir
+        )
+        self.channel_status_open_report_btn = QPushButton("打开移动报告")
+        self.channel_status_open_report_btn.setEnabled(False)
+        self.channel_status_open_report_btn.clicked.connect(
+            self._open_channel_status_report
+        )
+        actions.addWidget(self.channel_status_run_btn)
+        actions.addWidget(self.channel_status_open_output_btn)
+        actions.addWidget(self.channel_status_open_report_btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.channel_status_progress = QProgressBar()
+        self.channel_status_progress.setRange(0, 100)
+        self.channel_status_progress.setValue(0)
+        layout.addWidget(self.channel_status_progress)
+        self.channel_status_progress_message = QLabel("等待处理")
+        self.channel_status_progress_message.setObjectName("pageSub")
+        layout.addWidget(self.channel_status_progress_message)
+
+        log_box = QGroupBox("channel_status 移动日志")
+        log_layout = QVBoxLayout(log_box)
+        log_actions = QHBoxLayout()
+        copy_btn = QPushButton("复制日志")
+        copy_btn.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(
+                self.channel_status_log_edit.toPlainText()
+            )
+        )
+        clear_btn = QPushButton("清空日志")
+        clear_btn.clicked.connect(lambda: self.channel_status_log_edit.clear())
+        log_actions.addWidget(copy_btn)
+        log_actions.addWidget(clear_btn)
+        log_actions.addStretch(1)
+        log_layout.addLayout(log_actions)
+        self.channel_status_log_edit = QPlainTextEdit()
+        self.channel_status_log_edit.setReadOnly(True)
+        log_layout.addWidget(self.channel_status_log_edit, 1)
+        layout.addWidget(log_box, 1)
+        return panel
+
+    def _build_rmu_annotation_position_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            "调整麦加环网柜 NOP 和环网柜名称的位置。NOP 不按柜体整体居中，而是只匹配柜内 Y*/Q* 开关设备，"
+            "并与对应开关保持完全水平中心对齐；环网柜名称识别按 RIGHT → BOTTOM → GLOBAL fallback，位置按外框四边中点放置；名称已有 Poke 时同步移动 Poke。"
+        )
+        description.setWordWrap(True)
+        description.setObjectName("pageSub")
+        layout.addWidget(description)
+
+        option_box = QGroupBox("NOP / 环网柜名称位置设置")
+        option_layout = QGridLayout(option_box)
+        option_layout.setContentsMargins(14, 18, 14, 12)
+        option_layout.setHorizontalSpacing(10)
+        option_layout.setVerticalSpacing(9)
+        option_layout.setColumnStretch(1, 1)
+        option_layout.setColumnStretch(4, 1)
+
+        option_layout.addWidget(QLabel("NOP 位置"), 0, 0)
+        self.rmu_annotation_nop_position_combo = NoWheelComboBox()
+        self.rmu_annotation_nop_position_combo.setMinimumWidth(220)
+        for value, label in NOP_HORIZONTAL_POSITIONS.items():
+            self.rmu_annotation_nop_position_combo.addItem(label, value)
+        idx = self.rmu_annotation_nop_position_combo.findData("auto")
+        if idx >= 0:
+            self.rmu_annotation_nop_position_combo.setCurrentIndex(idx)
+        option_layout.addWidget(self.rmu_annotation_nop_position_combo, 0, 1)
+        option_layout.addWidget(QLabel("距边"), 0, 2)
+        self.rmu_annotation_nop_margin_spin = QSpinBox()
+        self.rmu_annotation_nop_margin_spin.setRange(0, 1000)
+        self.rmu_annotation_nop_margin_spin.setValue(5)
+        self.rmu_annotation_nop_margin_spin.setSuffix(" px")
+        self.rmu_annotation_nop_margin_spin.setFixedWidth(120)
+        option_layout.addWidget(self.rmu_annotation_nop_margin_spin, 0, 3)
+
+        option_layout.addWidget(QLabel("环网柜名称位置"), 1, 0)
+        self.rmu_annotation_name_position_combo = NoWheelComboBox()
+        self.rmu_annotation_name_position_combo.setMinimumWidth(220)
+        for value, label in RMU_NAME_POSITIONS.items():
+            self.rmu_annotation_name_position_combo.addItem(label, value)
+        idx = self.rmu_annotation_name_position_combo.findData("right")
+        if idx >= 0:
+            self.rmu_annotation_name_position_combo.setCurrentIndex(idx)
+        option_layout.addWidget(self.rmu_annotation_name_position_combo, 1, 1)
+        option_layout.addWidget(QLabel("距边"), 1, 2)
+        self.rmu_annotation_name_margin_spin = QSpinBox()
+        self.rmu_annotation_name_margin_spin.setRange(0, 1000)
+        self.rmu_annotation_name_margin_spin.setValue(5)
+        self.rmu_annotation_name_margin_spin.setSuffix(" px")
+        self.rmu_annotation_name_margin_spin.setFixedWidth(120)
+        option_layout.addWidget(self.rmu_annotation_name_margin_spin, 1, 3)
+        layout.addWidget(option_box)
+
+        note = QLabel(
+            "NOP 对齐规则：只使用当前 RMU 内的 CBreakerDis，并要求设备名称能确定为 Y* 或 Q*。"
+            "优先使用设备 p_NameString，缺失时复用现有可见 Y*/Q* 名称识别。NOP 与对应设备的中心 Y 完全一致，"
+            "因此不会再按环网柜外框中心对齐。自动模式只保持 NOP 原来的左/右侧。"
+            "环网柜名称只从 RMU 框外 Text 中按 RIGHT → BOTTOM → GLOBAL fallback 识别；柜内 Text 不参与，一柜一名称、一 Text 只分配一次；若名称 Text 已绑定 Poke，名称移动时 Poke 同步移动。"
+        )
+        note.setWordWrap(True)
+        note.setObjectName("moduleDescription")
+        layout.addWidget(note)
+
+        actions = QHBoxLayout()
+        self.rmu_annotation_run_btn = QPushButton("开始调整 NOP / 环网柜名称")
+        self.rmu_annotation_run_btn.setObjectName("primary")
+        self.rmu_annotation_run_btn.clicked.connect(self.start_rmu_annotation_reposition)
+        self.rmu_annotation_open_output_btn = QPushButton("打开 G 输出目录")
+        self.rmu_annotation_open_output_btn.setEnabled(False)
+        self.rmu_annotation_open_output_btn.clicked.connect(self._open_rmu_annotation_output_dir)
+        self.rmu_annotation_open_report_btn = QPushButton("打开位置报告")
+        self.rmu_annotation_open_report_btn.setEnabled(False)
+        self.rmu_annotation_open_report_btn.clicked.connect(self._open_rmu_annotation_report)
+        actions.addWidget(self.rmu_annotation_run_btn)
+        actions.addWidget(self.rmu_annotation_open_output_btn)
+        actions.addWidget(self.rmu_annotation_open_report_btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.rmu_annotation_progress = QProgressBar()
+        self.rmu_annotation_progress.setRange(0, 100)
+        self.rmu_annotation_progress.setValue(0)
+        layout.addWidget(self.rmu_annotation_progress)
+        self.rmu_annotation_progress_message = QLabel("等待处理")
+        self.rmu_annotation_progress_message.setObjectName("pageSub")
+        layout.addWidget(self.rmu_annotation_progress_message)
+
+        log_box = QGroupBox("NOP / 环网柜名称位置调整日志")
+        log_layout = QVBoxLayout(log_box)
+        log_actions = QHBoxLayout()
+        copy_btn = QPushButton("复制日志")
+        copy_btn.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(
+                self.rmu_annotation_log_edit.toPlainText()
+            )
+        )
+        clear_btn = QPushButton("清空日志")
+        clear_btn.clicked.connect(lambda: self.rmu_annotation_log_edit.clear())
+        log_actions.addWidget(copy_btn)
+        log_actions.addWidget(clear_btn)
+        log_actions.addStretch(1)
+        log_layout.addLayout(log_actions)
+        self.rmu_annotation_log_edit = QPlainTextEdit()
+        self.rmu_annotation_log_edit.setReadOnly(True)
+        log_layout.addWidget(self.rmu_annotation_log_edit, 1)
+        layout.addWidget(log_box, 1)
+        return panel
+
+    def _build_feeder_avoidance_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            "只移动压住环网柜名称或 NOP / N.O.P 文字的 FeedLine。"
+            "同一 RMU 列中，相邻环网柜之间的馈线对齐到同一内侧轨道；"
+            "跨越其它环网柜的长馈线依次往外排列。右侧向右、左侧向左镜像处理。"
+        )
+        description.setWordWrap(True)
+        description.setObjectName("pageSub")
+        layout.addWidget(description)
+
+        option_box = QGroupBox("馈线避让参数")
+        option_layout = QGridLayout(option_box)
+        option_layout.setContentsMargins(14, 18, 14, 12)
+        option_layout.setHorizontalSpacing(10)
+        option_layout.setVerticalSpacing(9)
+
+        option_layout.addWidget(QLabel("文字安全间距"), 0, 0)
+        self.feeder_avoidance_clearance_spin = QSpinBox()
+        self.feeder_avoidance_clearance_spin.setRange(0, 300)
+        self.feeder_avoidance_clearance_spin.setValue(
+            int(self.cfg.get("feeder_avoidance_text_clearance", DEFAULT_TEXT_CLEARANCE))
+        )
+        self.feeder_avoidance_clearance_spin.setSuffix(" G")
+        self.feeder_avoidance_clearance_spin.setFixedWidth(120)
+        option_layout.addWidget(self.feeder_avoidance_clearance_spin, 0, 1)
+
+        option_layout.addWidget(QLabel("错落轨道间距"), 0, 2)
+        self.feeder_avoidance_spacing_spin = QSpinBox()
+        self.feeder_avoidance_spacing_spin.setRange(10, 300)
+        self.feeder_avoidance_spacing_spin.setValue(
+            int(self.cfg.get("feeder_avoidance_track_spacing", DEFAULT_FEEDER_SPACING))
+        )
+        self.feeder_avoidance_spacing_spin.setSuffix(" G")
+        self.feeder_avoidance_spacing_spin.setFixedWidth(120)
+        option_layout.addWidget(self.feeder_avoidance_spacing_spin, 0, 3)
+
+        option_layout.addWidget(QLabel("同列判定范围"), 0, 4)
+        self.feeder_avoidance_corridor_spin = QSpinBox()
+        self.feeder_avoidance_corridor_spin.setRange(0, 1000)
+        self.feeder_avoidance_corridor_spin.setValue(
+            int(self.cfg.get("feeder_avoidance_corridor_tolerance", DEFAULT_CORRIDOR_TOLERANCE))
+        )
+        self.feeder_avoidance_corridor_spin.setSuffix(" G")
+        self.feeder_avoidance_corridor_spin.setFixedWidth(130)
+        option_layout.addWidget(self.feeder_avoidance_corridor_spin, 0, 5)
+
+        option_layout.addWidget(QLabel("最大外移"), 1, 0)
+        self.feeder_avoidance_max_shift_spin = QSpinBox()
+        self.feeder_avoidance_max_shift_spin.setRange(50, 3000)
+        self.feeder_avoidance_max_shift_spin.setValue(
+            int(self.cfg.get("feeder_avoidance_max_shift", DEFAULT_MAX_RIGHT_SHIFT))
+        )
+        self.feeder_avoidance_max_shift_spin.setSuffix(" G")
+        self.feeder_avoidance_max_shift_spin.setFixedWidth(120)
+        option_layout.addWidget(self.feeder_avoidance_max_shift_spin, 1, 1)
+
+        self.feeder_avoidance_right_check = QCheckBox("处理右侧馈线")
+        self.feeder_avoidance_right_check.setChecked(
+            bool(self.cfg.get("feeder_avoidance_process_right", True))
+        )
+        option_layout.addWidget(self.feeder_avoidance_right_check, 1, 2, 1, 2)
+
+        self.feeder_avoidance_left_check = QCheckBox("处理左侧馈线")
+        self.feeder_avoidance_left_check.setChecked(
+            bool(self.cfg.get("feeder_avoidance_process_left", True))
+        )
+        option_layout.addWidget(self.feeder_avoidance_left_check, 1, 4, 1, 2)
+        option_layout.setColumnStretch(6, 1)
+        layout.addWidget(option_box)
+
+        note = QLabel(
+            "硬规则：环网柜名称和 NOP / N.O.P 原地不动；没有文字碰撞的 FeedLine 完全不处理。"
+            "同一 RMU 列中，相邻 RMU 之间且 Y 范围不重叠的馈线复用同一条内侧轨道；"
+            "跨越这些区间的馈线按重叠层级依次放到更外侧轨道。"
+            "右侧轨道只向 +X 外扩，左侧轨道只向 -X 外扩。"
+            "只修改 Workspace 安全副本中的 FeedLine.d 及其几何包围框，link / node_area / keyid 不变。"
+        )
+        note.setWordWrap(True)
+        note.setObjectName("moduleDescription")
+        layout.addWidget(note)
+
+        actions = QHBoxLayout()
+        self.feeder_avoidance_run_btn = QPushButton("开始馈线避让调整")
+        self.feeder_avoidance_run_btn.setObjectName("primary")
+        self.feeder_avoidance_run_btn.clicked.connect(self.start_feeder_avoidance)
+        self.feeder_avoidance_open_output_btn = QPushButton("打开 G 输出目录")
+        self.feeder_avoidance_open_output_btn.setEnabled(False)
+        self.feeder_avoidance_open_output_btn.clicked.connect(self._open_feeder_avoidance_output_dir)
+        self.feeder_avoidance_open_report_btn = QPushButton("打开避让报告")
+        self.feeder_avoidance_open_report_btn.setEnabled(False)
+        self.feeder_avoidance_open_report_btn.clicked.connect(self._open_feeder_avoidance_report)
+        actions.addWidget(self.feeder_avoidance_run_btn)
+        actions.addWidget(self.feeder_avoidance_open_output_btn)
+        actions.addWidget(self.feeder_avoidance_open_report_btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.feeder_avoidance_progress = QProgressBar()
+        self.feeder_avoidance_progress.setRange(0, 100)
+        self.feeder_avoidance_progress.setValue(0)
+        layout.addWidget(self.feeder_avoidance_progress)
+        self.feeder_avoidance_progress_message = QLabel("等待处理")
+        self.feeder_avoidance_progress_message.setObjectName("pageSub")
+        layout.addWidget(self.feeder_avoidance_progress_message)
+
+        log_box = QGroupBox("馈线避让调整日志")
+        log_layout = QVBoxLayout(log_box)
+        log_actions = QHBoxLayout()
+        copy_btn = QPushButton("复制日志")
+        copy_btn.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(
+                self.feeder_avoidance_log_edit.toPlainText()
+            )
+        )
+        clear_btn = QPushButton("清空日志")
+        clear_btn.clicked.connect(lambda: self.feeder_avoidance_log_edit.clear())
+        log_actions.addWidget(copy_btn)
+        log_actions.addWidget(clear_btn)
+        log_actions.addStretch(1)
+        log_layout.addLayout(log_actions)
+        self.feeder_avoidance_log_edit = QPlainTextEdit()
+        self.feeder_avoidance_log_edit.setReadOnly(True)
+        log_layout.addWidget(self.feeder_avoidance_log_edit, 1)
+        layout.addWidget(log_box, 1)
+        return panel
+
+    def _build_rmu_feeder_topology_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            "本模块只判断环网柜 RMU 的所属馈线。FeedLine、ConnectLine、Bus、BusDis 和其它网络对象只作为电气拓扑寻路介质，不判断 FeedLine 属于哪个 RMU，也不输出 FeedLine 业务归属。"
+            "分析从每条主网馈线 CBreaker 出发，沿 link/node_area 和严格几何补链持续传播；只处理红色 NOP，非红色 NOP 全部忽略。"
+            "只有某一条传播路径实际碰到红色 NOP 对应的 Y*/Q* 开关时，这一路才在该开关处停止；同一馈线的其它支路、同一 RMU 的其它非 NOP 端口继续传播。"
+            "本模块只读分析，不修改 G 文件，也不连接、不查询、不写入 Oracle 数据库。"
+        )
+        description.setWordWrap(True)
+        description.setObjectName("pageSub")
+        layout.addWidget(description)
+
+        rule_box = QGroupBox("NOP 拓扑分析规则")
+        rule_layout = QVBoxLayout(rule_box)
+        rules = (
+            "① 分析目标：只判断 RMU 所属馈线；FeedLine / ConnectLine / Bus / BusDis 仅用于拓扑寻路，不作为 RMU 归属对象。",
+            "② 主网馈线源：识别包含 CBreaker 的最内层 Bay 框，并读取附近无背景合法馈线标题（颜色不限）。",
+            "③ 电气传播：从每个主网 CBreaker 出发，优先沿 link / node_area 传播；缺失连接时只允许端点≤3G、端点到线段≤2G的严格补链。没有碰到 NOP 就一直继续，线路分叉时每一条支路都继续。",
+            "④ NOP 归属：只处理红色 NOP；非红色 NOP 全部忽略。红色 NOP 先归属最近 RMU，而且只能在该 RMU 框内找 Y*/Q* CBreakerDis。左右侧 NOP 优先按中心 Y 水平对齐，上下侧 NOP 按中心 X 对齐；同一对齐行/列有多个候选时再取离 NOP 最近者。",
+            "⑤ NOP 断点：NOP 是端口级、支路级断点。只有传播路径真正走到 NOP 对应 Y*/Q* 开关时，该一路在此停止；同一 feeder 的其它支路以及同柜其它非 NOP 端口继续传播，不做整条 feeder 的全局删除。",
+            "⑥ RMU归属：普通 RMU 根据其 Y*/Q* 端口从哪些主网 feeder 可达来判断；NOP 柜忽略 NOP 端口作为归属端口，使用同柜其它非 NOP Y*/Q* 的唯一一致 feeder 作为 RMU 所属馈线，NOP 另一侧 feeder 记录为在此截止。",
+            "⑦ 报告：只输出主网传播入口、NOP所属RMU/开关、RMU所属馈线和RMU端口拓扑证据，不输出 FeedLine 业务归属。",
+            "⑧ 安全原则：多馈线同时可达标记 CONFLICT，无可靠可达证据标记 UNRESOLVED，不按全图最近距离猜测。",
+        )
+        for line in rules:
+            label = QLabel(line)
+            label.setWordWrap(True)
+            rule_layout.addWidget(label)
+        layout.addWidget(rule_box)
+
+        actions = QHBoxLayout()
+        self.rmu_feeder_topology_run_btn = QPushButton("开始环网柜馈线拓扑分析")
+        self.rmu_feeder_topology_run_btn.setObjectName("primary")
+        self.rmu_feeder_topology_run_btn.clicked.connect(self.start_rmu_feeder_topology_analysis)
+        self.rmu_feeder_topology_open_report_btn = QPushButton("打开拓扑分析报告")
+        self.rmu_feeder_topology_open_report_btn.setEnabled(False)
+        self.rmu_feeder_topology_open_report_btn.clicked.connect(self._open_rmu_feeder_topology_report)
+        self.rmu_feeder_topology_open_dir_btn = QPushButton("打开分析结果目录")
+        self.rmu_feeder_topology_open_dir_btn.setEnabled(False)
+        self.rmu_feeder_topology_open_dir_btn.clicked.connect(self._open_rmu_feeder_topology_report_dir)
+        actions.addWidget(self.rmu_feeder_topology_run_btn)
+        actions.addWidget(self.rmu_feeder_topology_open_report_btn)
+        actions.addWidget(self.rmu_feeder_topology_open_dir_btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.rmu_feeder_topology_progress = QProgressBar()
+        self.rmu_feeder_topology_progress.setRange(0, 100)
+        self.rmu_feeder_topology_progress.setValue(0)
+        layout.addWidget(self.rmu_feeder_topology_progress)
+        self.rmu_feeder_topology_progress_message = QLabel("等待分析")
+        self.rmu_feeder_topology_progress_message.setObjectName("pageSub")
+        layout.addWidget(self.rmu_feeder_topology_progress_message)
+
+        log_box = QGroupBox("环网柜馈线拓扑分析日志")
+        log_layout = QVBoxLayout(log_box)
+        log_actions = QHBoxLayout()
+        copy_btn = QPushButton("复制日志")
+        copy_btn.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(
+                self.rmu_feeder_topology_log_edit.toPlainText()
+            )
+        )
+        clear_btn = QPushButton("清空日志")
+        clear_btn.clicked.connect(lambda: self.rmu_feeder_topology_log_edit.clear())
+        log_actions.addWidget(copy_btn)
+        log_actions.addWidget(clear_btn)
+        log_actions.addStretch(1)
+        log_layout.addLayout(log_actions)
+        self.rmu_feeder_topology_log_edit = QPlainTextEdit()
+        self.rmu_feeder_topology_log_edit.setReadOnly(True)
+        log_layout.addWidget(self.rmu_feeder_topology_log_edit, 1)
+        layout.addWidget(log_box, 1)
+        return panel
+
+    def _build_feedline_feeder_topology_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            "本模块独立分析 FeedLine 的所属馈线，不修改已经验证通过的‘环网柜馈线拓扑分析’逻辑。"
+            "从每条主网馈线 CBreaker 出发，沿 link/node_area、连接线、FeedLine、配网母线及严格几何补链持续传播；只处理红色 NOP，非红色 NOP 全部忽略。"
+            "只有当前传播路径真正碰到红色 NOP 对应的 Y*/Q* 开关时，这一路才停止，其它支路继续。"
+            "本模块只读分析，不修改 G 文件，也不连接、不查询、不写入 Oracle 数据库。"
+        )
+        description.setWordWrap(True)
+        description.setObjectName("pageSub")
+        layout.addWidget(description)
+
+        rule_box = QGroupBox("馈线段拓扑分析规则")
+        rule_layout = QVBoxLayout(rule_box)
+        rules = (
+            "① 分析目标：输出每条 FeedLine 的所属主网馈线；RMU、ConnectLine、Bus、BusDis 和其它网络对象只作为拓扑节点/路径证据。",
+            "② 主网馈线源：与环网柜拓扑分析保持一致，识别包含 CBreaker 的最内层 Bay 框及附近无背景合法馈线标题，标题颜色不限。",
+            "③ 电气传播：优先使用 link / node_area；XML 缺链时只允许端点≤3G、端点到线段≤2G的严格补链。线路分叉后每条支路独立继续传播。",
+            "④ NOP 断点：只处理红色 NOP。NOP 只能在所属 RMU 框内匹配 Y*/Q* 开关；左右侧优先按中心 Y 水平对齐，上下侧按中心 X 对齐。同一行/列多个候选时再按距离消歧。",
+            "⑤ 支路停止：只有传播路径真正走到红色 NOP 对应开关时，该一路停止；同一 feeder 的其它支路继续，不做整条 feeder 全局删除。",
+            "⑥ FeedLine归属：只有一个 feeder 可达 → CONFIRMED；多个 feeder 可达 → CONFLICT；没有 feeder 可达 → UNRESOLVED。绝不按全图最近馈线猜测。",
+            "⑦ 输出：HTML 汇总主网馈线传播入口、红色 NOP 边界和全部 FeedLine 所属馈线；同时输出 FeedLine CSV 与 NOP 边界 CSV。",
+        )
+        for line in rules:
+            label = QLabel(line)
+            label.setWordWrap(True)
+            rule_layout.addWidget(label)
+        layout.addWidget(rule_box)
+
+        actions = QHBoxLayout()
+        self.feedline_feeder_topology_run_btn = QPushButton("开始馈线段所属馈线分析")
+        self.feedline_feeder_topology_run_btn.setObjectName("primary")
+        self.feedline_feeder_topology_run_btn.clicked.connect(self.start_feedline_feeder_topology_analysis)
+        self.feedline_feeder_topology_open_report_btn = QPushButton("打开馈线段分析报告")
+        self.feedline_feeder_topology_open_report_btn.setEnabled(False)
+        self.feedline_feeder_topology_open_report_btn.clicked.connect(self._open_feedline_feeder_topology_report)
+        self.feedline_feeder_topology_open_dir_btn = QPushButton("打开分析结果目录")
+        self.feedline_feeder_topology_open_dir_btn.setEnabled(False)
+        self.feedline_feeder_topology_open_dir_btn.clicked.connect(self._open_feedline_feeder_topology_report_dir)
+        actions.addWidget(self.feedline_feeder_topology_run_btn)
+        actions.addWidget(self.feedline_feeder_topology_open_report_btn)
+        actions.addWidget(self.feedline_feeder_topology_open_dir_btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.feedline_feeder_topology_progress = QProgressBar()
+        self.feedline_feeder_topology_progress.setRange(0, 100)
+        self.feedline_feeder_topology_progress.setValue(0)
+        layout.addWidget(self.feedline_feeder_topology_progress)
+        self.feedline_feeder_topology_progress_message = QLabel("等待分析")
+        self.feedline_feeder_topology_progress_message.setObjectName("pageSub")
+        layout.addWidget(self.feedline_feeder_topology_progress_message)
+
+        log_box = QGroupBox("馈线段所属馈线分析日志")
+        log_layout = QVBoxLayout(log_box)
+        log_actions = QHBoxLayout()
+        copy_btn = QPushButton("复制日志")
+        copy_btn.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(
+                self.feedline_feeder_topology_log_edit.toPlainText()
+            )
+        )
+        clear_btn = QPushButton("清空日志")
+        clear_btn.clicked.connect(lambda: self.feedline_feeder_topology_log_edit.clear())
+        log_actions.addWidget(copy_btn)
+        log_actions.addWidget(clear_btn)
+        log_actions.addStretch(1)
+        log_layout.addLayout(log_actions)
+        self.feedline_feeder_topology_log_edit = QPlainTextEdit()
+        self.feedline_feeder_topology_log_edit.setReadOnly(True)
+        log_layout.addWidget(self.feedline_feeder_topology_log_edit, 1)
+        layout.addWidget(log_box, 1)
+        return panel
+
+    def _build_main_station_background_label_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            "专门修正主网入口附近的带背景跳转标签。程序先识别真实主网 Bay CBreaker 和馈线名，"
+            "再在其 300G 范围内寻找具有可见背景、并与“(目标环网柜名称)”成组显示的标签。"
+            "括号内容保持不变，只修正括号外主网文字；修正后自动调整背景对象大小，并把两行文字上下居中对齐；原始 G 文件不覆盖。"
+        )
+        description.setWordWrap(True)
+        description.setObjectName("pageSub")
+        layout.addWidget(description)
+
+        rule_box = QGroupBox("背景标签修正规则")
+        rule_layout = QVBoxLayout(rule_box)
+        rules = (
+            "① 候选必须有可见背景色：优先识别填充的 Poke / Rect，也兼容 Text 自带背景属性；不依赖固定 RGB。",
+            "② 同一背景内必须存在一段馈线样式文字和一段形如 (33359) / （33359） 的目标名称；两段文字必须紧邻。",
+            "③ 只在已确认主网 CBreaker 300G 范围内处理；300G 内有多个主网候选时标记 AMBIGUOUS，不自动修改。",
+            "④ 修正时只替换括号外文字，例如 MNA4-12 + (33359) → MNA4-AH312 + (33359)；括号目标绝不修改。",
+            "⑤ 此类背景跳转标签不是馈线标题：整图馈线拓扑分析会在主网/沿线馈线候选识别前强制排除这些 Text。",
+            "⑥ 背景排版：按修正后的文字宽度自动扩展背景 Poke / Rect / 其它可见填充对象；主网名称在上、(目标RMU)在下，两行水平居中且整体垂直居中。",
+            "⑦ 安全原则：原始 G 永不覆盖；只在 Workspace/g_output 生成 *.main-station-label-fixed.sln.pic.g 安全副本，并输出 HTML/CSV 明细。",
+        )
+        for line in rules:
+            label = QLabel(line)
+            label.setWordWrap(True)
+            rule_layout.addWidget(label)
+        layout.addWidget(rule_box)
+
+        actions = QHBoxLayout()
+        self.main_station_background_label_run_btn = QPushButton("开始主网入口背景标签修正")
+        self.main_station_background_label_run_btn.setObjectName("primary")
+        self.main_station_background_label_run_btn.clicked.connect(self.start_main_station_background_label_repair)
+        self.main_station_background_label_open_report_btn = QPushButton("打开修正报告")
+        self.main_station_background_label_open_report_btn.setEnabled(False)
+        self.main_station_background_label_open_report_btn.clicked.connect(self._open_main_station_background_label_report)
+        self.main_station_background_label_open_dir_btn = QPushButton("打开输出目录")
+        self.main_station_background_label_open_dir_btn.setEnabled(False)
+        self.main_station_background_label_open_dir_btn.clicked.connect(self._open_main_station_background_label_output_dir)
+        actions.addWidget(self.main_station_background_label_run_btn)
+        actions.addWidget(self.main_station_background_label_open_report_btn)
+        actions.addWidget(self.main_station_background_label_open_dir_btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.main_station_background_label_progress = QProgressBar()
+        self.main_station_background_label_progress.setRange(0, 100)
+        self.main_station_background_label_progress.setValue(0)
+        layout.addWidget(self.main_station_background_label_progress)
+        self.main_station_background_label_progress_message = QLabel("等待处理")
+        self.main_station_background_label_progress_message.setObjectName("pageSub")
+        layout.addWidget(self.main_station_background_label_progress_message)
+
+        log_box = QGroupBox("主网入口背景标签修正日志")
+        log_layout = QVBoxLayout(log_box)
+        log_actions = QHBoxLayout()
+        copy_btn = QPushButton("复制日志")
+        copy_btn.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(
+                self.main_station_background_label_log_edit.toPlainText()
+            )
+        )
+        clear_btn = QPushButton("清空日志")
+        clear_btn.clicked.connect(lambda: self.main_station_background_label_log_edit.clear())
+        log_actions.addWidget(copy_btn)
+        log_actions.addWidget(clear_btn)
+        log_actions.addStretch(1)
+        log_layout.addLayout(log_actions)
+        self.main_station_background_label_log_edit = QPlainTextEdit()
+        self.main_station_background_label_log_edit.setReadOnly(True)
+        log_layout.addWidget(self.main_station_background_label_log_edit, 1)
+        layout.addWidget(log_box, 1)
+        return panel
+
+    def _build_whole_graph_topology_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            "本模块是全新的整张 G 图拓扑分析，只处理一个 G 文件；不修改既有‘环网柜馈线拓扑分析’和‘馈线段所属馈线分析’逻辑。"
+            "完全只看图形：不连接 Oracle、不校验 13500/13501/13502/13503、不做模型关联。发现唯一且可验证的微小拓扑断点时，"
+            "会保留原始 G 不变，并额外生成 topology-fixed 修复副本，同时在 HTML 显示修复前/修复后两张拓扑图。"
+        )
+        description.setWordWrap(True)
+        description.setObjectName("pageSub")
+        layout.addWidget(description)
+
+        rule_box = QGroupBox("整图拓扑分析规则")
+        rule_layout = QVBoxLayout(rule_box)
+        rules = (
+            "① 分析范围：一次只分析一个 G 文件；输出整张图中 FeedLine、ConnectLine、Bus/BusDis、普通柱上开关、Pole、变压器及其它有 link/node_area 的电气对象所属馈线。",
+            "② 馈线源唯一性：一个主站出线有且只能有一个馈线名字。主网 Bay CBreaker + 馈线标题是权威源；若现场没有主站设备、只在线路末端写 TRUB-BH21 这类主站/馈线名称，则只允许在无主网设备源的末端拓扑区域选中唯一一个文字源。同名文字重复、同一源端出现多个不同名字都只报错/排除，绝不同时参与传播。带背景跳转标签仍强制排除。",
+            "③ 电气连接：优先使用 link / node_area；基础分析仍按端点≤3G、端点到线段≤2G严格补链。若出现无馈线孤立区，会额外检查3G~4.5G之间的线端点微小间隙；只有双方唯一近邻且模拟后错误减少、不新增多馈线时才允许自动修复。",
+            "④ RMU NOP：能按现有逻辑归属到 RMU 的红色 NOP，继续按该 RMU 内唯一 Y*/Q* 开关作为端口级断点；既有环网柜拓扑模块代码不改。",
+            "⑤ 柱上 NOP：所有未归属 RMU 的红色 NOP 都按柱上开关 NOP 处理，匹配最近的外部 CBreakerDis/Disconnector；该开关是硬边界。",
+            "⑥ 传播规则：只从通过唯一性校验的馈线源沿真实拓扑传播；遇到 NOP 开关停止当前路径，其它分支继续。被排除的重复主站名字、中段文字、背景跳转文字都不能成为传播源。NOP 开关本身暂不判断所属馈线。",
+            "⑦ NOP 两侧：分别读取 NOP 开关各邻接侧在断点外的馈线结果。每一侧必须最终有且只有一个主站/馈线名字；0 个=NO_SOURCE_ERROR，多个=MULTI_SOURCE_ERROR，只有唯一一个才算确认。",
+            "⑧ 非NOP设备硬规则：每个设备必须且只能属于一条馈线。唯一馈线可达 → CONFIRMED；没有馈线 → NO_FEEDER_ERROR；多个馈线 → MULTI_FEEDER_ERROR。后两种都作为拓扑错误，优先检查NOP设置或连接。",
+            "⑨ RMU所属馈线：单独汇总同柜 Y*/Q* 开关；NOP端口只作为边界，不参与RMU归属。所有非NOP端口必须各自唯一且最终一致到同一馈线，否则RMU报错；不使用多数投票。HTML报告新增RMU所属馈线独立表格。",
+            "⑩ 安全原则：原始 G 永不覆盖；自动修复只写新的 *.topology-fixed.sln.pic.g 安全副本，并再次完整复核。HTML同时输出修复前/修复后拓扑图和断点修复明细；不连接、不查询、不写入 Oracle。",
+        )
+        for line in rules:
+            label = QLabel(line)
+            label.setWordWrap(True)
+            rule_layout.addWidget(label)
+        layout.addWidget(rule_box)
+
+        actions = QHBoxLayout()
+        self.whole_graph_topology_run_btn = QPushButton("开始整图馈线拓扑分析 / 自动修复")
+        self.whole_graph_topology_run_btn.setObjectName("primary")
+        self.whole_graph_topology_run_btn.clicked.connect(self.start_whole_graph_topology_analysis)
+        self.whole_graph_topology_open_report_btn = QPushButton("打开整图拓扑报告")
+        self.whole_graph_topology_open_report_btn.setEnabled(False)
+        self.whole_graph_topology_open_report_btn.clicked.connect(self._open_whole_graph_topology_report)
+        self.whole_graph_topology_open_dir_btn = QPushButton("打开分析结果目录")
+        self.whole_graph_topology_open_dir_btn.setEnabled(False)
+        self.whole_graph_topology_open_dir_btn.clicked.connect(self._open_whole_graph_topology_report_dir)
+        actions.addWidget(self.whole_graph_topology_run_btn)
+        actions.addWidget(self.whole_graph_topology_open_report_btn)
+        actions.addWidget(self.whole_graph_topology_open_dir_btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.whole_graph_topology_progress = QProgressBar()
+        self.whole_graph_topology_progress.setRange(0, 100)
+        self.whole_graph_topology_progress.setValue(0)
+        layout.addWidget(self.whole_graph_topology_progress)
+        self.whole_graph_topology_progress_message = QLabel("等待分析")
+        self.whole_graph_topology_progress_message.setObjectName("pageSub")
+        layout.addWidget(self.whole_graph_topology_progress_message)
+
+        log_box = QGroupBox("整图馈线拓扑分析日志")
+        log_layout = QVBoxLayout(log_box)
+        log_actions = QHBoxLayout()
+        copy_btn = QPushButton("复制日志")
+        copy_btn.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(
+                self.whole_graph_topology_log_edit.toPlainText()
+            )
+        )
+        clear_btn = QPushButton("清空日志")
+        clear_btn.clicked.connect(lambda: self.whole_graph_topology_log_edit.clear())
+        log_actions.addWidget(copy_btn)
+        log_actions.addWidget(clear_btn)
+        log_actions.addStretch(1)
+        log_layout.addLayout(log_actions)
+        self.whole_graph_topology_log_edit = QPlainTextEdit()
+        self.whole_graph_topology_log_edit.setReadOnly(True)
+        log_layout.addWidget(self.whole_graph_topology_log_edit, 1)
+        layout.addWidget(log_box, 1)
+        return panel
+
+    def _build_graphics_pipeline_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            "一次对同一批 G 文件连续执行多个图形处理步骤。每个文件只有全部已选步骤成功后才写入最终 g_output；"
+            "任何一步失败都不会发布该文件的半成品，并继续处理下一文件。"
+        )
+        description.setWordWrap(True)
+        description.setObjectName("pageSub")
+        layout.addWidget(description)
+
+        steps_box = QGroupBox("组合处理步骤")
+        steps_layout = QVBoxLayout(steps_box)
+        self.pipeline_enable_cleanup = QCheckBox("① 环网柜网络图元清理（删除 G / L / N）")
+        self.pipeline_enable_channel = QCheckBox("② 环网柜 channel_status 移动")
+        self.pipeline_enable_poke = QCheckBox("③ Poke 跳转处理")
+        for cb in (self.pipeline_enable_cleanup, self.pipeline_enable_channel, self.pipeline_enable_poke):
+            cb.setChecked(True)
+            steps_layout.addWidget(cb)
+
+        choice_actions = QHBoxLayout()
+        select_all = QPushButton("全选")
+        clear_all = QPushButton("全部取消")
+        select_all.clicked.connect(lambda: [cb.setChecked(True) for cb in (self.pipeline_enable_cleanup, self.pipeline_enable_channel, self.pipeline_enable_poke)])
+        clear_all.clicked.connect(lambda: [cb.setChecked(False) for cb in (self.pipeline_enable_cleanup, self.pipeline_enable_channel, self.pipeline_enable_poke)])
+        choice_actions.addWidget(select_all)
+        choice_actions.addWidget(clear_all)
+        choice_actions.addStretch(1)
+        steps_layout.addLayout(choice_actions)
+        layout.addWidget(steps_box)
+
+        channel_box = QGroupBox("channel_status 移动参数")
+        channel_layout = QHBoxLayout(channel_box)
+        channel_layout.setContentsMargins(14, 18, 14, 12)
+        channel_layout.addWidget(QLabel("框内位置"))
+        self.pipeline_channel_position_combo = NoWheelComboBox()
+        self.pipeline_channel_position_combo.setMinimumWidth(150)
+        for value, label in CHANNEL_STATUS_POSITIONS.items():
+            self.pipeline_channel_position_combo.addItem(label, value)
+        idx = self.pipeline_channel_position_combo.findData("bottom_left")
+        if idx >= 0:
+            self.pipeline_channel_position_combo.setCurrentIndex(idx)
+        channel_layout.addWidget(self.pipeline_channel_position_combo)
+        channel_layout.addWidget(QLabel("距边"))
+        self.pipeline_channel_margin_spin = QSpinBox()
+        self.pipeline_channel_margin_spin.setRange(0, 1000)
+        self.pipeline_channel_margin_spin.setValue(5)
+        self.pipeline_channel_margin_spin.setSuffix(" px")
+        self.pipeline_channel_margin_spin.setFixedWidth(140)
+        channel_layout.addWidget(self.pipeline_channel_margin_spin)
+        channel_layout.addStretch(1)
+        layout.addWidget(channel_box)
+
+        poke_box = QGroupBox("Poke 参数")
+        poke_layout = QVBoxLayout(poke_box)
+        self.pipeline_poke_main_feeder = QCheckBox("主网馈线标题 Poke")
+        self.pipeline_poke_smart_rmu = QCheckBox("SMART / SMR 智能 RMU Poke")
+        self.pipeline_poke_main_feeder.setChecked(True)
+        self.pipeline_poke_smart_rmu.setChecked(True)
+        poke_layout.addWidget(self.pipeline_poke_main_feeder)
+        poke_layout.addWidget(self.pipeline_poke_smart_rmu)
+
+        poke_choice_actions = QHBoxLayout()
+        self.pipeline_poke_select_all_btn = QPushButton("全选")
+        self.pipeline_poke_clear_all_btn = QPushButton("全部取消")
+        self.pipeline_poke_select_all_btn.clicked.connect(
+            lambda: [cb.setChecked(True) for cb in (self.pipeline_poke_main_feeder, self.pipeline_poke_smart_rmu)]
+        )
+        self.pipeline_poke_clear_all_btn.clicked.connect(
+            lambda: [cb.setChecked(False) for cb in (self.pipeline_poke_main_feeder, self.pipeline_poke_smart_rmu)]
+        )
+        poke_choice_actions.addWidget(self.pipeline_poke_select_all_btn)
+        poke_choice_actions.addWidget(self.pipeline_poke_clear_all_btn)
+        poke_choice_actions.addStretch(1)
+        poke_layout.addLayout(poke_choice_actions)
+        layout.addWidget(poke_box)
+
+        actions = QHBoxLayout()
+        self.graphics_pipeline_run_btn = QPushButton("开始组合处理")
+        self.graphics_pipeline_run_btn.setObjectName("primary")
+        self.graphics_pipeline_run_btn.clicked.connect(self.start_graphics_pipeline)
+        self.graphics_pipeline_open_output_btn = QPushButton("打开 G 输出目录")
+        self.graphics_pipeline_open_output_btn.setEnabled(False)
+        self.graphics_pipeline_open_output_btn.clicked.connect(self._open_graphics_pipeline_output_dir)
+        self.graphics_pipeline_open_report_btn = QPushButton("打开组合处理报告")
+        self.graphics_pipeline_open_report_btn.setEnabled(False)
+        self.graphics_pipeline_open_report_btn.clicked.connect(self._open_graphics_pipeline_report)
+        actions.addWidget(self.graphics_pipeline_run_btn)
+        actions.addWidget(self.graphics_pipeline_open_output_btn)
+        actions.addWidget(self.graphics_pipeline_open_report_btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.graphics_pipeline_progress = QProgressBar()
+        self.graphics_pipeline_progress.setRange(0, 100)
+        self.graphics_pipeline_progress.setValue(0)
+        layout.addWidget(self.graphics_pipeline_progress)
+        self.graphics_pipeline_progress_message = QLabel("等待处理")
+        self.graphics_pipeline_progress_message.setObjectName("pageSub")
+        layout.addWidget(self.graphics_pipeline_progress_message)
+
+        log_box = QGroupBox("组合处理运行日志")
+        log_layout = QVBoxLayout(log_box)
+        log_actions = QHBoxLayout()
+        copy_btn = QPushButton("复制日志")
+        clear_btn = QPushButton("清空日志")
+        copy_btn.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.graphics_pipeline_log_edit.toPlainText()))
+        clear_btn.clicked.connect(lambda: self.graphics_pipeline_log_edit.clear())
+        log_actions.addWidget(copy_btn)
+        log_actions.addWidget(clear_btn)
+        log_actions.addStretch(1)
+        log_layout.addLayout(log_actions)
+        self.graphics_pipeline_log_edit = QPlainTextEdit()
+        self.graphics_pipeline_log_edit.setReadOnly(True)
+        log_layout.addWidget(self.graphics_pipeline_log_edit, 1)
+        layout.addWidget(log_box, 1)
+        return panel
+
+    def _build_poke_source_box(self):
+        """Build a full-width source selector for the Poke page.
+
+        The controls mirror the Model Workspace source state instead of
+        creating a separate source model. This keeps SSH read-only semantics,
+        selection state and snapshots consistent across both pages.
+        """
+        box = QGroupBox("文件来源（图形工作区）")
+        root = QVBoxLayout(box)
+        root.setContentsMargins(14, 18, 14, 12)
+        root.setSpacing(8)
+
+        source_row = QGridLayout()
+        source_row.setColumnStretch(1, 1)
+        source_row.addWidget(QLabel("文件来源"), 0, 0)
+        self.poke_input_source_combo = NoWheelComboBox()
+        self.poke_input_source_combo.addItem("本地文件 / 目录", "LOCAL")
+        self.poke_input_source_combo.addItem("SSH 文件服务器（只读）", "SSH")
+        self.poke_input_source_combo.currentIndexChanged.connect(
+            self._on_poke_input_source_changed
+        )
+        source_row.addWidget(self.poke_input_source_combo, 0, 1, 1, 3)
+        root.addLayout(source_row)
+
+        self.poke_input_source_stack = CurrentPageStackedWidget()
+        # LOCAL is only one input row while SSH contains a 240px+ file table.
+        # Follow the visible page height so LOCAL does not reserve SSH space.
+        self.poke_input_source_stack.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Maximum
+        )
+
+        local_page = QWidget()
+        local_layout = QGridLayout(local_page)
+        local_layout.setContentsMargins(0, 0, 0, 0)
+        local_layout.setColumnStretch(1, 1)
+        local_layout.addWidget(QLabel("G 文件 / 目录"), 0, 0)
+        self.poke_input_edit = QLineEdit()
+        self.poke_input_edit.setPlaceholderText("请选择一个 G 文件，或包含 G 文件的目录")
+        self.poke_input_edit.editingFinished.connect(
+            self._sync_workspace_source_from_poke
+        )
+        local_layout.addWidget(self.poke_input_edit, 0, 1)
+        poke_file_btn = QPushButton("选择文件")
+        poke_folder_btn = QPushButton("选择目录")
+        poke_file_btn.clicked.connect(self._poke_browse_file)
+        poke_folder_btn.clicked.connect(self._poke_browse_folder)
+        local_layout.addWidget(poke_file_btn, 0, 2)
+        local_layout.addWidget(poke_folder_btn, 0, 3)
+        self.poke_input_source_stack.addWidget(local_page)
+
+        remote_page = QWidget()
+        remote_layout = QVBoxLayout(remote_page)
+        remote_layout.setContentsMargins(0, 0, 0, 0)
+        remote_layout.setSpacing(8)
+        ssh_grid = QGridLayout()
+        ssh_grid.setColumnStretch(1, 1)
+        self.poke_ssh_edits = {}
+        ssh_cfg = dict(self.cfg.get("ssh", {}) or {})
+        ssh_fields = [
+            ("host", "IP / 主机", ssh_cfg.get("host", "172.16.21.27")),
+            ("port", "端口", ssh_cfg.get("port", 22)),
+            ("username", "用户名", ssh_cfg.get("username", "up8000")),
+            ("password", "密码", ssh_cfg.get("password", "up8000")),
+            ("remote_directory", "远程目录", ssh_cfg.get("remote_directory", "/home/up8000/data/graph/display/sln")),
+        ]
+        for row_index, (key, label, value) in enumerate(ssh_fields):
+            ssh_grid.addWidget(QLabel(label), row_index, 0)
+            edit = QLineEdit(str(value))
+            if key == "password":
+                edit.setEchoMode(QLineEdit.Password)
+            self.poke_ssh_edits[key] = edit
+            ssh_grid.addWidget(edit, row_index, 1, 1, 3)
+
+        ssh_buttons = QHBoxLayout()
+        poke_test_btn = QPushButton("测试 SSH 连接")
+        poke_save_btn = QPushButton("保存 SSH 配置")
+        self.poke_refresh_ssh_btn = QPushButton("刷新 G 文件列表")
+        poke_download_btn = QPushButton("下载所选 G 文件")
+        poke_test_btn.clicked.connect(self._poke_test_ssh_connection)
+        poke_save_btn.clicked.connect(self._poke_save_ssh_settings)
+        self.poke_refresh_ssh_btn.clicked.connect(self._poke_refresh_remote_g_files)
+        poke_download_btn.clicked.connect(self._poke_download_selected_remote_g_files)
+        ssh_buttons.addWidget(poke_test_btn)
+        ssh_buttons.addWidget(poke_save_btn)
+        ssh_buttons.addWidget(self.poke_refresh_ssh_btn)
+        ssh_buttons.addWidget(poke_download_btn)
+        ssh_buttons.addStretch()
+        ssh_grid.addLayout(ssh_buttons, len(ssh_fields), 1, 1, 3)
+
+        self.poke_ssh_connection_status = QLabel("尚未测试 SSH/SFTP 连接。")
+        self.poke_ssh_connection_status.setWordWrap(True)
+        self.poke_ssh_connection_status.setStyleSheet(
+            "background:#F5F7F8; color:#53636C; "
+            "border:1px solid #D7E0E4; border-radius:6px; padding:7px 10px;"
+        )
+        ssh_grid.addWidget(
+            self.poke_ssh_connection_status, len(ssh_fields) + 1, 1, 1, 3
+        )
+        remote_layout.addLayout(ssh_grid)
+
+        readonly_notice = QLabel(
+            "SSH 服务器只读：本工具仅允许列目录、读取属性和下载 G 文件；"
+            "禁止上传、覆盖、重命名、删除或修改服务器上的任何文件。"
+        )
+        readonly_notice.setWordWrap(True)
+        readonly_notice.setStyleSheet(
+            "background:#E8F7F1; color:#006B52; "
+            "border:1px solid #A9DCC8; border-radius:7px; "
+            "padding:8px 10px; font-weight:600;"
+        )
+        remote_layout.addWidget(readonly_notice)
+
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("搜索 G 文件"))
+        self.poke_remote_search_edit = QLineEdit()
+        self.poke_remote_search_edit.setPlaceholderText("例如：ABH-06、SAMR、JED-NTH")
+        self.poke_remote_search_edit.textChanged.connect(
+            self._apply_poke_remote_file_filter
+        )
+        search_row.addWidget(self.poke_remote_search_edit, 1)
+        self.poke_remote_count_label = QLabel("尚未加载远程文件")
+        search_row.addWidget(self.poke_remote_count_label)
+        remote_layout.addLayout(search_row)
+
+        remote_actions = QHBoxLayout()
+        select_visible_btn = QPushButton("全选当前结果")
+        clear_btn = QPushButton("清空选择和搜索")
+        select_visible_btn.clicked.connect(
+            lambda: self._poke_set_visible_remote_selection(True)
+        )
+        clear_btn.clicked.connect(self._poke_clear_remote_selection)
+        remote_actions.addWidget(select_visible_btn)
+        remote_actions.addWidget(clear_btn)
+        remote_actions.addStretch()
+        remote_layout.addLayout(remote_actions)
+
+        self.poke_remote_file_table = QTableWidget()
+        self.poke_remote_file_table.setColumnCount(4)
+        self.poke_remote_file_table.setHorizontalHeaderLabels(
+            ["选择", "文件名", "大小", "服务器修改时间"]
+        )
+        self.poke_remote_file_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.poke_remote_file_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.poke_remote_file_table.verticalHeader().setDefaultSectionSize(30)
+        header = self.poke_remote_file_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.poke_remote_file_table.itemChanged.connect(
+            self._on_poke_remote_file_item_changed
+        )
+        self.poke_remote_file_table.setMinimumHeight(240)
+        remote_layout.addWidget(self.poke_remote_file_table)
+        self.poke_input_source_stack.addWidget(remote_page)
+        root.addWidget(self.poke_input_source_stack)
+        return box
+
+    def _on_poke_input_source_changed(self, *_args):
+        if not hasattr(self, "poke_input_source_combo"):
+            return
+        source = str(self.poke_input_source_combo.currentData() or "LOCAL").upper()
+        self.poke_input_source_stack.setCurrentIndex(1 if source == "SSH" else 0)
+        self.poke_input_source_stack.updateGeometry()
+        self._sync_workspace_source_from_poke()
+
+    def _sync_workspace_source_from_poke(self):
+        """Push Poke-page source controls into the shared workspace source state."""
+        if not hasattr(self, "poke_input_source_combo"):
+            return
+
+        # Copy values first so the workspace source-change handler persists the
+        # same SSH configuration the user is currently looking at.
+        if hasattr(self, "poke_input_edit") and hasattr(self, "input_edit"):
+            self.input_edit.setText(self.poke_input_edit.text().strip())
+        if hasattr(self, "poke_ssh_edits") and hasattr(self, "ssh_edits"):
+            for key, edit in self.poke_ssh_edits.items():
+                if key in self.ssh_edits:
+                    self.ssh_edits[key].setText(edit.text())
+
+        source = str(self.poke_input_source_combo.currentData() or "LOCAL").upper()
+        if hasattr(self, "input_source_combo"):
+            index = self.input_source_combo.findData(source)
+            if index >= 0 and self.input_source_combo.currentIndex() != index:
+                self.input_source_combo.setCurrentIndex(index)
+
+        if source == "LOCAL" and hasattr(self, "_save_input_path_from_edit"):
+            self._save_input_path_from_edit()
+
+    def _sync_poke_source_from_workspace(self, rebuild_remote=False):
+        if not hasattr(self, "poke_input_source_combo"):
+            return
+        source = self._current_input_source()
+        index = self.poke_input_source_combo.findData(source)
+        self.poke_input_source_combo.blockSignals(True)
+        try:
+            if index >= 0:
+                self.poke_input_source_combo.setCurrentIndex(index)
+        finally:
+            self.poke_input_source_combo.blockSignals(False)
+        self.poke_input_source_stack.setCurrentIndex(1 if source == "SSH" else 0)
+        self.poke_input_source_stack.updateGeometry()
+
+        if hasattr(self, "poke_input_edit"):
+            self.poke_input_edit.setText(self.input_edit.text())
+        if hasattr(self, "poke_ssh_edits"):
+            for key, edit in self.poke_ssh_edits.items():
+                if key in self.ssh_edits:
+                    edit.setText(self.ssh_edits[key].text())
+
+        if hasattr(self, "poke_ssh_connection_status") and hasattr(self, "ssh_connection_status"):
+            self.poke_ssh_connection_status.setText(self.ssh_connection_status.text())
+            self.poke_ssh_connection_status.setStyleSheet(self.ssh_connection_status.styleSheet())
+
+        if rebuild_remote and hasattr(self, "poke_remote_file_table"):
+            self._rebuild_poke_remote_file_table()
+            self._apply_poke_remote_file_filter(
+                self.poke_remote_search_edit.text()
+                if hasattr(self, "poke_remote_search_edit") else ""
+            )
+        else:
+            self._update_poke_remote_count_label()
+
+    def _poke_browse_file(self):
+        self.browse_file()
+        self._sync_poke_source_from_workspace()
+
+    def _poke_browse_folder(self):
+        self.browse_folder()
+        self._sync_poke_source_from_workspace()
+
+    def _poke_test_ssh_connection(self):
+        self._sync_workspace_source_from_poke()
+        self.test_ssh_connection()
+        self._sync_poke_source_from_workspace()
+
+    def _poke_save_ssh_settings(self):
+        self._sync_workspace_source_from_poke()
+        self.save_ssh_settings()
+        self._sync_poke_source_from_workspace()
+
+    def _poke_refresh_remote_g_files(self):
+        self._sync_workspace_source_from_poke()
+        self.refresh_remote_g_files()
+
+    def _poke_download_selected_remote_g_files(self):
+        self._sync_workspace_source_from_poke()
+        self.download_selected_remote_g_files()
+
+    def _rebuild_poke_remote_file_table(self):
+        if not hasattr(self, "poke_remote_file_table"):
+            return
+        table = self.poke_remote_file_table
+        header = table.horizontalHeader()
+        table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+        self._poke_remote_table_populating = True
+        try:
+            for column in range(table.columnCount()):
+                header.setSectionResizeMode(column, QHeaderView.Interactive)
+            table.clearContents()
+            table.setRowCount(len(self.remote_file_rows))
+            self._poke_remote_row_by_name = {}
+            for row_index, remote_file in enumerate(self.remote_file_rows):
+                self._poke_remote_row_by_name[remote_file.name] = row_index
+                check = QTableWidgetItem()
+                check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                check.setCheckState(
+                    Qt.Checked if remote_file.name in self.remote_selected_names else Qt.Unchecked
+                )
+                check.setData(Qt.UserRole, remote_file.name)
+                table.setItem(row_index, 0, check)
+                for column, value in enumerate(
+                    [remote_file.name, self._format_file_size(remote_file.size), remote_file.mtime_text],
+                    start=1,
+                ):
+                    item = QTableWidgetItem(str(value))
+                    item.setToolTip(str(value))
+                    table.setItem(row_index, column, item)
+            table.resizeColumnsToContents()
+            header.setSectionResizeMode(1, QHeaderView.Stretch)
+        finally:
+            self._poke_remote_table_populating = False
+            table.setUpdatesEnabled(True)
+            table.blockSignals(False)
+        self._poke_remote_visible_count = len(self.remote_file_rows)
+        self._poke_remote_table_dirty = False
+        self._update_poke_remote_count_label()
+
+    def _mark_poke_remote_table_dirty(self):
+        self._poke_remote_table_dirty = True
+        if (
+            hasattr(self, "pages")
+            and self.pages.currentIndex() == 3
+            and hasattr(self, "poke_remote_file_table")
+        ):
+            self._rebuild_poke_remote_file_table()
+            self._apply_poke_remote_file_filter(
+                self.poke_remote_search_edit.text()
+                if hasattr(self, "poke_remote_search_edit") else ""
+            )
+
+    def _apply_poke_remote_file_filter(self, text=""):
+        if not hasattr(self, "poke_remote_file_table"):
+            return
+        query = str(text or "").strip().lower()
+        table = self.poke_remote_file_table
+        visible = 0
+        table.setUpdatesEnabled(False)
+        try:
+            for row_index, remote_file in enumerate(self.remote_file_rows):
+                matched = not query or query in remote_file.name.lower()
+                table.setRowHidden(row_index, not matched)
+                if matched:
+                    visible += 1
+        finally:
+            table.setUpdatesEnabled(True)
+        self._poke_remote_visible_count = visible
+        self._update_poke_remote_count_label()
+
+    def _update_poke_remote_count_label(self):
+        if not hasattr(self, "poke_remote_count_label"):
+            return
+        visible = getattr(self, "_poke_remote_visible_count", len(self.remote_file_rows))
+        self.poke_remote_count_label.setText(
+            (f"Total {len(self.remote_file_rows)} | Visible {visible} | Selected {len(self.remote_selected_names)}")
+            if self.language == "en_US" else
+            (f"总数 {len(self.remote_file_rows)} | 当前显示 {visible} | 已选择 {len(self.remote_selected_names)}")
+        )
+
+    def _sync_workspace_remote_checks_from_state(self):
+        if not hasattr(self, "remote_file_table"):
+            return
+        table = self.remote_file_table
+        table.blockSignals(True)
+        try:
+            for name, row in self._remote_row_by_name.items():
+                item = table.item(row, 0)
+                if item is None:
+                    continue
+                wanted = Qt.Checked if name in self.remote_selected_names else Qt.Unchecked
+                if item.checkState() != wanted:
+                    item.setCheckState(wanted)
+        finally:
+            table.blockSignals(False)
+        self._update_remote_count_label()
+
+    def _sync_poke_remote_checks_from_state(self):
+        if not hasattr(self, "poke_remote_file_table"):
+            return
+        table = self.poke_remote_file_table
+        table.blockSignals(True)
+        try:
+            for name, row in getattr(self, "_poke_remote_row_by_name", {}).items():
+                item = table.item(row, 0)
+                if item is None:
+                    continue
+                wanted = Qt.Checked if name in self.remote_selected_names else Qt.Unchecked
+                if item.checkState() != wanted:
+                    item.setCheckState(wanted)
+        finally:
+            table.blockSignals(False)
+        self._update_poke_remote_count_label()
+
+    def _on_poke_remote_file_item_changed(self, item):
+        if getattr(self, "_poke_remote_table_populating", False) or item.column() != 0:
+            return
+        name = str(item.data(Qt.UserRole) or "")
+        if not name:
+            return
+        if item.checkState() == Qt.Checked:
+            self.remote_selected_names.add(name)
+        else:
+            self.remote_selected_names.discard(name)
+        self._sync_workspace_remote_checks_from_state()
+        self._update_poke_remote_count_label()
+        self._invalidate_validation_snapshot("远程 G 文件选择发生变化")
+
+    def _poke_set_visible_remote_selection(self, selected: bool):
+        if not hasattr(self, "poke_remote_file_table"):
+            return
+        table = self.poke_remote_file_table
+        table.blockSignals(True)
+        try:
+            for row in range(table.rowCount()):
+                if table.isRowHidden(row):
+                    continue
+                item = table.item(row, 0)
+                if item is None:
+                    continue
+                name = str(item.data(Qt.UserRole) or "")
+                if selected:
+                    self.remote_selected_names.add(name)
+                    item.setCheckState(Qt.Checked)
+                else:
+                    self.remote_selected_names.discard(name)
+                    item.setCheckState(Qt.Unchecked)
+        finally:
+            table.blockSignals(False)
+        self._sync_workspace_remote_checks_from_state()
+        self._update_poke_remote_count_label()
+        self._invalidate_validation_snapshot("远程 G 文件选择发生变化")
+
+    def _poke_clear_remote_selection(self):
+        self.remote_selected_names.clear()
+        if hasattr(self, "poke_remote_search_edit"):
+            self.poke_remote_search_edit.blockSignals(True)
+            try:
+                self.poke_remote_search_edit.clear()
+            finally:
+                self.poke_remote_search_edit.blockSignals(False)
+        self._sync_workspace_remote_checks_from_state()
+        self._sync_poke_remote_checks_from_state()
+        self._apply_poke_remote_file_filter("")
+        self._invalidate_validation_snapshot("远程 G 文件选择和搜索条件已清空")
+
+    def _poke_log(self, message):
+        if hasattr(self, "poke_log_edit"):
+            self.poke_log_edit.appendPlainText(str(message))
+
+    def _set_poke_busy(self, busy: bool):
+        for widget in (
+            getattr(self, "poke_run_btn", None),
+            getattr(self, "poke_enable_main_feeder", None),
+            getattr(self, "poke_enable_smart_rmu", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not busy)
+
+    def start_poke_processing(self):
+        if self.poke_worker is not None and self.poke_worker.isRunning():
+            return
+        # Poke page owns a full source selector in v4.1.73; synchronize its
+        # values into the shared source state before resolving the snapshot.
+        self._sync_workspace_source_from_poke()
+        enable_main = self.poke_enable_main_feeder.isChecked()
+        enable_rmu = self.poke_enable_smart_rmu.isChecked()
+        if not (enable_main or enable_rmu):
+            QMessageBox.warning(self, "Poke 跳转", "请至少选择一种 Poke 跳转类型。")
+            return
+
+        files = []
+        try:
+            source_type = self._current_input_source()
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择 G 文件或目录。")
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError("当前文件/目录中没有找到可处理的 .g 文件。")
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"], int(ssh_cfg["port"]),
+                    ssh_cfg["username"], ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError(
+                        "SSH 配置与当前文件列表不一致，请先刷新 G 文件列表。"
+                    )
+                selected_remote = self._selected_remote_files()
+                if not selected_remote:
+                    raise ValueError(
+                        "请先勾选至少一个远程 G 文件。"
+                    )
+            else:
+                raise ValueError(f"不支持的文件来源：{source_type}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Poke 跳转配置错误", str(exc))
+            return
+
+        try:
+            run_dir = create_run_directory()
+        except Exception as exc:
+            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            return
+
+        self.poke_artifacts = {}
+        self.poke_log_edit.clear()
+        self.poke_progress.setValue(0)
+        self.poke_progress_message.setText(self._t("任务准备中……"))
+        self.poke_open_output_btn.setEnabled(False)
+        self.poke_open_report_btn.setEnabled(False)
+        self._set_poke_busy(True)
+
+        try:
+            if source_type == "SSH":
+                self._poke_log("正在从 SSH 只读服务器获取本次选择文件的最新稳定快照……")
+                self.poke_progress.setValue(2)
+                QApplication.processEvents()
+                ssh_cfg = self._current_ssh_config()
+                snapshot_service = RemoteSnapshotService(
+                    host=ssh_cfg["host"],
+                    port=ssh_cfg["port"],
+                    username=ssh_cfg["username"],
+                    password=ssh_cfg["password"],
+                    remote_directory=ssh_cfg["remote_directory"],
+                    max_attempts=3,
+                )
+                files, _source_info = snapshot_service.download_latest(
+                    self._selected_remote_files(),
+                    run_dir,
+                    log=self._poke_log,
+                )
+            self._sync_poke_source_from_workspace(rebuild_remote=False)
+        except Exception as exc:
+            self._set_poke_busy(False)
+            self.poke_progress_message.setText("文件准备失败")
+            self._poke_log(f"文件准备失败：{exc}")
+            QMessageBox.critical(self, "Poke 文件准备失败", str(exc))
+            return
+
+        settings = {
+            "rmu_name_positions": dict(
+                self.cfg.get("rmu_name_positions", DEFAULT_RMU_NAME_POSITIONS)
+            ),
+            "rmu_name_exclusions": list(
+                self.cfg.get("rmu_name_exclusions", DEFAULT_RMU_NAME_EXCLUSIONS)
+            ),
+        }
+        self.poke_worker = PokeProcessingWorker(
+            db_config=self.current_db_config(),
+            files=files,
+            settings=settings,
+            run_dir=run_dir,
+            enable_main_feeder=enable_main,
+            enable_smart_rmu=enable_rmu,
+        )
+        self.poke_worker.log.connect(self._poke_log)
+        self.poke_worker.progress.connect(self._on_poke_progress)
+        self.poke_worker.completed.connect(self._on_poke_completed)
+        self.poke_worker.failed.connect(self._on_poke_failed)
+        self.poke_worker.start()
+
+    def _on_poke_progress(self, percent, message):
+        self.poke_progress.setValue(max(0, min(100, int(percent))))
+        if message:
+            self.poke_progress_message.setText(self._rt(message))
+
+    def _on_poke_completed(self, artifacts):
+        self.poke_artifacts = dict(artifacts or {})
+        self._set_poke_busy(False)
+        self.poke_progress.setValue(100)
+        self.poke_progress_message.setText("Poke 跳转处理完成")
+        self.poke_open_output_btn.setEnabled(
+            bool(self.poke_artifacts.get("g_output_dir"))
+        )
+        self.poke_open_report_btn.setEnabled(
+            bool(self.poke_artifacts.get("html_report"))
+        )
+        self.cfg["last_run_dir"] = self.poke_artifacts.get("run_dir", "")
+        save_settings(self.cfg)
+        self._poke_log(
+            "[完成] "
+            f"新增={self.poke_artifacts.get('added', 0)}；"
+            f"更新={self.poke_artifacts.get('updated', 0)}；"
+            f"已符合={self.poke_artifacts.get('unchanged', 0)}；"
+            f"跳过={self.poke_artifacts.get('skipped', 0)}。"
+        )
+
+    def _on_poke_failed(self, trace_text):
+        self._set_poke_busy(False)
+        self.poke_progress_message.setText("Poke 跳转处理失败")
+        self._poke_log(str(trace_text))
+        # Keep the dialog compact while the complete traceback remains in log.
+        last_line = str(trace_text).strip().splitlines()[-1] if str(trace_text).strip() else "未知错误"
+        QMessageBox.critical(self, "Poke 跳转处理失败", last_line)
+
+    def _open_poke_output_dir(self):
+        value = self.poke_artifacts.get("g_output_dir", "")
+        if value:
+            self._open_external_path(Path(value), "G 输出目录")
+
+    def _open_poke_report(self):
+        value = self.poke_artifacts.get("html_report", "")
+        if value:
+            self._open_external_path(Path(value), "Poke 报告")
+
+    def _open_external_path(self, path: Path, label: str):
+        path = Path(path)
+        if not path.exists():
+            QMessageBox.warning(self, label, f"路径不存在：\n{path}")
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:
+            QMessageBox.critical(self, f"打开{label}失败", str(exc))
+
+    def _graphics_cleanup_log(self, message):
+        if hasattr(self, "graphics_cleanup_log_edit"):
+            self.graphics_cleanup_log_edit.appendPlainText(str(message))
+
+    def _set_graphics_cleanup_busy(self, busy: bool):
+        for widget in (
+            getattr(self, "graphics_cleanup_run_btn", None),
+            getattr(self, "graphics_operation_combo", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not busy)
+
+    def start_rmu_network_cleanup(self):
+        if (
+            self.graphics_cleanup_worker is not None
+            and self.graphics_cleanup_worker.isRunning()
+        ):
+            return
+
+        # 图形工作区所有任务共用上方同一套本地/SSH只读文件来源。
+        self._sync_workspace_source_from_poke()
+        files = []
+        try:
+            source_type = self._current_input_source()
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择 G 文件或目录。")
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError("当前文件/目录中没有找到可处理的 .g 文件。")
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"], int(ssh_cfg["port"]),
+                    ssh_cfg["username"], ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError(
+                        "SSH 配置与当前文件列表不一致，请先刷新 G 文件列表。"
+                    )
+                if not self._selected_remote_files():
+                    raise ValueError("请先勾选至少一个远程 G 文件。")
+            else:
+                raise ValueError(f"不支持的文件来源：{source_type}")
+        except Exception as exc:
+            QMessageBox.critical(self, "环网柜网络图元清理配置错误", str(exc))
+            return
+
+        try:
+            run_dir = create_run_directory()
+        except Exception as exc:
+            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            return
+
+        self.graphics_cleanup_artifacts = {}
+        self.graphics_cleanup_log_edit.clear()
+        self.graphics_cleanup_progress.setValue(0)
+        self.graphics_cleanup_progress_message.setText(self._t("任务准备中……"))
+        self.graphics_cleanup_open_output_btn.setEnabled(False)
+        self.graphics_cleanup_open_report_btn.setEnabled(False)
+        self._set_graphics_cleanup_busy(True)
+
+        try:
+            if source_type == "SSH":
+                self._graphics_cleanup_log(
+                    "正在从 SSH 只读服务器获取本次选择文件的最新稳定快照……"
+                )
+                self.graphics_cleanup_progress.setValue(2)
+                QApplication.processEvents()
+                ssh_cfg = self._current_ssh_config()
+                snapshot_service = RemoteSnapshotService(
+                    host=ssh_cfg["host"],
+                    port=ssh_cfg["port"],
+                    username=ssh_cfg["username"],
+                    password=ssh_cfg["password"],
+                    remote_directory=ssh_cfg["remote_directory"],
+                    max_attempts=3,
+                )
+                files, _source_info = snapshot_service.download_latest(
+                    self._selected_remote_files(),
+                    run_dir,
+                    log=self._graphics_cleanup_log,
+                )
+            self._sync_poke_source_from_workspace(rebuild_remote=False)
+        except Exception as exc:
+            self._set_graphics_cleanup_busy(False)
+            self.graphics_cleanup_progress_message.setText("文件准备失败")
+            self._graphics_cleanup_log(f"文件准备失败：{exc}")
+            QMessageBox.critical(self, "清理文件准备失败", str(exc))
+            return
+
+        self.graphics_cleanup_worker = GraphicsCleanupWorker(
+            files=files,
+            run_dir=run_dir,
+        )
+        self.graphics_cleanup_worker.log.connect(self._graphics_cleanup_log)
+        self.graphics_cleanup_worker.progress.connect(
+            self._on_graphics_cleanup_progress
+        )
+        self.graphics_cleanup_worker.completed.connect(
+            self._on_graphics_cleanup_completed
+        )
+        self.graphics_cleanup_worker.failed.connect(
+            self._on_graphics_cleanup_failed
+        )
+        self.graphics_cleanup_worker.start()
+
+    def _on_graphics_cleanup_progress(self, percent, message):
+        self.graphics_cleanup_progress.setValue(max(0, min(100, int(percent))))
+        if message:
+            self.graphics_cleanup_progress_message.setText(self._rt(message))
+
+    def _on_graphics_cleanup_completed(self, artifacts):
+        self.graphics_cleanup_artifacts = dict(artifacts or {})
+        self._set_graphics_cleanup_busy(False)
+        self.graphics_cleanup_progress.setValue(100)
+        self.graphics_cleanup_progress_message.setText("环网柜网络图元清理完成")
+        self.graphics_cleanup_open_output_btn.setEnabled(
+            bool(self.graphics_cleanup_artifacts.get("g_output_dir"))
+        )
+        self.graphics_cleanup_open_report_btn.setEnabled(
+            bool(self.graphics_cleanup_artifacts.get("html_report"))
+        )
+        self.cfg["last_run_dir"] = self.graphics_cleanup_artifacts.get(
+            "run_dir", ""
+        )
+        save_settings(self.cfg)
+        self._graphics_cleanup_log(
+            "[完成] "
+            f"已删除固定网络图元={self.graphics_cleanup_artifacts.get('removed', 0)}。"
+        )
+
+    def _on_graphics_cleanup_failed(self, trace_text):
+        self._set_graphics_cleanup_busy(False)
+        self.graphics_cleanup_progress_message.setText("环网柜网络图元清理失败")
+        self._graphics_cleanup_log(str(trace_text))
+        last_line = (
+            str(trace_text).strip().splitlines()[-1]
+            if str(trace_text).strip()
+            else "未知错误"
+        )
+        QMessageBox.critical(self, "环网柜网络图元清理失败", last_line)
+
+    def _open_graphics_cleanup_output_dir(self):
+        value = self.graphics_cleanup_artifacts.get("g_output_dir", "")
+        if value:
+            self._open_external_path(Path(value), "G 输出目录")
+
+    def _open_graphics_cleanup_report(self):
+        value = self.graphics_cleanup_artifacts.get("html_report", "")
+        if value:
+            self._open_external_path(Path(value), "环网柜网络图元清理报告")
+
+    def _graphics_pipeline_log(self, message):
+        if hasattr(self, "graphics_pipeline_log_edit"):
+            self.graphics_pipeline_log_edit.appendPlainText(str(message))
+
+    def _set_graphics_pipeline_busy(self, busy: bool):
+        for widget in (
+            getattr(self, "graphics_pipeline_run_btn", None),
+            getattr(self, "graphics_operation_combo", None),
+            getattr(self, "pipeline_enable_cleanup", None),
+            getattr(self, "pipeline_enable_channel", None),
+            getattr(self, "pipeline_enable_poke", None),
+            getattr(self, "pipeline_channel_position_combo", None),
+            getattr(self, "pipeline_channel_margin_spin", None),
+            getattr(self, "pipeline_poke_main_feeder", None),
+            getattr(self, "pipeline_poke_smart_rmu", None),
+            getattr(self, "pipeline_poke_select_all_btn", None),
+            getattr(self, "pipeline_poke_clear_all_btn", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not busy)
+
+    def start_graphics_pipeline(self):
+        if self.graphics_pipeline_worker is not None and self.graphics_pipeline_worker.isRunning():
+            return
+        self._sync_workspace_source_from_poke()
+        steps = {
+            "cleanup": self.pipeline_enable_cleanup.isChecked(),
+            "channel_status": self.pipeline_enable_channel.isChecked(),
+            "poke": self.pipeline_enable_poke.isChecked(),
+        }
+        if not any(steps.values()):
+            QMessageBox.warning(self, "组合处理", "请至少选择一个图形处理步骤。")
+            return
+        if steps["poke"] and not (self.pipeline_poke_main_feeder.isChecked() or self.pipeline_poke_smart_rmu.isChecked()):
+            QMessageBox.warning(self, "组合处理", "启用 Poke 时，请至少选择一种 Poke 跳转类型。")
+            return
+
+        files = []
+        try:
+            source_type = self._current_input_source()
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择 G 文件或目录。")
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError("当前文件/目录中没有找到可处理的 .g 文件。")
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"], int(ssh_cfg["port"]),
+                    ssh_cfg["username"], ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError("SSH 配置与当前文件列表不一致，请先刷新 G 文件列表。")
+                if not self._selected_remote_files():
+                    raise ValueError("请先勾选至少一个远程 G 文件。")
+            else:
+                raise ValueError(f"不支持的文件来源：{source_type}")
+        except Exception as exc:
+            QMessageBox.critical(self, "组合处理配置错误", str(exc))
+            return
+
+        db_config = None
+        if steps["poke"]:
+            try:
+                db_config = self.current_db_config()
+            except Exception as exc:
+                QMessageBox.critical(self, "组合处理数据库配置错误", str(exc))
+                return
+
+        try:
+            run_dir = create_run_directory()
+        except Exception as exc:
+            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            return
+
+        self.graphics_pipeline_artifacts = {}
+        self.graphics_pipeline_log_edit.clear()
+        self.graphics_pipeline_progress.setValue(0)
+        self.graphics_pipeline_progress_message.setText(self._t("任务准备中……"))
+        self.graphics_pipeline_open_output_btn.setEnabled(False)
+        self.graphics_pipeline_open_report_btn.setEnabled(False)
+        self._set_graphics_pipeline_busy(True)
+
+        try:
+            if source_type == "SSH":
+                self._graphics_pipeline_log("正在从 SSH 只读服务器获取本次选择文件的最新稳定快照……")
+                self.graphics_pipeline_progress.setValue(2)
+                QApplication.processEvents()
+                ssh_cfg = self._current_ssh_config()
+                snapshot_service = RemoteSnapshotService(
+                    host=ssh_cfg["host"],
+                    port=ssh_cfg["port"],
+                    username=ssh_cfg["username"],
+                    password=ssh_cfg["password"],
+                    remote_directory=ssh_cfg["remote_directory"],
+                    max_attempts=3,
+                )
+                files, _source_info = snapshot_service.download_latest(
+                    self._selected_remote_files(),
+                    run_dir,
+                    log=self._graphics_pipeline_log,
+                )
+            self._sync_poke_source_from_workspace(rebuild_remote=False)
+        except Exception as exc:
+            self._set_graphics_pipeline_busy(False)
+            self.graphics_pipeline_progress_message.setText("文件准备失败")
+            self._graphics_pipeline_log(f"文件准备失败：{exc}")
+            QMessageBox.critical(self, "组合处理文件准备失败", str(exc))
+            return
+
+        settings = {
+            "rmu_name_positions": dict(self.cfg.get("rmu_name_positions", DEFAULT_RMU_NAME_POSITIONS)),
+            "rmu_name_exclusions": list(self.cfg.get("rmu_name_exclusions", DEFAULT_RMU_NAME_EXCLUSIONS)),
+        }
+        self.graphics_pipeline_worker = GraphicsPipelineWorker(
+            files=files,
+            run_dir=run_dir,
+            steps=steps,
+            channel_position=str(self.pipeline_channel_position_combo.currentData() or "bottom_left"),
+            channel_margin=int(self.pipeline_channel_margin_spin.value()),
+            db_config=db_config,
+            poke_settings=settings,
+            poke_enable_main_feeder=self.pipeline_poke_main_feeder.isChecked(),
+            poke_enable_smart_rmu=self.pipeline_poke_smart_rmu.isChecked(),
+        )
+        self.graphics_pipeline_worker.log.connect(self._graphics_pipeline_log)
+        self.graphics_pipeline_worker.progress.connect(self._on_graphics_pipeline_progress)
+        self.graphics_pipeline_worker.completed.connect(self._on_graphics_pipeline_completed)
+        self.graphics_pipeline_worker.failed.connect(self._on_graphics_pipeline_failed)
+        self.graphics_pipeline_worker.start()
+
+    def _on_graphics_pipeline_progress(self, percent, message):
+        self.graphics_pipeline_progress.setValue(max(0, min(100, int(percent))))
+        if message:
+            self.graphics_pipeline_progress_message.setText(self._rt(message))
+
+    def _on_graphics_pipeline_completed(self, artifacts):
+        self.graphics_pipeline_artifacts = dict(artifacts or {})
+        self._set_graphics_pipeline_busy(False)
+        self.graphics_pipeline_progress.setValue(100)
+        passed = int(self.graphics_pipeline_artifacts.get("passed", 0))
+        failed = int(self.graphics_pipeline_artifacts.get("failed", 0))
+        self.graphics_pipeline_progress_message.setText(f"组合处理完成：成功 {passed}，失败 {failed}")
+        self.graphics_pipeline_open_output_btn.setEnabled(bool(self.graphics_pipeline_artifacts.get("g_output_dir")))
+        self.graphics_pipeline_open_report_btn.setEnabled(bool(self.graphics_pipeline_artifacts.get("html_report")))
+        self.cfg["last_run_dir"] = self.graphics_pipeline_artifacts.get("run_dir", "")
+        save_settings(self.cfg)
+        self._graphics_pipeline_log(
+            "[完成] "
+            f"成功文件={passed}, 失败文件={failed}, "
+            f"删除图元={self.graphics_pipeline_artifacts.get('cleanup_removed', 0)}, "
+            f"channel_status移动={self.graphics_pipeline_artifacts.get('channel_moved', 0)}, "
+            f"Poke新增={self.graphics_pipeline_artifacts.get('poke_added', 0)}, "
+            f"Poke更新={self.graphics_pipeline_artifacts.get('poke_updated', 0)}。"
+        )
+
+    def _on_graphics_pipeline_failed(self, trace_text):
+        self._set_graphics_pipeline_busy(False)
+        self.graphics_pipeline_progress_message.setText("组合处理失败")
+        self._graphics_pipeline_log(str(trace_text))
+        last_line = str(trace_text).strip().splitlines()[-1] if str(trace_text).strip() else "未知错误"
+        QMessageBox.critical(self, "组合处理失败", last_line)
+
+    def _open_graphics_pipeline_output_dir(self):
+        value = self.graphics_pipeline_artifacts.get("g_output_dir", "")
+        if value:
+            self._open_external_path(Path(value), "G 输出目录")
+
+    def _open_graphics_pipeline_report(self):
+        value = self.graphics_pipeline_artifacts.get("html_report", "")
+        if value:
+            self._open_external_path(Path(value), "图形组合处理报告")
+
+    def _channel_status_log(self, message):
+        if hasattr(self, "channel_status_log_edit"):
+            self.channel_status_log_edit.appendPlainText(str(message))
+
+    def _set_channel_status_busy(self, busy: bool):
+        for widget in (
+            getattr(self, "channel_status_run_btn", None),
+            getattr(self, "graphics_operation_combo", None),
+            getattr(self, "channel_status_position_combo", None),
+            getattr(self, "channel_status_margin_spin", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not busy)
+
+    def start_rmu_channel_status_reposition(self):
+        if self.channel_status_worker is not None and self.channel_status_worker.isRunning():
+            return
+
+        self._sync_workspace_source_from_poke()
+        files = []
+        try:
+            source_type = self._current_input_source()
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择 G 文件或目录。")
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError("当前文件/目录中没有找到可处理的 .g 文件。")
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"], int(ssh_cfg["port"]),
+                    ssh_cfg["username"], ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError("SSH 配置与当前文件列表不一致，请先刷新 G 文件列表。")
+                if not self._selected_remote_files():
+                    raise ValueError("请先勾选至少一个远程 G 文件。")
+            else:
+                raise ValueError(f"不支持的文件来源：{source_type}")
+        except Exception as exc:
+            QMessageBox.critical(self, "channel_status 移动配置错误", str(exc))
+            return
+
+        try:
+            run_dir = create_run_directory()
+        except Exception as exc:
+            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            return
+
+        position = str(self.channel_status_position_combo.currentData() or "bottom_left")
+        inner_margin = int(self.channel_status_margin_spin.value())
+        self.channel_status_artifacts = {}
+        self.channel_status_log_edit.clear()
+        self.channel_status_progress.setValue(0)
+        self.channel_status_progress_message.setText(self._t("任务准备中……"))
+        self.channel_status_open_output_btn.setEnabled(False)
+        self.channel_status_open_report_btn.setEnabled(False)
+        self._set_channel_status_busy(True)
+
+        try:
+            if source_type == "SSH":
+                self._channel_status_log(
+                    "正在从 SSH 只读服务器获取本次选择文件的最新稳定快照……"
+                )
+                self.channel_status_progress.setValue(2)
+                QApplication.processEvents()
+                ssh_cfg = self._current_ssh_config()
+                snapshot_service = RemoteSnapshotService(
+                    host=ssh_cfg["host"],
+                    port=ssh_cfg["port"],
+                    username=ssh_cfg["username"],
+                    password=ssh_cfg["password"],
+                    remote_directory=ssh_cfg["remote_directory"],
+                    max_attempts=3,
+                )
+                files, _source_info = snapshot_service.download_latest(
+                    self._selected_remote_files(),
+                    run_dir,
+                    log=self._channel_status_log,
+                )
+            self._sync_poke_source_from_workspace(rebuild_remote=False)
+        except Exception as exc:
+            self._set_channel_status_busy(False)
+            self.channel_status_progress_message.setText("文件准备失败")
+            self._channel_status_log(f"文件准备失败：{exc}")
+            QMessageBox.critical(self, "channel_status 文件准备失败", str(exc))
+            return
+
+        self.channel_status_worker = ChannelStatusRepositionWorker(
+            files=files,
+            run_dir=run_dir,
+            position=position,
+            inner_margin=inner_margin,
+        )
+        self.channel_status_worker.log.connect(self._channel_status_log)
+        self.channel_status_worker.progress.connect(self._on_channel_status_progress)
+        self.channel_status_worker.completed.connect(self._on_channel_status_completed)
+        self.channel_status_worker.failed.connect(self._on_channel_status_failed)
+        self.channel_status_worker.start()
+
+    def _on_channel_status_progress(self, percent, message):
+        self.channel_status_progress.setValue(max(0, min(100, int(percent))))
+        if message:
+            self.channel_status_progress_message.setText(self._rt(message))
+
+    def _on_channel_status_completed(self, artifacts):
+        self.channel_status_artifacts = dict(artifacts or {})
+        self._set_channel_status_busy(False)
+        self.channel_status_progress.setValue(100)
+        self.channel_status_progress_message.setText("环网柜 channel_status 移动完成")
+        self.channel_status_open_output_btn.setEnabled(
+            bool(self.channel_status_artifacts.get("g_output_dir"))
+        )
+        self.channel_status_open_report_btn.setEnabled(
+            bool(self.channel_status_artifacts.get("html_report"))
+        )
+        self.cfg["last_run_dir"] = self.channel_status_artifacts.get("run_dir", "")
+        save_settings(self.cfg)
+        self._channel_status_log(
+            "[完成] "
+            f"找到 channel_status={self.channel_status_artifacts.get('found', 0)}，"
+            f"移动={self.channel_status_artifacts.get('moved', 0)}，"
+            f"未找到={self.channel_status_artifacts.get('missing', 0)}。"
+        )
+
+    def _on_channel_status_failed(self, trace_text):
+        self._set_channel_status_busy(False)
+        self.channel_status_progress_message.setText("环网柜 channel_status 移动失败")
+        self._channel_status_log(str(trace_text))
+        last_line = (
+            str(trace_text).strip().splitlines()[-1]
+            if str(trace_text).strip()
+            else "未知错误"
+        )
+        QMessageBox.critical(self, "环网柜 channel_status 移动失败", last_line)
+
+    def _open_channel_status_output_dir(self):
+        value = self.channel_status_artifacts.get("g_output_dir", "")
+        if value:
+            self._open_external_path(Path(value), "G 输出目录")
+
+    def _open_channel_status_report(self):
+        value = self.channel_status_artifacts.get("html_report", "")
+        if value:
+            self._open_external_path(Path(value), "环网柜 channel_status 移动报告")
+
+    def _rmu_annotation_log(self, message):
+        if hasattr(self, "rmu_annotation_log_edit"):
+            self.rmu_annotation_log_edit.appendPlainText(str(message))
+
+    def _set_rmu_annotation_busy(self, busy: bool):
+        for widget in (
+            getattr(self, "rmu_annotation_run_btn", None),
+            getattr(self, "graphics_operation_combo", None),
+            getattr(self, "rmu_annotation_nop_position_combo", None),
+            getattr(self, "rmu_annotation_nop_margin_spin", None),
+            getattr(self, "rmu_annotation_name_position_combo", None),
+            getattr(self, "rmu_annotation_name_margin_spin", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not busy)
+
+    def start_rmu_annotation_reposition(self):
+        if self.rmu_annotation_worker is not None and self.rmu_annotation_worker.isRunning():
+            return
+
+        self._sync_workspace_source_from_poke()
+        files = []
+        try:
+            source_type = self._current_input_source()
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择 G 文件或目录。")
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError("当前文件/目录中没有找到可处理的 .g 文件。")
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"], int(ssh_cfg["port"]),
+                    ssh_cfg["username"], ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError("SSH 配置与当前文件列表不一致，请先刷新 G 文件列表。")
+                if not self._selected_remote_files():
+                    raise ValueError("请先勾选至少一个远程 G 文件。")
+            else:
+                raise ValueError(f"不支持的文件来源：{source_type}")
+        except Exception as exc:
+            QMessageBox.critical(self, "NOP / 名称位置配置错误", str(exc))
+            return
+
+        try:
+            run_dir = create_run_directory()
+        except Exception as exc:
+            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            return
+
+        nop_position = str(self.rmu_annotation_nop_position_combo.currentData() or "auto")
+        rmu_name_position = str(self.rmu_annotation_name_position_combo.currentData() or "right")
+        nop_margin = int(self.rmu_annotation_nop_margin_spin.value())
+        rmu_name_margin = int(self.rmu_annotation_name_margin_spin.value())
+
+        self.rmu_annotation_artifacts = {}
+        self.rmu_annotation_log_edit.clear()
+        self.rmu_annotation_progress.setValue(0)
+        self.rmu_annotation_progress_message.setText(self._t("任务准备中……"))
+        self.rmu_annotation_open_output_btn.setEnabled(False)
+        self.rmu_annotation_open_report_btn.setEnabled(False)
+        self._set_rmu_annotation_busy(True)
+
+        try:
+            if source_type == "SSH":
+                self._rmu_annotation_log("正在从 SSH 只读服务器获取本次选择文件的最新稳定快照……")
+                self.rmu_annotation_progress.setValue(2)
+                QApplication.processEvents()
+                ssh_cfg = self._current_ssh_config()
+                snapshot_service = RemoteSnapshotService(
+                    host=ssh_cfg["host"],
+                    port=ssh_cfg["port"],
+                    username=ssh_cfg["username"],
+                    password=ssh_cfg["password"],
+                    remote_directory=ssh_cfg["remote_directory"],
+                    max_attempts=3,
+                )
+                files, _source_info = snapshot_service.download_latest(
+                    self._selected_remote_files(),
+                    run_dir,
+                    log=self._rmu_annotation_log,
+                )
+            self._sync_poke_source_from_workspace(rebuild_remote=False)
+        except Exception as exc:
+            self._set_rmu_annotation_busy(False)
+            self.rmu_annotation_progress_message.setText("文件准备失败")
+            self._rmu_annotation_log(f"文件准备失败：{exc}")
+            QMessageBox.critical(self, "NOP / 名称位置文件准备失败", str(exc))
+            return
+
+        self.rmu_annotation_worker = RmuAnnotationPositionWorker(
+            files=files,
+            run_dir=run_dir,
+            nop_position=nop_position,
+            rmu_name_position=rmu_name_position,
+            nop_margin=nop_margin,
+            rmu_name_margin=rmu_name_margin,
+        )
+        self.rmu_annotation_worker.log.connect(self._rmu_annotation_log)
+        self.rmu_annotation_worker.progress.connect(self._on_rmu_annotation_progress)
+        self.rmu_annotation_worker.completed.connect(self._on_rmu_annotation_completed)
+        self.rmu_annotation_worker.failed.connect(self._on_rmu_annotation_failed)
+        self.rmu_annotation_worker.start()
+
+    def _on_rmu_annotation_progress(self, percent, message):
+        self.rmu_annotation_progress.setValue(max(0, min(100, int(percent))))
+        if message:
+            self.rmu_annotation_progress_message.setText(self._rt(message))
+
+    def _on_rmu_annotation_completed(self, artifacts):
+        self.rmu_annotation_artifacts = dict(artifacts or {})
+        self._set_rmu_annotation_busy(False)
+        self.rmu_annotation_progress.setValue(100)
+        self.rmu_annotation_progress_message.setText("NOP / 环网柜名称位置调整完成")
+        self.rmu_annotation_open_output_btn.setEnabled(
+            bool(self.rmu_annotation_artifacts.get("g_output_dir"))
+        )
+        self.rmu_annotation_open_report_btn.setEnabled(
+            bool(self.rmu_annotation_artifacts.get("html_report"))
+        )
+        self.cfg["last_run_dir"] = self.rmu_annotation_artifacts.get("run_dir", "")
+        save_settings(self.cfg)
+        self._rmu_annotation_log(
+            "[完成] "
+            f"环网柜名称找到={self.rmu_annotation_artifacts.get('rmu_name_found', 0)}，"
+            f"名称移动={self.rmu_annotation_artifacts.get('rmu_name_moved', 0)}，"
+            f"NOP找到={self.rmu_annotation_artifacts.get('nop_found', 0)}，"
+            f"NOP移动={self.rmu_annotation_artifacts.get('nop_moved', 0)}，"
+            f"NOP无对应Y/Q开关={self.rmu_annotation_artifacts.get('nop_unmatched_device', 0)}。"
+        )
+
+    def _on_rmu_annotation_failed(self, trace_text):
+        self._set_rmu_annotation_busy(False)
+        self.rmu_annotation_progress_message.setText("NOP / 环网柜名称位置调整失败")
+        self._rmu_annotation_log(str(trace_text))
+        last_line = (
+            str(trace_text).strip().splitlines()[-1]
+            if str(trace_text).strip()
+            else "未知错误"
+        )
+        QMessageBox.critical(self, "NOP / 环网柜名称位置调整失败", last_line)
+
+    def _open_rmu_annotation_output_dir(self):
+        value = self.rmu_annotation_artifacts.get("g_output_dir", "")
+        if value:
+            self._open_external_path(Path(value), "G 输出目录")
+
+    def _open_rmu_annotation_report(self):
+        value = self.rmu_annotation_artifacts.get("html_report", "")
+        if value:
+            self._open_external_path(Path(value), "NOP / 环网柜名称位置报告")
+
+    def _feeder_avoidance_log(self, message):
+        if hasattr(self, "feeder_avoidance_log_edit"):
+            self.feeder_avoidance_log_edit.appendPlainText(str(message))
+
+    def _set_feeder_avoidance_busy(self, busy: bool):
+        for widget in (
+            getattr(self, "feeder_avoidance_run_btn", None),
+            getattr(self, "graphics_operation_combo", None),
+            getattr(self, "feeder_avoidance_clearance_spin", None),
+            getattr(self, "feeder_avoidance_spacing_spin", None),
+            getattr(self, "feeder_avoidance_corridor_spin", None),
+            getattr(self, "feeder_avoidance_max_shift_spin", None),
+            getattr(self, "feeder_avoidance_right_check", None),
+            getattr(self, "feeder_avoidance_left_check", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not busy)
+
+    def start_feeder_avoidance(self):
+        if self.feeder_avoidance_worker is not None and self.feeder_avoidance_worker.isRunning():
+            return
+
+        self._sync_workspace_source_from_poke()
+        files = []
+        try:
+            source_type = self._current_input_source()
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择 G 文件或目录。")
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError("当前文件/目录中没有找到可处理的 .g 文件。")
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"], int(ssh_cfg["port"]),
+                    ssh_cfg["username"], ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError("SSH 配置与当前文件列表不一致，请先刷新 G 文件列表。")
+                if not self._selected_remote_files():
+                    raise ValueError("请先勾选至少一个远程 G 文件。")
+            else:
+                raise ValueError(f"不支持的文件来源：{source_type}")
+        except Exception as exc:
+            QMessageBox.critical(self, "馈线避让配置错误", str(exc))
+            return
+
+        try:
+            run_dir = create_run_directory()
+        except Exception as exc:
+            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            return
+
+        text_clearance = int(self.feeder_avoidance_clearance_spin.value())
+        feeder_spacing = int(self.feeder_avoidance_spacing_spin.value())
+        corridor_tolerance = int(self.feeder_avoidance_corridor_spin.value())
+        max_right_shift = int(self.feeder_avoidance_max_shift_spin.value())
+        process_right = bool(self.feeder_avoidance_right_check.isChecked())
+        process_left = bool(self.feeder_avoidance_left_check.isChecked())
+        if not process_right and not process_left:
+            QMessageBox.critical(self, "馈线避让配置错误", "右侧馈线和左侧馈线至少选择一个处理方向。")
+            return
+
+        # Keep field-tuned graphics parameters in the per-user settings cache
+        # so replacement builds preserve the operator's preferred lane layout.
+        self.cfg["feeder_avoidance_text_clearance"] = text_clearance
+        self.cfg["feeder_avoidance_track_spacing"] = feeder_spacing
+        self.cfg["feeder_avoidance_corridor_tolerance"] = corridor_tolerance
+        self.cfg["feeder_avoidance_max_shift"] = max_right_shift
+        self.cfg["feeder_avoidance_process_right"] = process_right
+        self.cfg["feeder_avoidance_process_left"] = process_left
+        save_settings(self.cfg)
+
+        self.feeder_avoidance_artifacts = {}
+        self.feeder_avoidance_log_edit.clear()
+        self.feeder_avoidance_progress.setValue(0)
+        self.feeder_avoidance_progress_message.setText(self._t("任务准备中……"))
+        self.feeder_avoidance_open_output_btn.setEnabled(False)
+        self.feeder_avoidance_open_report_btn.setEnabled(False)
+        self._set_feeder_avoidance_busy(True)
+
+        try:
+            if source_type == "SSH":
+                self._feeder_avoidance_log("正在从 SSH 只读服务器获取本次选择文件的最新稳定快照……")
+                self.feeder_avoidance_progress.setValue(2)
+                QApplication.processEvents()
+                ssh_cfg = self._current_ssh_config()
+                snapshot_service = RemoteSnapshotService(
+                    host=ssh_cfg["host"],
+                    port=ssh_cfg["port"],
+                    username=ssh_cfg["username"],
+                    password=ssh_cfg["password"],
+                    remote_directory=ssh_cfg["remote_directory"],
+                    max_attempts=3,
+                )
+                files, _source_info = snapshot_service.download_latest(
+                    self._selected_remote_files(),
+                    run_dir,
+                    log=self._feeder_avoidance_log,
+                )
+            self._sync_poke_source_from_workspace(rebuild_remote=False)
+        except Exception as exc:
+            self._set_feeder_avoidance_busy(False)
+            self.feeder_avoidance_progress_message.setText("文件准备失败")
+            self._feeder_avoidance_log(f"文件准备失败：{exc}")
+            QMessageBox.critical(self, "馈线避让文件准备失败", str(exc))
+            return
+
+        self.feeder_avoidance_worker = FeederAvoidanceWorker(
+            files=files,
+            run_dir=run_dir,
+            text_clearance=text_clearance,
+            feeder_spacing=feeder_spacing,
+            corridor_tolerance=corridor_tolerance,
+            max_right_shift=max_right_shift,
+            process_right=process_right,
+            process_left=process_left,
+        )
+        self.feeder_avoidance_worker.log.connect(self._feeder_avoidance_log)
+        self.feeder_avoidance_worker.progress.connect(self._on_feeder_avoidance_progress)
+        self.feeder_avoidance_worker.completed.connect(self._on_feeder_avoidance_completed)
+        self.feeder_avoidance_worker.failed.connect(self._on_feeder_avoidance_failed)
+        self.feeder_avoidance_worker.start()
+
+    def _on_feeder_avoidance_progress(self, percent, message):
+        self.feeder_avoidance_progress.setValue(max(0, min(100, int(percent))))
+        if message:
+            self.feeder_avoidance_progress_message.setText(self._rt(message))
+
+    def _on_feeder_avoidance_completed(self, artifacts):
+        self.feeder_avoidance_artifacts = dict(artifacts or {})
+        self._set_feeder_avoidance_busy(False)
+        self.feeder_avoidance_progress.setValue(100)
+        self.feeder_avoidance_progress_message.setText("馈线避让调整完成")
+        self.feeder_avoidance_open_output_btn.setEnabled(
+            bool(self.feeder_avoidance_artifacts.get("g_output_dir"))
+        )
+        self.feeder_avoidance_open_report_btn.setEnabled(
+            bool(self.feeder_avoidance_artifacts.get("html_report"))
+        )
+        self.cfg["last_run_dir"] = self.feeder_avoidance_artifacts.get("run_dir", "")
+        save_settings(self.cfg)
+        self._feeder_avoidance_log(
+            "[完成] "
+            f"碰撞馈线={self.feeder_avoidance_artifacts.get('colliding_feedline_count', 0)}，"
+            f"已移动馈线={self.feeder_avoidance_artifacts.get('moved_feedline_count', 0)}，"
+            f"已移动线段={self.feeder_avoidance_artifacts.get('moved_segment_count', 0)}，"
+            f"错落线段={self.feeder_avoidance_artifacts.get('staggered_segment_count', 0)}，"
+            f"未解决碰撞={self.feeder_avoidance_artifacts.get('unresolved_collision_count', 0)}。"
+        )
+
+    def _on_feeder_avoidance_failed(self, trace_text):
+        self._set_feeder_avoidance_busy(False)
+        self.feeder_avoidance_progress_message.setText("馈线避让调整失败")
+        self._feeder_avoidance_log(str(trace_text))
+        last_line = (
+            str(trace_text).strip().splitlines()[-1]
+            if str(trace_text).strip()
+            else "未知错误"
+        )
+        QMessageBox.critical(self, "馈线避让调整失败", last_line)
+
+    def _open_feeder_avoidance_output_dir(self):
+        value = self.feeder_avoidance_artifacts.get("g_output_dir", "")
+        if value:
+            self._open_external_path(Path(value), "G 输出目录")
+
+    def _open_feeder_avoidance_report(self):
+        value = self.feeder_avoidance_artifacts.get("html_report", "")
+        if value:
+            self._open_external_path(Path(value), "馈线避让调整报告")
+
+    def _rmu_feeder_topology_log(self, message):
+        if hasattr(self, "rmu_feeder_topology_log_edit"):
+            self.rmu_feeder_topology_log_edit.appendPlainText(str(message))
+
+    def _set_rmu_feeder_topology_busy(self, busy: bool):
+        for widget in (
+            getattr(self, "rmu_feeder_topology_run_btn", None),
+            getattr(self, "graphics_operation_combo", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not busy)
+
+    def start_rmu_feeder_topology_analysis(self):
+        if (
+            self.rmu_feeder_topology_worker is not None
+            and self.rmu_feeder_topology_worker.isRunning()
+        ):
+            return
+
+        self._sync_workspace_source_from_poke()
+        files = []
+        try:
+            source_type = self._current_input_source()
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择 G 文件或目录。")
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError("当前文件/目录中没有找到可分析的 .g 文件。")
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"], int(ssh_cfg["port"]),
+                    ssh_cfg["username"], ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError("SSH 配置与当前文件列表不一致，请先刷新 G 文件列表。")
+                if not self._selected_remote_files():
+                    raise ValueError("请先勾选至少一个远程 G 文件。")
+            else:
+                raise ValueError(f"不支持的文件来源：{source_type}")
+        except Exception as exc:
+            QMessageBox.critical(self, "环网柜馈线拓扑分析配置错误", str(exc))
+            return
+
+        try:
+            run_dir = create_run_directory()
+        except Exception as exc:
+            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            return
+
+        self.rmu_feeder_topology_artifacts = {}
+        self.rmu_feeder_topology_log_edit.clear()
+        self.rmu_feeder_topology_progress.setValue(0)
+        self.rmu_feeder_topology_progress_message.setText(self._t("任务准备中……"))
+        self.rmu_feeder_topology_open_report_btn.setEnabled(False)
+        self.rmu_feeder_topology_open_dir_btn.setEnabled(False)
+        self._set_rmu_feeder_topology_busy(True)
+
+        try:
+            if source_type == "SSH":
+                self._rmu_feeder_topology_log("正在从 SSH 只读服务器获取本次选择文件的最新稳定快照……")
+                self.rmu_feeder_topology_progress.setValue(2)
+                QApplication.processEvents()
+                ssh_cfg = self._current_ssh_config()
+                snapshot_service = RemoteSnapshotService(
+                    host=ssh_cfg["host"],
+                    port=ssh_cfg["port"],
+                    username=ssh_cfg["username"],
+                    password=ssh_cfg["password"],
+                    remote_directory=ssh_cfg["remote_directory"],
+                    max_attempts=3,
+                )
+                files, _source_info = snapshot_service.download_latest(
+                    self._selected_remote_files(),
+                    run_dir,
+                    log=self._rmu_feeder_topology_log,
+                )
+            self._sync_poke_source_from_workspace(rebuild_remote=False)
+        except Exception as exc:
+            self._set_rmu_feeder_topology_busy(False)
+            self.rmu_feeder_topology_progress_message.setText("文件准备失败")
+            self._rmu_feeder_topology_log(f"文件准备失败：{exc}")
+            QMessageBox.critical(self, "环网柜馈线拓扑分析文件准备失败", str(exc))
+            return
+
+        self.rmu_feeder_topology_worker = RmuFeederTopologyWorker(
+            files=files,
+            run_dir=run_dir,
+        )
+        self.rmu_feeder_topology_worker.log.connect(self._rmu_feeder_topology_log)
+        self.rmu_feeder_topology_worker.progress.connect(self._on_rmu_feeder_topology_progress)
+        self.rmu_feeder_topology_worker.completed.connect(self._on_rmu_feeder_topology_completed)
+        self.rmu_feeder_topology_worker.failed.connect(self._on_rmu_feeder_topology_failed)
+        self.rmu_feeder_topology_worker.start()
+
+    def _on_rmu_feeder_topology_progress(self, percent, message):
+        self.rmu_feeder_topology_progress.setValue(max(0, min(100, int(percent))))
+        if message:
+            self.rmu_feeder_topology_progress_message.setText(self._rt(message))
+
+    def _on_rmu_feeder_topology_completed(self, artifacts):
+        self.rmu_feeder_topology_artifacts = dict(artifacts or {})
+        self._set_rmu_feeder_topology_busy(False)
+        self.rmu_feeder_topology_progress.setValue(100)
+        self.rmu_feeder_topology_progress_message.setText("环网柜馈线拓扑分析完成")
+        self.rmu_feeder_topology_open_report_btn.setEnabled(
+            bool(self.rmu_feeder_topology_artifacts.get("html_report"))
+        )
+        self.rmu_feeder_topology_open_dir_btn.setEnabled(
+            bool(self.rmu_feeder_topology_artifacts.get("report_dir"))
+        )
+        self.cfg["last_run_dir"] = self.rmu_feeder_topology_artifacts.get("run_dir", "")
+        save_settings(self.cfg)
+        self._rmu_feeder_topology_log(
+            "[完成] "
+            f"主网馈线={self.rmu_feeder_topology_artifacts.get('source_feeder_count', 0)}，"
+            f"入口支路遇NOP={self.rmu_feeder_topology_artifacts.get('source_entry_nop_feeder_count', 0)}，"
+            f"RMU={self.rmu_feeder_topology_artifacts.get('rmu_count', 0)}，"
+            f"唯一归属={self.rmu_feeder_topology_artifacts.get('unique_count', 0)}，"
+            f"NOP边界柜={self.rmu_feeder_topology_artifacts.get('nop_boundary_count', 0)}，"
+            f"冲突={self.rmu_feeder_topology_artifacts.get('conflict_count', 0)}，"
+            f"未确定={self.rmu_feeder_topology_artifacts.get('unresolved_count', 0)}。"
+        )
+
+    def _on_rmu_feeder_topology_failed(self, trace_text):
+        self._set_rmu_feeder_topology_busy(False)
+        self.rmu_feeder_topology_progress_message.setText("环网柜馈线拓扑分析失败")
+        self._rmu_feeder_topology_log(str(trace_text))
+        last_line = (
+            str(trace_text).strip().splitlines()[-1]
+            if str(trace_text).strip()
+            else "未知错误"
+        )
+        QMessageBox.critical(self, "环网柜馈线拓扑分析失败", last_line)
+
+    def _open_rmu_feeder_topology_report(self):
+        value = self.rmu_feeder_topology_artifacts.get("html_report", "")
+        if value:
+            self._open_external_path(Path(value), "环网柜馈线拓扑分析报告")
+
+    def _open_rmu_feeder_topology_report_dir(self):
+        value = self.rmu_feeder_topology_artifacts.get("report_dir", "")
+        if value:
+            self._open_external_path(Path(value), "拓扑分析结果目录")
+
+    def _feedline_feeder_topology_log(self, message):
+        if hasattr(self, "feedline_feeder_topology_log_edit"):
+            self.feedline_feeder_topology_log_edit.appendPlainText(str(message))
+
+    def _set_feedline_feeder_topology_busy(self, busy: bool):
+        for widget in (
+            getattr(self, "feedline_feeder_topology_run_btn", None),
+            getattr(self, "graphics_operation_combo", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not busy)
+
+    def start_feedline_feeder_topology_analysis(self):
+        if (
+            self.feedline_feeder_topology_worker is not None
+            and self.feedline_feeder_topology_worker.isRunning()
+        ):
+            return
+
+        self._sync_workspace_source_from_poke()
+        files = []
+        try:
+            source_type = self._current_input_source()
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择 G 文件或目录。")
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError("当前文件/目录中没有找到可分析的 .g 文件。")
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"], int(ssh_cfg["port"]),
+                    ssh_cfg["username"], ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError("SSH 配置与当前文件列表不一致，请先刷新 G 文件列表。")
+                if not self._selected_remote_files():
+                    raise ValueError("请先勾选至少一个远程 G 文件。")
+            else:
+                raise ValueError(f"不支持的文件来源：{source_type}")
+        except Exception as exc:
+            QMessageBox.critical(self, "馈线段所属馈线分析配置错误", str(exc))
+            return
+
+        try:
+            run_dir = create_run_directory()
+        except Exception as exc:
+            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            return
+
+        self.feedline_feeder_topology_artifacts = {}
+        self.feedline_feeder_topology_log_edit.clear()
+        self.feedline_feeder_topology_progress.setValue(0)
+        self.feedline_feeder_topology_progress_message.setText(self._t("任务准备中……"))
+        self.feedline_feeder_topology_open_report_btn.setEnabled(False)
+        self.feedline_feeder_topology_open_dir_btn.setEnabled(False)
+        self._set_feedline_feeder_topology_busy(True)
+
+        try:
+            if source_type == "SSH":
+                self._feedline_feeder_topology_log("正在从 SSH 只读服务器获取本次选择文件的最新稳定快照……")
+                self.feedline_feeder_topology_progress.setValue(2)
+                QApplication.processEvents()
+                ssh_cfg = self._current_ssh_config()
+                snapshot_service = RemoteSnapshotService(
+                    host=ssh_cfg["host"],
+                    port=ssh_cfg["port"],
+                    username=ssh_cfg["username"],
+                    password=ssh_cfg["password"],
+                    remote_directory=ssh_cfg["remote_directory"],
+                    max_attempts=3,
+                )
+                files, _source_info = snapshot_service.download_latest(
+                    self._selected_remote_files(),
+                    run_dir,
+                    log=self._feedline_feeder_topology_log,
+                )
+            self._sync_poke_source_from_workspace(rebuild_remote=False)
+        except Exception as exc:
+            self._set_feedline_feeder_topology_busy(False)
+            self.feedline_feeder_topology_progress_message.setText("文件准备失败")
+            self._feedline_feeder_topology_log(f"文件准备失败：{exc}")
+            QMessageBox.critical(self, "馈线段所属馈线分析文件准备失败", str(exc))
+            return
+
+        self.feedline_feeder_topology_worker = FeedlineFeederTopologyWorker(
+            files=files,
+            run_dir=run_dir,
+        )
+        self.feedline_feeder_topology_worker.log.connect(self._feedline_feeder_topology_log)
+        self.feedline_feeder_topology_worker.progress.connect(self._on_feedline_feeder_topology_progress)
+        self.feedline_feeder_topology_worker.completed.connect(self._on_feedline_feeder_topology_completed)
+        self.feedline_feeder_topology_worker.failed.connect(self._on_feedline_feeder_topology_failed)
+        self.feedline_feeder_topology_worker.start()
+
+    def _on_feedline_feeder_topology_progress(self, percent, message):
+        self.feedline_feeder_topology_progress.setValue(max(0, min(100, int(percent))))
+        if message:
+            self.feedline_feeder_topology_progress_message.setText(self._rt(message))
+
+    def _on_feedline_feeder_topology_completed(self, artifacts):
+        self.feedline_feeder_topology_artifacts = dict(artifacts or {})
+        self._set_feedline_feeder_topology_busy(False)
+        self.feedline_feeder_topology_progress.setValue(100)
+        self.feedline_feeder_topology_progress_message.setText("馈线段所属馈线分析完成")
+        self.feedline_feeder_topology_open_report_btn.setEnabled(
+            bool(self.feedline_feeder_topology_artifacts.get("html_report"))
+        )
+        self.feedline_feeder_topology_open_dir_btn.setEnabled(
+            bool(self.feedline_feeder_topology_artifacts.get("report_dir"))
+        )
+        self.cfg["last_run_dir"] = self.feedline_feeder_topology_artifacts.get("run_dir", "")
+        save_settings(self.cfg)
+        self._feedline_feeder_topology_log(
+            "[完成] "
+            f"主网馈线={self.feedline_feeder_topology_artifacts.get('source_feeder_count', 0)}，"
+            f"FeedLine={self.feedline_feeder_topology_artifacts.get('feedline_count', 0)}，"
+            f"确认={self.feedline_feeder_topology_artifacts.get('confirmed_count', 0)}，"
+            f"冲突={self.feedline_feeder_topology_artifacts.get('conflict_count', 0)}，"
+            f"未确定={self.feedline_feeder_topology_artifacts.get('unresolved_count', 0)}，"
+            f"红色NOP边界={self.feedline_feeder_topology_artifacts.get('nop_boundary_count', 0)}。"
+        )
+
+    def _on_feedline_feeder_topology_failed(self, trace_text):
+        self._set_feedline_feeder_topology_busy(False)
+        self.feedline_feeder_topology_progress_message.setText("馈线段所属馈线分析失败")
+        self._feedline_feeder_topology_log(str(trace_text))
+        last_line = (
+            str(trace_text).strip().splitlines()[-1]
+            if str(trace_text).strip()
+            else "未知错误"
+        )
+        QMessageBox.critical(self, "馈线段所属馈线分析失败", last_line)
+
+    def _open_feedline_feeder_topology_report(self):
+        value = self.feedline_feeder_topology_artifacts.get("html_report", "")
+        if value:
+            self._open_external_path(Path(value), "馈线段所属馈线分析报告")
+
+    def _open_feedline_feeder_topology_report_dir(self):
+        value = self.feedline_feeder_topology_artifacts.get("report_dir", "")
+        if value:
+            self._open_external_path(Path(value), "馈线段拓扑分析结果目录")
+
+    def _main_station_background_label_log(self, message):
+        if hasattr(self, "main_station_background_label_log_edit"):
+            self.main_station_background_label_log_edit.appendPlainText(str(message))
+
+    def _set_main_station_background_label_busy(self, busy: bool):
+        for widget in (
+            getattr(self, "main_station_background_label_run_btn", None),
+            getattr(self, "graphics_operation_combo", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not busy)
+
+    def start_main_station_background_label_repair(self):
+        if (
+            self.main_station_background_label_worker is not None
+            and self.main_station_background_label_worker.isRunning()
+        ):
+            return
+
+        self._sync_workspace_source_from_poke()
+        files = []
+        try:
+            source_type = self._current_input_source()
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择 G 文件或目录。")
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError("当前文件/目录中没有找到可处理的 .g 文件。")
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"], int(ssh_cfg["port"]),
+                    ssh_cfg["username"], ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError("SSH 配置与当前文件列表不一致，请先刷新 G 文件列表。")
+                if not self._selected_remote_files():
+                    raise ValueError("请先勾选至少一个远程 G 文件。")
+            else:
+                raise ValueError(f"不支持的文件来源：{source_type}")
+        except Exception as exc:
+            QMessageBox.critical(self, "主网入口背景标签修正配置错误", str(exc))
+            return
+
+        try:
+            run_dir = create_run_directory()
+        except Exception as exc:
+            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            return
+
+        self.main_station_background_label_artifacts = {}
+        self.main_station_background_label_log_edit.clear()
+        self.main_station_background_label_progress.setValue(0)
+        self.main_station_background_label_progress_message.setText(self._t("任务准备中……"))
+        self.main_station_background_label_open_report_btn.setEnabled(False)
+        self.main_station_background_label_open_dir_btn.setEnabled(False)
+        self._set_main_station_background_label_busy(True)
+
+        try:
+            if source_type == "SSH":
+                self._main_station_background_label_log("正在从 SSH 只读服务器获取所选 G 文件的最新稳定快照……")
+                self.main_station_background_label_progress.setValue(2)
+                QApplication.processEvents()
+                ssh_cfg = self._current_ssh_config()
+                snapshot_service = RemoteSnapshotService(
+                    host=ssh_cfg["host"],
+                    port=ssh_cfg["port"],
+                    username=ssh_cfg["username"],
+                    password=ssh_cfg["password"],
+                    remote_directory=ssh_cfg["remote_directory"],
+                    max_attempts=3,
+                )
+                files, _source_info = snapshot_service.download_latest(
+                    self._selected_remote_files(),
+                    run_dir,
+                    log=self._main_station_background_label_log,
+                )
+            self._sync_poke_source_from_workspace(rebuild_remote=False)
+        except Exception as exc:
+            self._set_main_station_background_label_busy(False)
+            self.main_station_background_label_progress_message.setText("文件准备失败")
+            self._main_station_background_label_log(f"文件准备失败：{exc}")
+            QMessageBox.critical(self, "主网入口背景标签修正文件准备失败", str(exc))
+            return
+
+        self.main_station_background_label_worker = MainStationBackgroundLabelWorker(
+            files=files, run_dir=run_dir
+        )
+        self.main_station_background_label_worker.log.connect(self._main_station_background_label_log)
+        self.main_station_background_label_worker.progress.connect(self._on_main_station_background_label_progress)
+        self.main_station_background_label_worker.completed.connect(self._on_main_station_background_label_completed)
+        self.main_station_background_label_worker.failed.connect(self._on_main_station_background_label_failed)
+        self.main_station_background_label_worker.start()
+
+    def _on_main_station_background_label_progress(self, percent, message):
+        self.main_station_background_label_progress.setValue(max(0, min(100, int(percent))))
+        if message:
+            self.main_station_background_label_progress_message.setText(self._rt(message))
+
+    def _on_main_station_background_label_completed(self, artifacts):
+        self.main_station_background_label_artifacts = dict(artifacts or {})
+        self._set_main_station_background_label_busy(False)
+        self.main_station_background_label_progress.setValue(100)
+        self.main_station_background_label_progress_message.setText("主网入口背景标签修正完成")
+        self.main_station_background_label_open_report_btn.setEnabled(
+            bool(self.main_station_background_label_artifacts.get("html_report"))
+        )
+        self.main_station_background_label_open_dir_btn.setEnabled(
+            bool(self.main_station_background_label_artifacts.get("g_output_dir"))
+        )
+        self.cfg["last_run_dir"] = self.main_station_background_label_artifacts.get("run_dir", "")
+        save_settings(self.cfg)
+        self._main_station_background_label_log(
+            "[完成] "
+            f"候选={self.main_station_background_label_artifacts.get('candidate_count', 0)}，"
+            f"文字已修正={self.main_station_background_label_artifacts.get('updated_count', 0)}，"
+            f"背景排版={self.main_station_background_label_artifacts.get('layout_count', 0)}，"
+            f"歧义={self.main_station_background_label_artifacts.get('ambiguous_count', 0)}，"
+            f"跳过={self.main_station_background_label_artifacts.get('skipped_count', 0)}。"
+        )
+
+    def _on_main_station_background_label_failed(self, trace_text):
+        self._set_main_station_background_label_busy(False)
+        self.main_station_background_label_progress_message.setText("主网入口背景标签修正失败")
+        self._main_station_background_label_log(str(trace_text))
+        last_line = str(trace_text).strip().splitlines()[-1] if str(trace_text).strip() else "未知错误"
+        QMessageBox.critical(self, "主网入口背景标签修正失败", last_line)
+
+    def _open_main_station_background_label_report(self):
+        value = self.main_station_background_label_artifacts.get("html_report", "")
+        if value:
+            self._open_external_path(Path(value), "主网入口背景标签修正报告")
+
+    def _open_main_station_background_label_output_dir(self):
+        value = self.main_station_background_label_artifacts.get("g_output_dir", "")
+        if value:
+            self._open_external_path(Path(value), "主网入口背景标签输出目录")
+
+    def _whole_graph_topology_log(self, message):
+        if hasattr(self, "whole_graph_topology_log_edit"):
+            self.whole_graph_topology_log_edit.appendPlainText(str(message))
+
+    def _set_whole_graph_topology_busy(self, busy: bool):
+        for widget in (
+            getattr(self, "whole_graph_topology_run_btn", None),
+            getattr(self, "graphics_operation_combo", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not busy)
+
+    def start_whole_graph_topology_analysis(self):
+        if (
+            self.whole_graph_topology_worker is not None
+            and self.whole_graph_topology_worker.isRunning()
+        ):
+            return
+
+        self._sync_workspace_source_from_poke()
+        files = []
+        try:
+            source_type = self._current_input_source()
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择一个 G 文件。")
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError("当前文件/目录中没有找到可分析的 .g 文件。")
+                if len(files) != 1:
+                    raise ValueError(
+                        f"整图馈线拓扑分析一次只处理 1 个 G 文件；当前解析到 {len(files)} 个，请直接选择单个 .g 文件。"
+                    )
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"], int(ssh_cfg["port"]),
+                    ssh_cfg["username"], ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError("SSH 配置与当前文件列表不一致，请先刷新 G 文件列表。")
+                selected = self._selected_remote_files()
+                if len(selected) != 1:
+                    raise ValueError(
+                        f"整图馈线拓扑分析一次只处理 1 个 G 文件；当前已勾选 {len(selected)} 个。"
+                    )
+            else:
+                raise ValueError(f"不支持的文件来源：{source_type}")
+        except Exception as exc:
+            QMessageBox.critical(self, "整图馈线拓扑分析配置错误", str(exc))
+            return
+
+        try:
+            run_dir = create_run_directory()
+        except Exception as exc:
+            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            return
+
+        self.whole_graph_topology_artifacts = {}
+        self.whole_graph_topology_log_edit.clear()
+        self.whole_graph_topology_progress.setValue(0)
+        self.whole_graph_topology_progress_message.setText(self._t("任务准备中……"))
+        self.whole_graph_topology_open_report_btn.setEnabled(False)
+        self.whole_graph_topology_open_dir_btn.setEnabled(False)
+        self._set_whole_graph_topology_busy(True)
+
+        try:
+            if source_type == "SSH":
+                self._whole_graph_topology_log("正在从 SSH 只读服务器获取所选 G 文件的最新稳定快照……")
+                self.whole_graph_topology_progress.setValue(2)
+                QApplication.processEvents()
+                ssh_cfg = self._current_ssh_config()
+                snapshot_service = RemoteSnapshotService(
+                    host=ssh_cfg["host"],
+                    port=ssh_cfg["port"],
+                    username=ssh_cfg["username"],
+                    password=ssh_cfg["password"],
+                    remote_directory=ssh_cfg["remote_directory"],
+                    max_attempts=3,
+                )
+                files, _source_info = snapshot_service.download_latest(
+                    self._selected_remote_files(),
+                    run_dir,
+                    log=self._whole_graph_topology_log,
+                )
+            self._sync_poke_source_from_workspace(rebuild_remote=False)
+        except Exception as exc:
+            self._set_whole_graph_topology_busy(False)
+            self.whole_graph_topology_progress_message.setText("文件准备失败")
+            self._whole_graph_topology_log(f"文件准备失败：{exc}")
+            QMessageBox.critical(self, "整图馈线拓扑分析文件准备失败", str(exc))
+            return
+
+        self.whole_graph_topology_worker = WholeGraphTopologyWorker(
+            files=files,
+            run_dir=run_dir,
+        )
+        self.whole_graph_topology_worker.log.connect(self._whole_graph_topology_log)
+        self.whole_graph_topology_worker.progress.connect(self._on_whole_graph_topology_progress)
+        self.whole_graph_topology_worker.completed.connect(self._on_whole_graph_topology_completed)
+        self.whole_graph_topology_worker.failed.connect(self._on_whole_graph_topology_failed)
+        self.whole_graph_topology_worker.start()
+
+    def _on_whole_graph_topology_progress(self, percent, message):
+        self.whole_graph_topology_progress.setValue(max(0, min(100, int(percent))))
+        if message:
+            self.whole_graph_topology_progress_message.setText(self._rt(message))
+
+    def _on_whole_graph_topology_completed(self, artifacts):
+        self.whole_graph_topology_artifacts = dict(artifacts or {})
+        self._set_whole_graph_topology_busy(False)
+        self.whole_graph_topology_progress.setValue(100)
+        self.whole_graph_topology_progress_message.setText("整图馈线拓扑分析 / 自动修复完成")
+        self.whole_graph_topology_open_report_btn.setEnabled(
+            bool(self.whole_graph_topology_artifacts.get("html_report"))
+        )
+        self.whole_graph_topology_open_dir_btn.setEnabled(
+            bool(self.whole_graph_topology_artifacts.get("report_dir"))
+        )
+        self.cfg["last_run_dir"] = self.whole_graph_topology_artifacts.get("run_dir", "")
+        save_settings(self.cfg)
+        self._whole_graph_topology_log(
+            "[完成] "
+            f"馈线={self.whole_graph_topology_artifacts.get('feeder_count', 0)}，"
+            f"设备={self.whole_graph_topology_artifacts.get('device_count', 0)}，"
+            f"确认={self.whole_graph_topology_artifacts.get('confirmed_count', 0)}，"
+            f"拓扑异常={self.whole_graph_topology_artifacts.get('topology_error_count', 0)}，"
+            f"无馈线={self.whole_graph_topology_artifacts.get('no_feeder_error_count', 0)}，"
+            f"多馈线={self.whole_graph_topology_artifacts.get('multi_feeder_error_count', 0)}，"
+            f"RMU={self.whole_graph_topology_artifacts.get('rmu_count', 0)}（确认={self.whole_graph_topology_artifacts.get('rmu_confirmed_count', 0)}，异常={self.whole_graph_topology_artifacts.get('rmu_error_count', 0)}），"
+            f"RMU NOP={self.whole_graph_topology_artifacts.get('rmu_nop_count', 0)}，"
+            f"柱上NOP={self.whole_graph_topology_artifacts.get('pole_nop_count', 0)}，"
+            f"自动修复={self.whole_graph_topology_artifacts.get('repair_applied_count', 0)}，"
+            f"拓扑异常={self.whole_graph_topology_artifacts.get('before_topology_error_count', 0)}→{self.whole_graph_topology_artifacts.get('after_topology_error_count', 0)}。"
+        )
+        fixed_g = self.whole_graph_topology_artifacts.get("fixed_g", "")
+        if fixed_g:
+            self._whole_graph_topology_log(f"[修复后 G] {fixed_g}")
+
+    def _on_whole_graph_topology_failed(self, trace_text):
+        self._set_whole_graph_topology_busy(False)
+        self.whole_graph_topology_progress_message.setText("整图馈线拓扑分析失败")
+        self._whole_graph_topology_log(str(trace_text))
+        last_line = (
+            str(trace_text).strip().splitlines()[-1]
+            if str(trace_text).strip()
+            else "未知错误"
+        )
+        QMessageBox.critical(self, "整图馈线拓扑分析失败", last_line)
+
+    def _open_whole_graph_topology_report(self):
+        value = self.whole_graph_topology_artifacts.get("html_report", "")
+        if value:
+            self._open_external_path(Path(value), "整图馈线拓扑分析报告")
+
+    def _open_whole_graph_topology_report_dir(self):
+        value = self.whole_graph_topology_artifacts.get("report_dir", "")
+        if value:
+            self._open_external_path(Path(value), "整图拓扑分析结果目录")
 
     # ------------------------------------------------------------
     # Database page
@@ -807,6 +4262,7 @@ class MainWindow(QMainWindow):
 
         save_btn = QPushButton("保存数据库配置")
         save_btn.clicked.connect(self.save_database_settings)
+        self.db_save_button = save_btn
 
         actions.addWidget(test_btn)
         actions.addWidget(save_btn)
@@ -987,6 +4443,7 @@ class MainWindow(QMainWindow):
         ssh_buttons = QHBoxLayout()
         test_ssh_btn = QPushButton("测试 SSH 连接")
         save_ssh_btn = QPushButton("保存 SSH 配置")
+        self.ssh_save_button = save_ssh_btn
         self.refresh_ssh_btn = QPushButton("刷新 G 文件列表")
         download_ssh_btn = QPushButton("下载所选 G 文件")
         test_ssh_btn.clicked.connect(self.test_ssh_connection)
@@ -1371,7 +4828,7 @@ class MainWindow(QMainWindow):
 
         database_btn = QPushButton("数据库设置")
         database_btn.setObjectName("secondary")
-        database_btn.clicked.connect(lambda: self.nav.setCurrentRow(1))
+        database_btn.clicked.connect(lambda: self.nav.setCurrentRow(2))
 
         for button in (
             self.validate_btn,
@@ -1474,10 +4931,10 @@ class MainWindow(QMainWindow):
                 <h2>Feeder Model Help</h2>
                 <h3>1. Feeder Resolution</h3>
                 <ol>
-                  <li>Run the feeder model after RMU, pole-switch, and pole-transformer models have been associated.</li>
-                  <li>For each FeedLine, find the nearest RMU or switch-like device by geometry and use the FEEDER_ID from its existing model link.</li>
-                  <li>If the nearest device has no model, its model cannot resolve to a feeder, or it belongs to another feeder, the FeedLine is blocked with a warning.</li>
-                  <li>No feeder name, substation name, file-name token, or G-root facID needs to be entered by the user.</li>
+                  <li>Scan every main-network Bay feeder first and resolve each graph feeder to one 13500 / dms_feeder_device record.</li>
+                  <li>For each FeedLine, reuse the Graphics Workspace topology rule: propagate from the main-network CBreaker through link/node_area and strict geometry repair, stopping only the branch that reaches a red NOP Y*/Q* switch.</li>
+                  <li>Only a FeedLine with exactly one reachable feeder is eligible. CONFLICT / UNRESOLVED rows are blocked rather than guessed.</li>
+                  <li>The resolved graph feeder must map uniquely to the database feeder; no cross-feeder fallback allocation is allowed.</li>
                 </ol>
                 <h3>2. Database Query / Create Boundary</h3>
                 <ul>
@@ -1490,7 +4947,8 @@ class MainWindow(QMainWindow):
                 </ul>
                 <h3>3. FeedLine Allocation and Association</h3>
                 <ul>
-                  <li>Correct existing FeedLine associations are preserved. Unlinked/stale FeedLines use currently unused database sections in deterministic order; only the true shortage is created. Multiple-feeder ring diagrams use the same rule by feeder region.</li>
+                  <li>An existing FeedLine association is preserved only when its 13503.FEEDER_ID equals that FeedLine's topology-resolved feeder. A Domain-only mismatch keeps the same 13503.ID and repairs only the KeyID Domain.</li>
+                  <li>Unlinked/stale/wrong-feeder FeedLines reuse only unused 13503 rows under their own topology feeder. If that feeder is short, only that feeder receives the missing SECnnn rows. One drawing may therefore create sections under several feeders independently.</li>
                   <li>ls=2 → SECTION_TYPE=0; ls=1 → SECTION_TYPE=1; missing/empty ls → SECTION_TYPE=3.</li>
                   <li>After creation, 13503 is queried again and the final database ID / BV_ID is used to calculate Expected KeyID.</li>
                   <li>The existing LINK / RELINK and duplicate-association rules then continue normally.</li>
@@ -1508,26 +4966,36 @@ class MainWindow(QMainWindow):
             if module_id == "TRANSFORMER":
                 return """
                 <h2>Pole Transformer Model Help</h2>
-                <h3>1. Recognition and Feeder</h3>
-                <ul>
-                  <li>Only elements marked <b>Transformer_OH</b> in Element Management are recognized as pole transformers. Each transformer directly takes the nearest <b>Text</b> from the G file; numeric names such as 97803 are supported.</li>
-                  <li>G-root <b>facID</b> is queried exactly in 13500 / dms_feeder_device. RMU, ConnectLine, node_area, and CBreaker topology are not analyzed by this module.</li>
-                  <li>Only a unique facName is used as the fallback when the root facID is unavailable; otherwise the row remains unresolved.</li>
-                </ul>
-                <h3>2. Database Chain</h3>
-                <p>Nearest graphical Text name + feeder_id → 13505 / dms_tr_device.NAME and FEEDER_ID → 13505.ID. Expected KeyID is calculated with Domain 1.</p>
-                <h3>3. Safe Write-back</h3>
-                <pre>
-    app1/app2="6500000"
-    voltype1/voltype2="0"
-    p_ReportType1/p_ReportType2="1"
-    state1/state2="18"
-    keyid1/keyid2="Expected KeyID"
-                </pre>
-                <p>Only selected Transformer_OH-marked transformer elements are written to Workspace safe copies; original G files are not modified.</p>
+                <ol>
+                  <li>Only objects whose devref file name is listed in the operator-maintained pole-transformer element list are processed; Element Management classification is not used.</li>
+                  <li>Name rules fully follow Jeddah: pure-numeric, white/default-white, no-background Text; 全局最近 priority; minimum rectangle-edge distance between transformer and Text ≤ 300; Text ownership is globally one-to-one.</li>
+                  <li>Makkah does <b>not</b> resolve, require, or validate FEEDER_ID. The graphical name is queried only against 13505/dms_tr_device.NAME and must return exactly one row.</li>
+                  <li>Expected KeyID uses 13505.ID with Domain 1. Only Workspace safe copies are written; original G files are unchanged.</li>
+                </ol>
                 """
             if module_id == "POLE_SWITCH":
                 return """
+                <h2>Pole Switch Model Help</h2>
+                <ol>
+                  <li>Only objects whose devref file name is listed in the operator-maintained pole-switch element list are processed. Every listed file is directly treated as a pole switch; users do not classify AR/LBS/SEC and Element Management classification is not used.</li>
+                  <li>Makkah name rules are geometry-driven: valid Text is globally matched one-to-one by minimum rectangle-edge distance, maximum distance 200; obvious unit/decimal noise is excluded.</li>
+                  <li>Before database lookup, ordinary names are normalized as before, while valid prefix+digits-digits business names keep their hyphen without requiring a configured device family.</li>
+                  <li>Makkah does <b>not</b> resolve or validate FEEDER_ID. 13501 is matched by exact NAME only (no CODE fallback), then its 13502 child must also be unique. Multiple 13502 children block association instead of being disambiguated by AR/LBS/SEC.</li>
+                  <li>Expected KeyID uses 13502.ID with Domain 40; write-back changes Workspace safe copies only.</li>
+                </ol>
+                """
+            if module_id == "FUSE":
+                return """
+                <h2>Fuse Model Help</h2>
+                <ol>
+                  <li>Only graphic objects classified <b>FUSE</b> in Element Management are processed.</li>
+                  <li>Each FUSE nominates only its nearest TRANSFORMER_OH. One transformer can be owned by only one FUSE; conflicts are won by the closer FUSE and losers do not fall back to a second transformer.</li>
+                  <li>The assigned transformer name fully reuses the Jeddah transformer rule: pure numeric, white/no-background, 全局最近, max distance 300, globally one-to-one.</li>
+                  <li>The fuse business NAME is FUSE + transformer name. Makkah does not validate FEEDER_ID: 13505.NAME and 13513.NAME must each be unique; uniqueness is enough to associate.</li>
+                  <li>Expected KeyID uses 13513.ID with Domain 40; only Workspace safe copies are changed.</li>
+                </ol>
+                """
+            return """
                 <h2>Pole Switch Model Help</h2>
                 <h3>1. Recognition Rules</h3>
                 <ul>
@@ -1557,8 +5025,8 @@ class MainWindow(QMainWindow):
               <li><b>devref names are not interpreted:</b> only CBreakerDis participates. Y devices must share one template, Q devices must share one template, and the Y/Q templates must differ. ZhaiWaiJieDiDaoZha (for example RMU_ES), BusDis, and all other objects are excluded.</li>
               <li>If text type and valid devref type disagree, the final RMU type uses the devref result and the report raises WARN.</li>
               <li><b>SMART/NORMAL:</b> SMART and SMR graphical markers are globally assigned to the nearest RMU. Any SMART/SMR marker makes the cabinet SMART; otherwise it is NORMAL.</li>
-               <li>RMU names are searched only above the rectangle, and each RMU keeps exactly one nearest Text.</li>
-               <li>Each Text belongs to only one nearest RMU, preventing the same name from being reused by adjacent cabinets.</li>
+               <li>RMU name priority is fixed as <b>RIGHT → BOTTOM → GLOBAL fallback</b>, within the 300-unit hard limit.</li>
+               <li>RMU names are external labels only: any Text whose centre lies inside a recognised RMU frame is excluded before all three stages. Names are then assigned one-to-one: RIGHT, BOTTOM, then GLOBAL fallback.</li>
               <li>Names are strings. Standard compact names are supported, plus the field form <b>number + space + suffix</b> such as <b>66 B</b>. Arbitrary descriptive text containing spaces is still rejected.</li>
             </ul>
             <h3>2. Device Naming Rules</h3>
@@ -1601,45 +5069,34 @@ class MainWindow(QMainWindow):
         if module_id == "TRANSFORMER":
             return """
             <h2>柱上变压器模型帮助</h2>
-            <h3>1. 识别与馈线</h3>
-            <ul>
-              <li>只识别图元管理中标记为 <b>Transformer_OH</b> 的图元，被标记图元直接视为柱上变压器；每个变压器直接取整张 G 图中距离最近的 <b>Text</b>，支持 97803 这类纯数字名称。</li>
-              <li>优先按 G 根节点 <b>facID</b> 精确查询 13500 / dms_feeder_device；不分析 RMU、ConnectLine、node_area 或 CBreaker 拓扑链路。</li>
-              <li>根 facID 查不到时，仅使用唯一 facName 兜底；仍无法唯一确定时阻断。</li>
-            </ul>
-            <h3>2. 数据库链路</h3>
-            <p>最近 Text 名称直接解析 + feeder_id → 13505 / dms_tr_device 的 NAME、FEEDER_ID 精确匹配 → 取 13505.ID，按 Domain=1 计算 Expected KeyID。</p>
-            <h3>3. 安全回写</h3>
-            <pre>
-    app1/app2="6500000"
-    voltype1/voltype2="0"
-    p_ReportType1/p_ReportType2="1"
-    state1/state2="18"
-    keyid1/keyid2="Expected KeyID"
-            </pre>
-            <p>只将用户勾选的 Transformer_OH 标记图元写入 Workspace 安全副本，原始 G 文件不修改。</p>
+            <ol>
+              <li>只识别【柱上变压器模型配置】中用户维护的 devref 图元文件名单；默认包含 <b>Transformer_OH.pb.icn.g</b>，不再读取【图元管理】TRANSFORMER_OH 分类。</li>
+              <li>麦加名称规则：全图 Text 不限制颜色、背景、纯数字/字母/字母数字组合；纯小数直接排除。优先级为<b>上方 TOP → 右方 RIGHT → 全局 GLOBAL</b>；按设备矩形框与 Text 矩形框的最小边缘距离计算，最大距离 200；所有变压器与 Text 全局一对一分配。</li>
+              <li>麦加<b>不识别、不要求、不校验 FEEDER_ID</b>。图上名称只按 13505/dms_tr_device.NAME 精确查询，唯一命中 1 条就直接作为目标，0 条或多条不自动关联。</li>
+              <li>使用 13505.ID、Domain=1 计算并反解校验 Expected KeyID；只写 Workspace 安全副本。</li>
+            </ol>
             """
         if module_id == "POLE_SWITCH":
             return """
             <h2>柱上开关模型帮助</h2>
-            <h3>1. 识别规则</h3>
-            <ul>
-              <li>只识别对应图元文件在图元管理中标记为 <b>LBS</b>、<b>SEC</b> 或 <b>AR</b> 的 <b>CBreakerDis</b> 图元。</li>
-              <li>图元标记是强制条件，不从 devref、key_name 或 p_NameString 猜测设备类型。</li>
-              <li>扫描整张 G 图的有效 Text，每个柱上开关独立取最近的合规 Text；不分析 RMU、ConnectLine、node_area 或其他拓扑关系。</li>
-              <li>Text.ts 中的换行名称（例如 <b>AUTO RECLOSER 101601</b>）会规范空白后作为一个完整名称保留；只有 <b>kV</b>、<b>A</b>、<b>V</b> 等单位 Text 不参与设备名称分配，名称不读取 DText。</li>
-            </ul>
-            <h3>2. 数据库链路</h3>
-            <p>图上名称 → 13501 / dms_combined_device.NAME（未命中再按 CODE）→ 13501.ID → 13502 / dms_cb_device.combined_id；目标设备使用 13502.ID，Domain 固定为 40 计算 KeyID。</p>
-            <h3>3. 安全回写</h3>
-            <pre>
-    app="6500000"
-    voltype="dms_cb_device.BV_ID"
-    p_ReportType="1"
-    state="41"
-    keyid="DeviceID + 40 * 2^32"
-            </pre>
-            <p>只将用户勾选的对象写入 Workspace 安全副本，原始 G 文件不修改。</p>
+            <ol>
+              <li>只识别【柱上开关模型配置】中用户维护的 devref 图元文件名单；<b>只要加入名单就直接认定为柱上开关</b>，用户不再区分 AR / LBS / SEC，也不再读取【图元管理】分类。</li>
+              <li>麦加名称规则：Text 不限制颜色、背景、纯数字/字母/字母数字组合；纯小数直接排除。按设备与 Text 的矩形最小边缘距离做全局一对一匹配，最大距离 200。</li>
+              <li>数据库查询直接使用 G 文件中的柱上开关原始 Text 名称；不删除空格、横杠、点号，不做拼接、大小写转换或其他名称标准化。</li>
+              <li>麦加<b>不识别、不要求、不校验 FEEDER_ID</b>。13501 只按 NAME 精确匹配，不使用 CODE 兜底；13501 必须唯一，其 13502 子设备也必须唯一。若 13502 有多条，直接阻断关联，不再按 AR/LBS/SEC 消歧。</li>
+              <li>使用 13502.ID、Domain=40 计算 Expected KeyID，只写 Workspace 安全副本。</li>
+            </ol>
+            """
+        if module_id == "FUSE":
+            return """
+            <h2>熔断器模型帮助</h2>
+            <ol>
+              <li>只识别【熔断器模型配置】中用户维护的 devref 图元文件名单；<b>只要加入名单就直接认定为熔断器</b>，不再读取【图元管理】FUSE 分类。</li>
+              <li>每个 FUSE 只提名几何位置最近的 TRANSFORMER_OH；同一柱上变压器只能分配给一个 FUSE，冲突时距离更近者获得，失败者不再找第二近。</li>
+              <li>获得柱上变压器后，名称复用麦加柱上变压器规则：不限制颜色、背景、纯数字/字母/字母数字组合，纯小数排除；全局最近，最大距离 200，全局一对一。</li>
+              <li>熔断器业务名称固定为 FUSE+变压器名称。麦加<b>不识别、不要求、不校验 FEEDER_ID</b>：13505.NAME 必须唯一，派生后的 13513.NAME 也必须唯一；唯一即关联。</li>
+              <li>使用 13513.ID、Domain=40 计算 Expected KeyID，只写 Workspace 安全副本。</li>
+            </ol>
             """
 
         if module_id == "MASTER_STATION":
@@ -1648,9 +5105,15 @@ class MainWindow(QMainWindow):
             <h3>1. 强制识别</h3>
             <p>只扫描 Bus、CBreaker、Disconnector、GroundDisconnector 图元，不分析拓扑，也不从无关文字猜测设备。</p>
             <h3>2. 数据库匹配</h3>
-            <p>每个对象先以最近的 CBreaker 为锚点，再查找该断路器最近的 RMU 矩形框；只检查这个 RMU 框内部设备或保护信号的已有 KeyID，然后直接查询 13501 dms_combined_device，使用 RMU 的 FEEDER_ID 反查厂站和馈线。没有 RMU、框内没有有效关联，或 RMU 没有唯一 FEEDER_ID 时，直接报错“该图环网柜请手动关联”。不会扫描整张图，也不分析拓扑。确认上下文后，从图元 key_name 提取 CODE 并按配置表精确查询。默认 CBreaker → 407 / breaker、Disconnector → 408 / disconnector、GroundDisconnector → 409 / grounddisconnector，域号均为 40。Bus 表号待现场确认，默认不执行关联。</p>
+            <p>先识别含 CBreaker 的最内层矩形框，只有这种框才作为主网 Bay 框。每个框只取附近最近的无背景合法馈线标题（例如 MNA4-12、ARF2-07），文字颜色不参与判断；标题超出安全距离或存在背景时不借用。标题拆分出变电站与馈线，在 405/13500 中确定唯一厂站和馈线，再在 406 中确定唯一 BAY_ID，并用 407 breaker 的 ST_ID/BAY_ID 进行交叉确认。确认 Bay 后，框内 CBreaker → 407、Disconnector → 408、GroundDisconnector → 409 继续按 BAY_ID 查询；Bus → 410/busbarsection 只检查已确认的变电站 ST_ID，不检查 BAY_ID。同站 410 记录作为候选池，已有正确 Bus 关联优先保留，其余 Bus 任意一对一取未使用记录。Disconnector/GroundDisconnector 多记录仍按 key_name CODE 消歧。不依赖 RMU 已有关联，也不分析全图拓扑。</p>
             <h3>3. 安全回写</h3>
-            <p>沿用现有关联回写规则，只修改 Workspace 安全副本中的目标属性，不删除原有 XML 属性，原始 G 文件不修改。</p>
+            <p>只修改 Workspace 安全副本，不修改原始 G 文件。执行前会重新检查数据库和目标有效性，并且只有执行前目标仍与用户校验时确认的目标一致才允许写回。</p>
+            <pre>
+CBreaker: app=100000, voltype=数据库 BV_ID, p_ReportType=1, state=41, keyid=Expected KeyID
+Disconnector: app=100000, voltype=数据库 BV_ID, p_ReportType=1, state=31, keyid=Expected KeyID
+GroundDisconnector: app=100000, voltype=数据库 BV_ID, p_ReportType=1, state=31, keyid=Expected KeyID
+Bus: app=100000, voltype=数据库 BV_ID, p_ReportType=1, state=10, keyid=Expected KeyID
+            </pre>
             """
 
         if module_id == "FEEDER":
@@ -1659,10 +5122,10 @@ class MainWindow(QMainWindow):
 
             <h3>1. 馈线确定方式</h3>
             <ol>
-              <li>馈线模型必须在环网柜、柱上开关、柱上变压器模型完成关联后使用。</li>
-              <li>每条 FeedLine 按几何距离寻找最近的环网柜或开关等设备，并使用该设备已关联模型所属的 FEEDER_ID。</li>
-              <li>最近设备没有模型、模型无法反查馈线，或附近设备属于不同馈线时，直接告警并阻断该馈线段。</li>
-              <li>不再要求用户填写馈线名、变电站名或选择馈线识别方式；不会用文件名或 G 根 facID 猜测馈线段归属。</li>
+              <li>先扫描当前环网图全部主网 Bay 馈线，并通过 405/substation → 13500/dms_feeder_device 唯一确认每条图形馈线。</li>
+              <li>每条 FeedLine 直接复用【图形工作区 → 馈线段所属馈线分析】规则：从主网 CBreaker 沿 link/node_area 与严格几何补链传播；遇红色 NOP 对应 Y*/Q* 开关时只停止该支路。</li>
+              <li>只有唯一主网馈线可达时才继续。CONFLICT / UNRESOLVED 直接阻断，不按最近设备或其它馈线猜测。</li>
+              <li>图形所属馈线还必须唯一映射到数据库 13500，之后该 FeedLine 的 13503 复用/创建都限定在自己的 FEEDER_ID 下。</li>
             </ol>
 
             <h3>2. 数据库查询与创建边界</h3>
@@ -1677,7 +5140,8 @@ class MainWindow(QMainWindow):
 
             <h3>3. FeedLine 创建与关联</h3>
             <ul>
-              <li>已有正确 FeedLine 关联保持不变；仅未关联/失效关联按从上到下、同高度从左到右分配当前馈线未占用的数据库馈线段，真实不足时才按 SECnnn 规则新建。</li>
+              <li>已有 13503 只有在 FEEDER_ID 与该 FeedLine 的拓扑所属馈线一致时才保持；仅 Domain 错误时保留原 13503.ID 并修正 KeyID。</li>
+              <li>未关联/失效/跨馈线关联只复用自己所属馈线下未占用的 13503；该馈线数量不足时，才在该馈线下按 SECnnn 规则新建。一个 G 图可以同时在多条馈线下分别创建。</li>
               <li>ls=2 → SECTION_TYPE=0；ls=1 → SECTION_TYPE=1；ls为空/不存在 → SECTION_TYPE=3。</li>
               <li>创建成功后重新查询 13503，再使用数据库最终 ID / BV_ID 计算 Expected KeyID。</li>
               <li>然后继续沿用原有 FeedLine 自动关联 / RELINK / 重复关联处理逻辑。</li>
@@ -1705,7 +5169,7 @@ class MainWindow(QMainWindow):
           <li>如果文字类型与 devref 类型不一致，报告中显示“类型交叉校验=NO”，最终“环网柜类型”采用 devref 类型；该差异本身不改变 RMU 数据库关联资格。</li>
           <li><b>智能环网柜识别：</b>在整张 G 图全局寻找 Text 中精确的 SMART 和 SMR，并把每个标识唯一归属给距离最近的 RMU。SMART 通常在柜内、SMR 可以在柜外，因此不设置最大距离限制。</li>
           <li>一个 RMU 只要命中 SMART 或 SMR 任意一种，报告“是否智能”列显示 <b>SMART</b>；未命中则显示 <b>NORMAL</b>。若两种标识都归属于同一个柜，“智能标识”仍记录 <b>SMART, SMR</b>。</li>
-           <li>麦加现场环网柜名称默认搜索矩形框右侧，也可以多选其它方向；多选时按距离只保留最近的一个 Text。</li>
+           <li>麦加现场环网柜名称只从 RMU 框外 Text 中寻找；Text 中心落在任意 RMU 框内时直接排除。其余固定按 <b>右侧 RIGHT → 下方 BOTTOM → 全局 GLOBAL 兜底</b> 的顺序识别；名称距离不得超过 300 G 单位。</li>
            <li>每个 RMU 只保留一个名称；数据库中必须唯一匹配一条同名环网柜记录；同一 Text 全局只归属距离最近的一个环网柜，避免名称重复使用。</li>
           <li>名称始终按照字符串处理，支持数字、字母、横线、下划线等常见工程名称。</li>
         </ul>
@@ -1715,7 +5179,8 @@ class MainWindow(QMainWindow):
           <li><b>CBreakerDis：</b>只使用环网柜内部、与开关图元空间对应的图上文字作为设备名称。XML <code>p_NameString</code> 完全不参与设备命名。</li>
           <li><b>ZhaiWaiJieDiDaoZha：</b>与 CBreakerDis 做最近唯一空间配对，逻辑设备名称=配对开关图上名称+D。</li>
           <li><b>BusDis：</b>逻辑设备名称固定为 <b>BUS</b>。</li>
-          <li>上述逻辑设备名称必须与当前 RMU 下数据库设备 <b>CODE</b> 唯一对应；NAME 不参与判断。</li>
+          <li><b>Channel Status：</b>只识别已确定 RMU 框内 devref 含 <code>channel_status.zt.icn.g</code> 的 Status 图元；按当前 RMU ID 查询唯一 channel，目标表固定 13566、Domain 固定 40。</li>
+          <li>上述普通设备逻辑名称必须与当前 RMU 下数据库设备 <b>CODE</b> 唯一对应；NAME 不参与判断；Channel Status 使用独立 channel 查询规则。</li>
           <li>开关图上文字无法唯一识别、数据库不存在相同 CODE 或同 CODE 存在多条记录时，报告会明确指出对应环网柜并提示检查开关命名方式。</li>
         </ul>
 
@@ -2100,6 +5565,66 @@ class MainWindow(QMainWindow):
             )
         )
 
+        central_box = QGroupBox("公共配置同步")
+        central_layout = QVBoxLayout(central_box)
+        central_layout.setContentsMargins(14, 18, 14, 14)
+        central_cfg = dict(self.cfg.get("central_config", {}) or {})
+        central_tip = QLabel(
+            "软件启动只读取本机缓存，不会自动访问中央仓库。普通客户端可以修改并保存本机配置，也可以手动同步中央共享配置；"
+            "只有上传/发布配置到中央仓库需要 Admin 权限。任何机器都可以手动抢占 Admin。"
+            "当 Admin 被其他机器抢占后，本机仅后台检查很小的 instance.json 并自动降权；"
+            "该检查不会同步数据库、服务器或图元配置。"
+        )
+        central_tip.setWordWrap(True)
+        central_layout.addWidget(central_tip)
+        central_grid = QGridLayout()
+        self.central_edits = {}
+        central_fields = [
+            ("host", "中央服务器", central_cfg.get("host", "172.16.21.27")),
+            ("port", "端口", central_cfg.get("port", 22)),
+            ("username", "中央服务器用户名", central_cfg.get("username", "up8000")),
+            ("password", "中央服务器密码", central_cfg.get("password", "up8000")),
+            (
+                "remote_directory",
+                "中央配置目录",
+                central_cfg.get(
+                    "remote_directory",
+                    "/home/up8000/nari-international/distribution-model-manager/config",
+                ),
+            ),
+        ]
+        for row, (key, label, value) in enumerate(central_fields):
+            central_grid.addWidget(QLabel(label), row, 0)
+            edit = QLineEdit(str(value))
+            if key == "password":
+                edit.setEchoMode(QLineEdit.Password)
+            central_grid.addWidget(edit, row, 1)
+            self.central_edits[key] = edit
+        central_layout.addLayout(central_grid)
+        central_actions = QHBoxLayout()
+        self.central_save_local_button = QPushButton("保存本机连接配置")
+        self.central_save_local_button.clicked.connect(self.save_central_connection_locally)
+        self.central_sync_button = QPushButton("连接并同步中央配置")
+        self.central_sync_button.clicked.connect(self.sync_central_configuration)
+        self.central_publish_button = QPushButton("保存并发布全部配置")
+        self.central_publish_button.clicked.connect(self.publish_current_configuration)
+        self.central_init_button = QPushButton("抢占 Admin 权限")
+        self.central_init_button.clicked.connect(self.takeover_central_configuration)
+        self.central_release_button = QPushButton("释放 Admin 权限")
+        self.central_release_button.clicked.connect(self.release_central_configuration)
+        central_actions.addWidget(self.central_save_local_button)
+        central_actions.addWidget(self.central_sync_button)
+        central_actions.addWidget(self.central_publish_button)
+        central_actions.addWidget(self.central_init_button)
+        central_actions.addWidget(self.central_release_button)
+        central_actions.addStretch()
+        central_layout.addLayout(central_actions)
+        self.central_status = QLabel()
+        self.central_status.setWordWrap(True)
+        central_layout.addWidget(self.central_status)
+        self._refresh_central_status()
+        layout.addWidget(central_box)
+
         language_box = QGroupBox("语言设置")
         language_layout = QGridLayout(language_box)
         language_layout.setContentsMargins(14, 18, 14, 14)
@@ -2138,6 +5663,292 @@ class MainWindow(QMainWindow):
 
         return page
 
+    def _is_current_central_admin(self) -> bool:
+        state = dict(self.cfg.get("_central_sync", {}) or {})
+        if str(state.get("status") or "").upper() != "ACTIVE":
+            return False
+        if str(state.get("admin_machine_id") or "") != str(self.cfg.get("machine_id") or ""):
+            return False
+        remote_epoch = int(state.get("admin_epoch", 0) or 0)
+        return self._admin_session_epoch is not None and remote_epoch == int(self._admin_session_epoch)
+
+    def _adopt_admin_session_if_owner(self):
+        state = dict(self.cfg.get("_central_sync", {}) or {})
+        is_owner = (
+            str(state.get("status") or "").upper() == "ACTIVE"
+            and str(state.get("admin_machine_id") or "")
+            == str(self.cfg.get("machine_id") or "")
+        )
+        self._admin_session_epoch = (
+            int(state.get("admin_epoch", 0) or 0) if is_owner else None
+        )
+
+    def _apply_shared_configuration_permissions(self, is_admin: bool):
+        """Keep all local configuration editable; gate only central publish."""
+        for edit in getattr(self, "db_edits", {}).values():
+            edit.setReadOnly(False)
+        if hasattr(self, "db_save_button"):
+            self.db_save_button.setEnabled(True)
+        for edit in getattr(self, "ssh_edits", {}).values():
+            edit.setReadOnly(False)
+        if hasattr(self, "ssh_save_button"):
+            self.ssh_save_button.setEnabled(True)
+        element_page = getattr(self, "element_management_page", None)
+        if element_page is not None and hasattr(element_page, "set_admin_mode"):
+            element_page.set_admin_mode(is_admin)
+
+    def _refresh_central_status(self):
+        if not hasattr(self, "central_status"):
+            return
+        state = dict(self.cfg.get("_central_sync", {}) or {})
+        status = str(state.get("status") or "UNKNOWN").upper()
+        message = str(state.get("message") or "")
+        is_current_admin = self._is_current_central_admin()
+
+        if hasattr(self, "central_init_button"):
+            self.central_init_button.setEnabled(status != "DISABLED" and not is_current_admin)
+            self.central_init_button.setText(
+                "当前机器已是 Admin" if is_current_admin else "抢占 Admin 权限"
+            )
+        if hasattr(self, "central_publish_button"):
+            self.central_publish_button.setEnabled(is_current_admin)
+        if hasattr(self, "central_release_button"):
+            self.central_release_button.setEnabled(is_current_admin)
+        self._apply_shared_configuration_permissions(is_current_admin)
+
+        admin_name = str(state.get("admin_machine_name") or "").strip()
+        admin_ip = str(state.get("admin_ip") or "").strip()
+        admin_desc = " / ".join(value for value in (admin_name, admin_ip) if value)
+        if not admin_desc:
+            admin_desc = "未记录机器信息"
+        labels = {
+            "ACTIVE": (
+                f"已连接中央配置；当前机器为 Admin（{admin_desc}）。"
+                if is_current_admin
+                else f"当前 Admin：{admin_desc}；本机为普通客户端，可修改并保存本机配置、同步中央配置，但不能发布中央仓库；可随时抢占 Admin。"
+            ),
+            "UNASSIGNED": "中央配置当前没有 Admin；任意客户端都可以抢占 Admin。",
+            "UNINITIALIZED": "中央共享配置尚未初始化；请先抢占 Admin，再用本机配置发布。",
+            "OFFLINE": "中央配置暂时不可用，将继续使用本机缓存。",
+            "DISABLED": "中央配置同步已关闭。",
+            "LOCAL_ONLY": "当前仅使用本机缓存；启动未访问中央仓库。本机配置可修改保存，可手动同步中央配置；发布中央仓库需要 Admin。",
+            "UNKNOWN": "尚未读取中央配置；本机配置可修改保存，发布中央仓库需要 Admin。",
+        }
+        self.central_status.setText(
+            f"状态：{labels.get(status, status)}"
+            + (f"\n{message}" if message else "")
+        )
+        self.central_status.setStyleSheet(
+            "color:#006B52;background:#EAF8F2;"
+            "border:1px solid #B9DACD;border-radius:6px;padding:8px;"
+            if status in {"ACTIVE", "UNASSIGNED"}
+            else "color:#7A4B00;background:#FFF6DF;"
+            "border:1px solid #E7C66A;border-radius:6px;padding:8px;"
+        )
+
+    def _schedule_central_admin_ownership_check(self):
+        """Poll only instance.json while this app session is the current Admin."""
+        if not self._is_current_central_admin():
+            return
+        worker = self._central_admin_check_worker
+        if worker is not None and worker.isRunning():
+            return
+        worker = CentralAdminOwnershipWorker(dict(self.cfg), self)
+        self._central_admin_check_worker = worker
+        worker.checked.connect(self._on_central_admin_ownership_checked)
+        worker.failed.connect(self._on_central_admin_ownership_check_failed)
+        worker.finished.connect(self._clear_central_admin_check_worker)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _clear_central_admin_check_worker(self):
+        self._central_admin_check_worker = None
+
+    def _on_central_admin_ownership_check_failed(self, _message: str):
+        # Temporary connectivity loss must not alter local configuration/role.
+        return
+
+    def _on_central_admin_ownership_checked(self, remote_state: dict):
+        if not self._is_current_central_admin():
+            return
+        previous = dict(self.cfg.get("_central_sync", {}) or {})
+        local_id = str(self.cfg.get("machine_id") or "")
+        local_epoch = int(self._admin_session_epoch or 0)
+        remote_id = str(remote_state.get("admin_machine_id") or "")
+        remote_epoch = int(remote_state.get("admin_epoch", 0) or 0)
+        still_owner = (
+            str(remote_state.get("status") or "").upper() == "ACTIVE"
+            and remote_id == local_id
+            and remote_epoch == local_epoch
+        )
+        if still_owner:
+            previous.update(remote_state)
+            previous["message"] = "Admin 权限有效；后台仅检查所有权，未自动同步中央配置。"
+            self.cfg["_central_sync"] = previous
+            self._refresh_central_status()
+            return
+
+        self.cfg["_central_sync"] = dict(remote_state or {})
+        self._admin_session_epoch = None
+        self._refresh_central_status()
+        admin_name = str(remote_state.get("admin_machine_name") or "").strip()
+        admin_ip = str(remote_state.get("admin_ip") or "").strip()
+        owner = " / ".join(x for x in (admin_name, admin_ip) if x) or "其他客户端"
+        QMessageBox.information(
+            self,
+            "Admin 权限已释放",
+            f"Admin 权限已被 {owner} 接管。当前程序已自动切换为普通客户端；本机配置仍可修改保存和同步，但不能发布到中央仓库。",
+        )
+
+    def _current_central_config(self) -> dict:
+        cfg = {key: edit.text().strip() for key, edit in self.central_edits.items()}
+        try:
+            cfg["port"] = int(cfg.get("port") or 22)
+        except Exception as exc:
+            raise ValueError("中央服务器端口必须是整数。") from exc
+        if not cfg.get("host"):
+            raise ValueError("中央服务器地址不能为空。")
+        if not cfg.get("username"):
+            raise ValueError("中央服务器用户名不能为空。")
+        if not cfg.get("remote_directory"):
+            raise ValueError("中央配置目录不能为空。")
+        cfg["enabled"] = True
+        return cfg
+
+    def _save_central_connection(self):
+        self.cfg["central_config"] = self._current_central_config()
+
+    def save_central_connection_locally(self):
+        """Save only the central endpoint locally; do not connect to it."""
+        try:
+            self._save_central_connection()
+            save_settings(self.cfg)
+            self.statusBar().showMessage(
+                self._rt("中央仓库连接配置已保存到本机；未访问服务器。"), 3500
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "保存中央仓库连接配置失败", str(exc))
+
+    def sync_central_configuration(self):
+        """Manually pull central shared settings and overwrite local cache."""
+        try:
+            self._save_central_connection()
+            save_settings(self.cfg)
+            sync_central_settings(self.cfg, raise_on_error=True)
+            save_settings(self.cfg)
+            self._adopt_admin_session_if_owner()
+            self._refresh_shared_configuration_views()
+            self._refresh_central_status()
+            QMessageBox.information(
+                self,
+                "读取中央配置",
+                "中央配置已手动同步，并已覆盖本机的图元标记、数据库和文件服务器缓存。",
+            )
+        except Exception as exc:
+            self._refresh_central_status()
+            QMessageBox.warning(self, "读取中央配置失败", str(exc))
+
+    def _refresh_shared_configuration_views(self):
+        db_cfg = dict(self.cfg.get("db", {}) or {})
+        for key, edit in getattr(self, "db_edits", {}).items():
+            edit.setText(str(db_cfg.get(key, "")))
+        ssh_cfg = dict(self.cfg.get("ssh", {}) or {})
+        for key, edit in getattr(self, "ssh_edits", {}).items():
+            edit.setText(str(ssh_cfg.get(key, "")))
+        element_page = getattr(self, "element_management_page", None)
+        if element_page is not None and hasattr(element_page, "reload_local_cache"):
+            element_page.reload_local_cache()
+
+    def _collect_shared_configuration(self, *, save_local=True):
+        if hasattr(self, "central_edits"):
+            self._save_central_connection()
+        if hasattr(self, "db_edits"):
+            self.cfg["db"] = self.current_db_config()
+        if hasattr(self, "ssh_edits"):
+            self.cfg["ssh"] = self._current_ssh_config()
+        element_page = getattr(self, "element_management_page", None)
+        if element_page is not None:
+            element_page._sync_rows_from_table()
+            self.cfg["element_catalog"] = {
+                "remote_directory": element_page.directory_edit.text().strip(),
+                "records": [dict(row) for row in element_page.rows],
+            }
+        if save_local:
+            save_settings(self.cfg)
+
+    def publish_current_configuration(self):
+        """Explicitly publish all current local shared settings."""
+        try:
+            self._collect_shared_configuration(save_local=False)
+            version = publish_central_settings(self.cfg)
+            save_settings(self.cfg)
+            self._refresh_central_status()
+            QMessageBox.information(
+                self,
+                "中央配置发布完成",
+                f"图元标记、数据库和文件服务器配置已全部发布。\n中央配置版本：{version}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "中央配置发布失败", str(exc))
+
+    def takeover_central_configuration(self):
+        """Explicitly take over Admin ownership without syncing shared config."""
+        state = dict(self.cfg.get("_central_sync", {}) or {})
+        admin_name = str(state.get("admin_machine_name") or "").strip()
+        admin_ip = str(state.get("admin_ip") or "").strip()
+        current_owner = " / ".join(x for x in (admin_name, admin_ip) if x)
+        detail = f"当前已知 Admin：{current_owner}。\n\n" if current_owner else ""
+        answer = QMessageBox.question(
+            self,
+            "抢占 Admin 权限",
+            detail
+            + "抢占后，本机将立即获得共享配置的修改、保存和发布权限；"
+            "原 Admin 程序检测到所有权变化后会自动降级。\n\n"
+            "本操作只变更 Admin 所有权，不会自动同步或发布数据库、服务器、图元配置。是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self._save_central_connection()
+            save_settings(self.cfg)
+            epoch = takeover_central_admin(self.cfg)
+            self._admin_session_epoch = int(epoch)
+            save_settings(self.cfg)
+            self._refresh_central_status()
+            QMessageBox.information(
+                self,
+                "Admin 抢占完成",
+                "当前机器已成为 Admin。现在可以修改并保存本机共享配置，再按需点击【保存并发布全部配置】。"
+                "\n本次抢占没有自动同步或发布任何中央业务配置。",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "抢占 Admin 失败", str(exc))
+
+    def release_central_configuration(self):
+        answer = QMessageBox.question(
+            self,
+            "释放 Admin 权限",
+            "释放后当前机器不再拥有发布权限，其他机器可以重新申请成为 Admin。是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            version = release_central_admin(self.cfg)
+            self._admin_session_epoch = None
+            save_settings(self.cfg)
+            self._refresh_central_status()
+            QMessageBox.information(
+                self,
+                "Admin 权限已释放",
+                f"Admin 权限已释放，中央配置版本：{version}。",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "释放 Admin 失败", str(exc))
+
     def _on_language_changed(self, _index):
         if not hasattr(self, "language_combo"):
             return
@@ -2174,6 +5985,7 @@ class MainWindow(QMainWindow):
                 "FEEDER": "Feeder Model" if self.language == "en_US" else "馈线模型",
                 "POLE_SWITCH": "Pole Switch Model" if self.language == "en_US" else "柱上开关模型",
                 "TRANSFORMER": "Pole Transformer Model" if self.language == "en_US" else "柱上变压器模型",
+                "FUSE": "Fuse Model" if self.language == "en_US" else "熔断器模型",
                 "MASTER_STATION": "Master Station Device Association" if self.language == "en_US" else "配网主站设备关联",
             }
             for i in range(self.module_combo.count()):
@@ -2206,6 +6018,16 @@ class MainWindow(QMainWindow):
                 if self.language == "en_US"
                 else f"{APP_EDITION} · {APP_SITE_LABEL}  |  v{APP_VERSION}"
             )
+        if hasattr(self, "graphics_operation_combo"):
+            for i in range(self.graphics_operation_combo.count()):
+                operation_id = str(self.graphics_operation_combo.itemData(i) or "").upper()
+                if operation_id == "POKE":
+                    self.graphics_operation_combo.setItemText(
+                        i,
+                        "Poke Jump Processing"
+                        if self.language == "en_US"
+                        else "Poke 跳转处理",
+                    )
         if hasattr(self, "about_text_label"):
             if self.language == "en_US":
                 self.about_text_label.setText(
@@ -2309,9 +6131,9 @@ class MainWindow(QMainWindow):
         rmu_naming_text = QLabel(
             "• 环网柜只有在矩形框内同时存在 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元时才识别为 RMU。\n"
             "• RMU 柜型：柜内 Y*/Q* 文字与 CBreakerDis.devref 模板结构独立计算并交叉验证；devref 不解析任何现场图元关键字，只检查 Y 类同模板、Q 类同模板且 Y/Q 模板可区分。有效 devref 与文字冲突时仍以 devref 为准，同时 WARN。\n"
-             "• 麦加现场环网柜名称默认搜索矩形框右侧，也可以多选其它方向；多选时按距离只保留最近的一个 Text。\n"
+             "• 麦加现场环网柜名称固定按 <b>右侧 RIGHT → 下方 BOTTOM → 全局 GLOBAL 兜底</b> 的顺序识别；名称距离不得超过 300 G 单位，超过 300 不参与计算。\n"
              "• 每个 RMU 只保留一个名称；数据库中必须唯一匹配一条同名环网柜记录；每个 Text 全局只分配给距离最近的一个环网柜。\n"
-            "• 绿色依据 G 文件属性判断：lc=0,255,0 或 lcc=#00ff00；实际名称读取 Text 的 ts 属性。\n"
+            "• RMU 名称颜色不参与判断：红色、绿色、白色或其它颜色均按相同几何与名称规则处理；实际名称读取 Text 的 ts 属性。\n"
             "• 环网柜名称始终按字符串处理，支持 42646、RMU-42646、ABC_123、JED-RMU-01、ABC.01 等常见工程名称，不会强制转换成数字。"
         )
         rmu_naming_text.setWordWrap(True)
@@ -2325,6 +6147,7 @@ class MainWindow(QMainWindow):
             "• CBreakerDis：只使用环网柜内图上文字；XML p_NameString 完全不参与设备命名。\n"
             "• ZhaiWaiJieDiDaoZha：逻辑名称=配对开关图上名称+D。\n"
             "• BusDis：逻辑名称固定为 BUS。\n"
+            "• Channel Status：只识别当前 RMU 框内 channel_status.zt.icn.g 的 Status；按 RMU ID 查询唯一 channel，固定 table=13566 / domain=40。\n"
             "• 图上开关名称必须与当前 RMU 下数据库 CODE 唯一对应；失败时明确告警对应环网柜并提示检查命名方式。\n\n"
             "【RMU 柜型识别】\n"
             "• 第一套：柜内 Y1/Y2/Y3... 每个计 L；Q1/Q2/Q3... 每个计 T，形成文字柜型。\n"
@@ -2346,7 +6169,8 @@ class MainWindow(QMainWindow):
             "• 13502 / CBreakerDis：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称；NAME 不参与判断。\n"
             "• 13514 / ZhaiWaiJieDiDaoZha：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称（开关名称+D）；NAME 不参与判断。\n"
             "• 13506 / BusDis：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称；图上文字模式固定为 BUS；NAME 不参与判断。\n"
-            "• 设备校验以 G 文件实际存在的图元为准，只查询这些图元最终需要的 CODE。\n"
+            "• 13566 / Channel Status：按 RMU ID 查询 dms_terminal_info → dms_channel_info，排除 DR channel，必须唯一；KeyID 使用 Domain=40 并二次校验。\n"
+            "• 设备校验以 G 文件实际存在的图元为准，只查询这些图元最终需要的 CODE；Channel Status 使用独立 channel 查询。\n"
             "• 数据库中与 G 图元 CODE 无关的其它设备记录忽略，不参与数量比较。\n"
             "• G 图元需要的 CODE 不存在，或同一 CODE 匹配到多条记录时，才作为设备模型错误并阻止关联。"
         )
@@ -2402,13 +6226,13 @@ class MainWindow(QMainWindow):
         feeder_help = QGroupBox("馈线模型规则")
         feeder_help_layout = QVBoxLayout(feeder_help)
         feeder_help_text = QLabel(
-            "• 支持单馈线 G 图和一个文件内的多馈线环网图；多馈线按连接区域及最近设备分别处理。\n"
-            "• 馈线模型必须后置执行：先完成环网柜、柱上开关、柱上变压器模型关联。\n"
-            "• 每条 FeedLine 按几何距离取最近的已关联设备；最近设备无模型时提示“未关联附近设备模型，馈线段无法创建模型或者关联模型”。\n"
+            "• 支持一个 G 文件内多条主网馈线；先扫描主网 Bay，再复用【馈线段所属馈线分析】为每条 FeedLine 计算唯一拓扑所属馈线。\n"
+            "• 拓扑依据：主网 CBreaker、link/node_area、严格几何补链、红色 NOP 对应 Y*/Q* 支路级断点；CONFLICT / UNRESOLVED 不猜测。\n"
+            "• 图形所属馈线必须通过 405/substation → 13500/dms_feeder_device 唯一映射到 FEEDER_ID。\n"
             "• 馈线主表：13500 / dms_feeder_device；馈线段表：13503 / dms_section_device；默认域号：1。\n"
-            "• G 馈线段图元为 <FeedLine>。已有关联时，当前 KeyID 必须反解到 13503 / Domain 1 且数据库记录属于当前馈线。\n"
-            "• 已关联 FeedLine：13503、Domain、FEEDER_ID 均正确即保持原关联，不按几何顺序重排 SEC。\n• 未关联/失效关联 FeedLine：已正确关联的数据库馈线段先视为占用；其余数据库馈线段按自然顺序分配，真实数量不足时才新建缺少数量。\n"
-            "• 已经关联错误的 FeedLine 不自动覆盖，只在报告中标红，避免静默改错已有模型。\n"
+            "• 已有关联只有在 13503.FEEDER_ID 与该 FeedLine 拓扑目标一致时才保持；仅 Domain 错误时保持原 13503.ID 并修正 KeyID。\n"
+            "• 未关联/失效/跨馈线 FeedLine 只复用自己所属馈线下的空闲 13503；不足时也只在该馈线下创建实际缺少数量，不跨馈线分配。\n"
+            "• 一个 G 图可以同时在多条所属馈线下分别创建 13503；执行阶段按 FEEDER_ID 分组处理。\n"
             "• FeedLine 回写安全副本：app=6500000, p_ReportType=1, state=20, voltype=dms_section_device.BV_ID, keyid=Expected KeyID。\n"
             "• 馈线模块拥有独立的【馈线汇总】和【馈线段明细】HTML / CSV 报告，不改变 RMU 模块已经取消馈线判断的规则。"
         )
@@ -2496,7 +6320,10 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "module_stack"):
             return
 
-        # 先解除上一模块写入的固定高度，避免新模块继承旧页面尺寸。
+        # 与吉达 v4.1.96 保持一致：不冻结 QStackedWidget 重绘。
+        # 先解除上一模块写入的固定高度，再直接切换当前页；
+        # currentChanged 会立即针对新页做一次高度计算，事件循环结束后
+        # 再校准一次 WordWrap/DPI 的最终 sizeHint。
         self.module_stack.setMinimumHeight(0)
         self.module_stack.setMaximumHeight(16777215)
 
@@ -2537,7 +6364,7 @@ class MainWindow(QMainWindow):
             ))
             apply_status_style(self.workspace_status, False)
 
-        # 等 Qt 完成本次 stacked page 切换后，再计算新页面高度。
+        # 等 Qt 完成本次 stacked page 切换后，再计算新页面最终高度。
         QTimer.singleShot(0, self._update_module_stack_height)
 
     def refresh_operation_state(self):
@@ -2648,6 +6475,12 @@ class MainWindow(QMainWindow):
                     "打开关联结果柱上变压器 CSV",
                     "",
                 ),
+            }
+        elif report_kind == "FUSE":
+            labels = {
+                "validation": ("打开校验 HTML", "打开校验熔断器 CSV", ""),
+                "preview": ("打开预览 HTML", "打开预览熔断器 CSV", ""),
+                "association": ("打开关联结果 HTML", "打开关联结果熔断器 CSV", ""),
             }
         elif report_kind == "MASTER_STATION":
             labels = {
@@ -2985,11 +6818,15 @@ class MainWindow(QMainWindow):
                 "border:1px solid #D7E0E4;"
             ),
         }
-        self.ssh_connection_status.setText(self._rt(text))
-        self.ssh_connection_status.setStyleSheet(
+        style = (
             styles.get(state, styles["neutral"])
             + "border-radius:6px; padding:7px 10px;"
         )
+        self.ssh_connection_status.setText(self._rt(text))
+        self.ssh_connection_status.setStyleSheet(style)
+        if hasattr(self, "poke_ssh_connection_status"):
+            self.poke_ssh_connection_status.setText(self._rt(text))
+            self.poke_ssh_connection_status.setStyleSheet(style)
 
     def test_ssh_connection(self):
         try:
@@ -3066,6 +6903,8 @@ class MainWindow(QMainWindow):
             "working",
         )
         self.refresh_ssh_btn.setEnabled(False)
+        if hasattr(self, "poke_refresh_ssh_btn"):
+            self.poke_refresh_ssh_btn.setEnabled(False)
         self._remote_refresh_started_at = datetime.now()
         self._remote_refresh_timer.start()
 
@@ -3159,6 +6998,8 @@ class MainWindow(QMainWindow):
                 self._set_ssh_connection_status(status, "success")
                 self.log(log_text)
                 self._update_remote_count_label()
+                self._update_poke_remote_count_label()
+                self._sync_poke_remote_checks_from_state()
                 return
 
             self._set_ssh_connection_status(
@@ -3174,6 +7015,7 @@ class MainWindow(QMainWindow):
             # header ResizeToContents work while the 2k+ rows are populated.
             self._rebuild_remote_file_table()
             self._apply_remote_file_filter(self.remote_search_edit.text())
+            self._mark_poke_remote_table_dirty()
             self._invalidate_validation_snapshot("远程 G 文件列表已变化")
             self._set_ssh_connection_status(
                 f"SSH/SFTP 连接正常；远程文件源为只读。"
@@ -3202,6 +7044,8 @@ class MainWindow(QMainWindow):
         self._remote_refresh_timer.stop()
         self._remote_refresh_started_at = None
         self.refresh_ssh_btn.setEnabled(True)
+        if hasattr(self, "poke_refresh_ssh_btn"):
+            self.poke_refresh_ssh_btn.setEnabled(True)
         worker = self.remote_list_worker
         self.remote_list_worker = None
         if worker is not None:
@@ -3336,6 +7180,7 @@ class MainWindow(QMainWindow):
         else:
             self.remote_selected_names.discard(name)
         self._update_remote_count_label()
+        self._sync_poke_remote_checks_from_state()
         self._invalidate_validation_snapshot(
             "远程 G 文件选择发生变化"
         )
@@ -3367,6 +7212,7 @@ class MainWindow(QMainWindow):
             self._remote_table_populating = False
         table.viewport().update()
         self._update_remote_count_label()
+        self._sync_poke_remote_checks_from_state()
         self._invalidate_validation_snapshot(
             "远程 G 文件选择发生变化"
         )
@@ -3405,6 +7251,14 @@ class MainWindow(QMainWindow):
         self._remote_visible_count = len(self.remote_file_rows)
         table.viewport().update()
         self._update_remote_count_label()
+        self._sync_poke_remote_checks_from_state()
+        if hasattr(self, "poke_remote_search_edit"):
+            self.poke_remote_search_edit.blockSignals(True)
+            try:
+                self.poke_remote_search_edit.clear()
+            finally:
+                self.poke_remote_search_edit.blockSignals(False)
+            self._apply_poke_remote_file_filter("")
         self._invalidate_validation_snapshot(
             "远程 G 文件选择和搜索条件已清空"
         )
@@ -3906,7 +7760,7 @@ class MainWindow(QMainWindow):
             current_module = str(
                 self.module_combo.currentData() or ""
             ).upper()
-            if current_module in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"}:
+            if current_module in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"}:
                 self._populate_association_table(self.current_preview)
                 if current_module == "FEEDER":
                     self.log(
@@ -3925,6 +7779,12 @@ class MainWindow(QMainWindow):
                         f"模型校验已生成可关联柱上开关清单："
                         f"可关联/重新关联设备 {change_count} 个。"
                         "请在工作区表格中勾选需要处理的设备。"
+                    )
+                elif current_module == "FUSE":
+                    self.log(
+                        f"模型校验已生成可关联熔断器清单："
+                        f"可关联/重新关联设备 {change_count} 个。"
+                        "请在工作区表格中勾选需要处理的熔断器。"
                     )
                 elif current_module == "MASTER_STATION":
                     self.log(
@@ -3971,6 +7831,8 @@ class MainWindow(QMainWindow):
             self.log(f"柱上开关 CSV：{self.current_artifacts.get('rmu_csv', '')}")
         elif report_kind == "TRANSFORMER":
             self.log(f"柱上变压器 CSV：{self.current_artifacts.get('rmu_csv', '')}")
+        elif report_kind == "FUSE":
+            self.log(f"熔断器 CSV：{self.current_artifacts.get('rmu_csv', '')}")
         elif report_kind == "MASTER_STATION":
             self.log(f"配网主站设备 CSV：{self.current_artifacts.get('rmu_csv', '')}")
         else:
@@ -4133,7 +7995,7 @@ class MainWindow(QMainWindow):
             return
 
         module_id = str(self.module_combo.currentData() or "").upper()
-        if module_id not in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"}:
+        if module_id not in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"}:
             return
 
         candidate_lookup = self._candidate_change_lookup(preview_data)
@@ -4219,7 +8081,7 @@ class MainWindow(QMainWindow):
                 self._t("可关联柱上开关选择（模型校验结果）")
             )
             self.association_selection_tip.setText(self._rt(
-                "模型校验完成后，这里展示已按图元标记识别的柱上开关明细。"
+                "模型校验完成后，这里展示按用户维护 devref 图元名单识别的柱上开关明细。"
                 "只有 13501 记录、13501.ID 与 13502 combined_id 正确对应，且 Domain 40 KeyID 校验通过，"
                 "且需要关联或重新关联的对象才允许勾选。"
             ))
@@ -4242,15 +8104,43 @@ class MainWindow(QMainWindow):
                     item["_source_file"] = source_file
                     item["_file_name"] = file_name
                     display_rows.append(item)
+        elif module_id == "FUSE":
+            self.association_selection_box.setTitle(
+                self._t("可关联熔断器选择（模型校验结果）")
+            )
+            self.association_selection_tip.setText(self._rt(
+                "这里只展示【熔断器模型配置】中用户维护 devref 图元名单命中的对象。每个 FUSE 只提名最近的柱上变压器；柱上变压器身份复用用户维护的 devref 图元名单；"
+                "同一柱上变压器只能被一个 FUSE 占用。成功获得变压器后复用麦加柱上变压器名称规则，"
+                "派生 NAME=FUSE+变压器名称。麦加不判断 FEEDER_ID，13505 和 13513 都只按 NAME 唯一匹配。"
+            ))
+            self.association_filter_label.setText(self._t("熔断器快速筛选"))
+            self.rmu_filter_edit.setPlaceholderText(
+                self._t("输入熔断器名称、柱上变压器名称或 XML ID")
+            )
+            headers = [
+                self._t(x) for x in [
+                    "选择", "G文件", "图元XML ID", "最近柱上变压器", "熔断器名称",
+                    "变压器距离", "当前KeyID", "目标设备ID", "Expected KeyID", "状态", "处理说明",
+                ]
+            ]
+            for report in reports:
+                source_file = str(report.get("g_file", "") or "")
+                file_name = str(report.get("file_name", "") or Path(source_file).name)
+                for fuse_row in report.get("fuse_rows", []) or []:
+                    item = dict(fuse_row)
+                    item["_source_file"] = source_file
+                    item["_file_name"] = file_name
+                    display_rows.append(item)
         elif module_id == "MASTER_STATION":
             self.association_selection_box.setTitle(
                 self._t("可关联配网主站设备选择（模型校验结果）")
             )
             self.association_selection_tip.setText(self._rt(
-                "先按最近 CBreaker 找最近 RMU，只用该 RMU 框内部设备或保护信号 KeyID "
-                "反查厂站/馈线上下文，再按 G 图元类型和 key_name 中的 CODE 精确查询配置数据库表。"
-                "没有 RMU 或框内没有有效关联时直接阻断，并提示该图环网柜请手动关联。"
-                "只有目标记录唯一且 Expected KeyID 校验通过的对象才允许勾选。"
+                "只处理含 CBreaker 的最内层主网矩形框；取框附近最近的无背景合法馈线标题（颜色不限） "
+                "（如 MNA4-12 / ARF2-07）解析变电站、馈线和唯一 BAY_ID。"
+                "确认 Bay 后，框内 CBreaker / Disconnector / GroundDisconnector 继续按 BAY_ID 关联；"
+                "Bus 使用 410/busbarsection，只按变电站 ST_ID 取候选，不检查 BAY_ID，并从同站未使用 410 记录中任意一对一分配。"
+                "其它设备仍要求目标可唯一确定且 Expected KeyID 校验通过。"
             ))
             self.association_filter_label.setText(self._t("主站设备快速筛选"))
             self.rmu_filter_edit.setPlaceholderText(
@@ -4271,23 +8161,22 @@ class MainWindow(QMainWindow):
                     item["_source_file"] = source_file
                     item["_file_name"] = file_name
                     display_rows.append(item)
-        else:
+        elif module_id == "TRANSFORMER":
             self.association_selection_box.setTitle(
                 self._t("可关联柱上变压器选择（模型校验结果）")
             )
             self.association_selection_tip.setText(self._rt(
-                "模型校验完成后，这里展示 TransformerDis 变压器明细。"
-                "只有名称、馈线和 13505 目标唯一，且 Expected KeyID 校验通过的对象才允许勾选。"
+                "模型校验完成后，这里展示按用户维护 devref 图元名单识别的柱上变压器明细。"
+                "麦加不判断 FEEDER_ID；只要图上名称在 13505.NAME 唯一且 Expected KeyID 校验通过即可关联。"
             ))
             self.association_filter_label.setText(self._t("柱上变压器快速筛选"))
             self.rmu_filter_edit.setPlaceholderText(
-                self._t("输入变压器名称、馈线ID、devref 或 XML ID")
+                self._t("输入变压器名称、devref 或 XML ID")
             )
             headers = [
                 self._t(x) for x in [
-                    "选择", "G文件", "图元XML ID", "图上名称", "馈线ID",
-                    "馈线名称", "当前keyid1", "当前keyid2", "目标设备ID",
-                    "Expected KeyID", "状态", "处理说明",
+                    "选择", "G文件", "图元XML ID", "图上名称", "名称距离", "名称方向",
+                    "当前keyid1", "当前keyid2", "目标设备ID", "Expected KeyID", "状态", "处理说明",
                 ]
             ]
             for report in reports:
@@ -4377,6 +8266,14 @@ class MainWindow(QMainWindow):
                         row.get("expected_keyid", ""), self._row_status_text(row),
                         self._rt(row.get("reason", "")),
                     ]
+                elif module_id == "FUSE":
+                    values = [
+                        row["_file_name"], row.get("xml_id", ""),
+                        row.get("nearest_transformer_name", ""), row.get("derived_fuse_name", ""),
+                        row.get("nearest_transformer_distance", ""), row.get("current_keyid", ""),
+                        row.get("db_device_id", ""), row.get("expected_keyid", ""),
+                        self._row_status_text(row), self._rt(row.get("reason", "")),
+                    ]
                 elif module_id == "MASTER_STATION":
                     values = [
                         row["_file_name"], row.get("object_type", ""),
@@ -4386,11 +8283,11 @@ class MainWindow(QMainWindow):
                         row.get("db_device_id", ""), row.get("expected_keyid", ""),
                         self._row_status_text(row), self._rt(row.get("reason", "")),
                     ]
-                else:
+                elif module_id == "TRANSFORMER":
                     values = [
                         row["_file_name"], row.get("xml_id", ""),
-                        row.get("graphical_name", ""), row.get("feeder_id", ""),
-                        row.get("feeder_name", ""), row.get("current_keyid1", ""),
+                        row.get("graphical_name", ""), row.get("name_distance", ""),
+                        row.get("name_direction", ""), row.get("current_keyid1", ""),
                         row.get("current_keyid2", ""), row.get("db_device_id", ""),
                         row.get("expected_keyid", ""), self._row_status_text(row),
                         self._rt(row.get("reason", "")),
@@ -4514,8 +8411,9 @@ class MainWindow(QMainWindow):
                 # useful quick-filter keys for standalone pole switches.
                 columns = (2, 3, 4, 5, 6, 12)
             elif module_id == "TRANSFORMER":
-                # Transformer name, feeder, keyids, target and XML ID.
                 columns = (2, 3, 4, 5, 6, 7, 9, 11)
+            elif module_id == "FUSE":
+                columns = (2, 3, 4, 5, 7, 10)
             elif module_id == "MASTER_STATION":
                 columns = (1, 2, 3, 4, 5, 6, 9, 11)
             else:
@@ -4732,7 +8630,7 @@ class MainWindow(QMainWindow):
 
         module_id = str(self.module_combo.currentData() or "")
 
-        if module_id.upper() in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"}:
+        if module_id.upper() in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"}:
             execution_preview = self._selected_association_preview()
             if not execution_preview or not execution_preview.get(
                 "changes_by_file"
@@ -4749,7 +8647,11 @@ class MainWindow(QMainWindow):
                             else (
                                 "请先在“可关联柱上变压器选择”表格中勾选至少一个需要关联或重新关联的设备。"
                                 if module_id.upper() == "TRANSFORMER"
-                                else "请先在“可关联设备选择”表格中勾选至少一个需要关联或重新关联的设备。"
+                                else (
+                                    "请先在“可关联熔断器选择”表格中勾选至少一个需要关联或重新关联的设备。"
+                                    if module_id.upper() == "FUSE"
+                                    else "请先在“可关联设备选择”表格中勾选至少一个需要关联或重新关联的设备。"
+                                )
                             )
                         )
                     ),
@@ -4782,6 +8684,8 @@ class MainWindow(QMainWindow):
             if module_id == "POLE_SWITCH"
             else "柱上变压器"
             if module_id == "TRANSFORMER"
+            else "熔断器"
+            if module_id == "FUSE"
             else "RMU"
         )
         target_label = "馈线对象" if module_id == "FEEDER" else "设备图元"
@@ -4836,8 +8740,8 @@ class MainWindow(QMainWindow):
                     f"This run will process only the {change_count} selected pole-transformer objects.\n"
                     f"G files involved: {selected_file_count}\n"
                     f"Candidate status: {status_summary}\n\n"
-                    "The program will recheck 13500 / dms_feeder_device and 13505 / dms_tr_device, "
-                    "verify Expected KeyID Domain 1, and write both TransformerDis keyid1/keyid2 fields "
+                    "The program will recheck 13505 / dms_tr_device by NAME only (no FEEDER_ID check), "
+                    "verify Expected KeyID Domain 1, and write both transformer keyid1/keyid2 fields "
                     "to Workspace safe copies.\n\n"
                     "Original G files will not be modified.\n\n"
                     "Proceed with model association?"
@@ -4847,10 +8751,30 @@ class MainWindow(QMainWindow):
                     f"本次将只处理已勾选的 {change_count} 个柱上变压器图元。\n"
                     f"涉及 G 文件：{selected_file_count} 个\n"
                     f"候选状态：{status_summary}\n\n"
-                    "执行时会重新查询 13500 馈线和 13505 变压器设备，"
+                    "执行时只按 NAME 重新查询 13505 变压器设备，不判断 FEEDER_ID，"
                     "重新校验 Domain=1 的 Expected KeyID，并将 keyid1/keyid2 两组字段写入 Workspace 安全副本。\n\n"
                     "原始 G 文件不会被修改。\n\n"
                     "是否确认执行？"
+                )
+        elif module_id.upper() == "FUSE":
+            if self.language == "en_US":
+                message = (
+                    f"This run will process only the {change_count} selected fuse objects.\n"
+                    f"G files involved: {selected_file_count}\n"
+                    f"Candidate status: {status_summary}\n\n"
+                    "Execution rechecks the nearest Transformer_OH assignment, 13505 NAME uniqueness, derived FUSE NAME, "
+                    "and unique 13513 NAME without any FEEDER_ID validation, then verifies Domain 40 Expected KeyID.\n\n"
+                    "Original G files will not be modified.\n\nProceed with model association?"
+                )
+            else:
+                message = (
+                    f"本次将只处理已勾选的 {change_count} 个熔断器图元。\n"
+                    f"涉及 G 文件：{selected_file_count} 个\n"
+                    f"候选状态：{status_summary}\n\n"
+                    "执行时会重新计算 FUSE 与最近 Transformer_OH 的独占关系，重新校验 13505.NAME 唯一，"
+                    "再生成 FUSE+变压器名称，并只按 13513.NAME 唯一查询；麦加不判断 FEEDER_ID。"
+                    "随后重新校验 Domain=40 的 Expected KeyID，只写 Workspace 安全副本。\n\n"
+                    "原始 G 文件不会被修改。\n\n是否确认执行？"
                 )
         elif module_id.upper() == "FEEDER":
             feeder_settings = self.module_widgets[
@@ -4983,7 +8907,7 @@ class MainWindow(QMainWindow):
                     "模型校验输入快照不存在，请重新执行模型校验。"
                 )
 
-            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"}:
+            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"}:
                 selected_source_files = {
                     str(Path(p).resolve())
                     for p in execution_preview.get(
@@ -5074,7 +8998,7 @@ class MainWindow(QMainWindow):
                 if Path(p).exists()
             ]
 
-            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"}:
+            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"}:
                 # Execution reports are intentionally operation-scoped:
                 # only the rows explicitly selected by the user are included.
                 # The full drawing is NOT scanned/validated again after
@@ -5158,7 +9082,19 @@ class MainWindow(QMainWindow):
                     "正在生成模型关联完成报告……"
                 ))
 
-            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"} and not reports:
+            inventory_files = copied_files or [Path(p) for p in files]
+            graph_feeder_inventory = compare_makkah_ring_feeders_for_files(
+                db,
+                inventory_files,
+                settings,
+                self.log,
+            )
+            attach_makkah_ring_feeder_inventory(
+                reports,
+                graph_feeder_inventory,
+            )
+
+            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"} and not reports:
                 raise RuntimeError(
                     "模型关联已执行，但没有生成本次选中对象的执行报告。"
                 )
@@ -5240,10 +9176,12 @@ class MainWindow(QMainWindow):
             is_feeder = module.module_id == "FEEDER"
             is_pole_switch = module.module_id == "POLE_SWITCH"
             is_transformer = module.module_id == "TRANSFORMER"
+            is_fuse = module.module_id == "FUSE"
             is_master_station = module.module_id == "MASTER_STATION"
             object_label = (
                 "FeedLine 图元" if is_feeder
                 else "柱上变压器图元" if is_transformer
+                else "熔断器图元" if is_fuse
                 else "配网主站设备图元" if is_master_station
                 else "设备图元"
             )
@@ -5265,9 +9203,13 @@ class MainWindow(QMainWindow):
                                 f"关联完成柱上变压器 CSV：{csv_paths[0]}"
                                 if is_transformer
                                 else (
-                                    f"关联完成配网主站设备 CSV：{csv_paths[0]}"
-                                    if is_master_station
-                                    else f"关联完成环网柜 CSV：{csv_paths[0]}"
+                                    f"关联完成熔断器 CSV：{csv_paths[0]}"
+                                    if is_fuse
+                                    else (
+                                        f"关联完成配网主站设备 CSV：{csv_paths[0]}"
+                                        if is_master_station
+                                        else f"关联完成环网柜 CSV：{csv_paths[0]}"
+                                    )
                                 )
                             )
                         )

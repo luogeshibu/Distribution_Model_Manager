@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from dmm.config.constants import RMU_CHANNEL_STATUS_KEYID_OFFSET
+
 ORACLEDB_IMPORT_ERROR = None
 try:
     import oracledb
@@ -136,71 +138,145 @@ class OracleClient:
         row["_table_name"] = "dms_combined_device"
         return row
 
-    def get_rmu_records(self, rmu_name: str) -> List[Dict[str, Any]]:
-        """
-        Resolve RMU records by the business NAME field.
+    def get_rmu_records(
+        self,
+        rmu_name: str,
+        feeder_id: Any = None,
+    ) -> List[Dict[str, Any]]:
+        """Resolve RMU rows by exact NAME and, when supplied, FEEDER_ID.
 
-        RMU NAME is a string identifier, not a numeric identifier.  Valid
-        examples include:
-            42646
-            RMU-42646
-            ABC_123
-            JED-RMU-01
-
-        Therefore the application must never convert RMU names to int and must
-        never depend on TO_CHAR(name).  Oracle performs an exact trimmed string
-        comparison against dms_combined_device.NAME.
+        Makkah RMU association now treats the graph-topology feeder as an
+        ownership boundary.  For an unlinked RMU, callers pass ``feeder_id`` so
+        a same-name cabinet on another feeder can never become a candidate.
+        The optional argument preserves the historical name-only lookup for
+        diagnostics and existing-link inspection.
         """
         lookup_name = str(rmu_name or "").strip()
         if not lookup_name:
             return []
 
+        where = "TRIM(name) = :rmu_name"
+        binds: Dict[str, Any] = {"rmu_name": lookup_name}
+        if feeder_id not in (None, ""):
+            where += " AND feeder_id = :feeder_id"
+            binds["feeder_id"] = int(feeder_id)
+
         return self._query(
-            """
+            f"""
             SELECT *
             FROM dms_combined_device
-            WHERE TRIM(name) = :rmu_name
+            WHERE {where}
+            ORDER BY id
             """,
-            {"rmu_name": lookup_name},
+            binds,
         )
 
-    def get_combined_device_records(self, device_name: str) -> List[Dict[str, Any]]:
-        """Resolve a standalone device name in dms_combined_device (13501).
+    def update_rmu_feeder_id(
+        self,
+        rmu_id: Any,
+        old_feeder_id: Any,
+        new_feeder_id: Any,
+    ) -> Dict[str, Any]:
+        """Safely update one 13501 RMU FEEDER_ID using optimistic locking.
 
-        Pole-switch drawings use the visible device name as the business
-        identity. The normal lookup is an exact trimmed NAME lookup. Some
-        DMS exports (including the supplied screenshot) expose the same
-        display value in CODE instead, so CODE is checked only as a fallback
-        when the NAME lookup returns no rows. The two lookups are deliberately
-        performed one device at a time, never as a bulk IN query.
+        Only ``dms_combined_device.FEEDER_ID`` is changed.  The old value must
+        still equal the previewed value (including NULL), exactly one row must
+        be affected, and the new value is verified before commit.
         """
-        lookup_name = str(device_name or "").strip()
-        if not lookup_name:
+        self.ensure_connected()
+        rid = int(rmu_id)
+        target = int(new_feeder_id)
+        old = None if old_feeder_id in (None, "") else int(old_feeder_id)
+        try:
+            with self.conn.cursor() as cur:
+                if old is None:
+                    cur.execute(
+                        """
+                        UPDATE dms_combined_device
+                        SET feeder_id = :new_feeder_id
+                        WHERE id = :rmu_id
+                          AND feeder_id IS NULL
+                        """,
+                        {"new_feeder_id": target, "rmu_id": rid},
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE dms_combined_device
+                        SET feeder_id = :new_feeder_id
+                        WHERE id = :rmu_id
+                          AND feeder_id = :old_feeder_id
+                        """,
+                        {
+                            "new_feeder_id": target,
+                            "rmu_id": rid,
+                            "old_feeder_id": old,
+                        },
+                    )
+                if int(cur.rowcount or 0) != 1:
+                    raise OracleError(
+                        f"RMU FEEDER_ID 更新被阻断：ID={rid}；"
+                        f"预期旧值={old if old is not None else 'NULL'}；"
+                        "数据库记录可能已被其它操作修改。"
+                    )
+                cur.execute(
+                    """
+                    SELECT id, code, name, feeder_id
+                    FROM dms_combined_device
+                    WHERE id = :rmu_id
+                    """,
+                    {"rmu_id": rid},
+                )
+                raw = cur.fetchone()
+                if not raw or int(raw[3]) != target:
+                    raise OracleError(
+                        f"RMU FEEDER_ID 更新后验证失败：ID={rid}，目标={target}"
+                    )
+                result = {
+                    "id": raw[0], "code": raw[1], "name": raw[2],
+                    "feeder_id": raw[3], "old_feeder_id": old,
+                }
+            self.conn.commit()
+            return result
+        except Exception as exc:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            if isinstance(exc, OracleError):
+                raise
+            raise OracleError(
+                f"修改 dms_combined_device.FEEDER_ID 失败，事务已回滚：{exc}"
+            ) from exc
+
+    def get_combined_device_records(self, device_name: str) -> List[Dict[str, Any]]:
+        """Resolve a standalone pole-switch parent by exact NAME only.
+
+        Makkah pole-switch association treats the graphical device label as
+        the authoritative business NAME in dms_combined_device (13501). The
+        value is passed to Oracle unchanged: no TRIM, whitespace collapse,
+        punctuation removal, or case conversion. Do not fall back to CODE and
+        do not add a FEEDER_ID constraint. A caller may associate only when
+        this exact NAME lookup returns one row.
+        """
+        # Makkah rule: query with the G-file name exactly as supplied.
+        # Do not strip/collapse whitespace and do not remove punctuation.
+        lookup_name = str(device_name or "")
+        if lookup_name == "":
             return []
         table_name = self.get_table_name(13501)
         rows = self._query(
             f"""
             SELECT *
             FROM {table_name}
-            WHERE TRIM(name) = :device_name
+            WHERE name = :device_name
             """,
             {"device_name": lookup_name},
         )
-        matched_field = "NAME"
-        if not rows:
-            rows = self._query(
-                f"""
-                SELECT *
-                FROM {table_name}
-                WHERE TRIM(code) = :device_name
-                """,
-                {"device_name": lookup_name},
-            )
-            matched_field = "CODE"
         for row in rows:
             row["_table_id"] = 13501
             row["_table_name"] = table_name
-            row["_matched_field"] = matched_field
+            row["_matched_field"] = "NAME"
         return rows
 
     def get_cb_devices_by_combined_name(
@@ -263,6 +339,40 @@ class OracleClient:
             row["_table_id"] = int(table_id)
             row["_table_name"] = table_name
         return rows
+
+    def get_channel_status_keyids_by_combined_id(self, combined_id: int) -> List[Dict[str, Any]]:
+        """Return Channel Status KeyID candidates for one resolved RMU.
+
+        This is the same read-only database rule used by the Jazan edition:
+        resolve dms_terminal_info by the RMU COMBINED_ID, join
+        dms_channel_info by TERMINAL_ID, exclude DR channels, and construct
+        the G-file KeyID from dms_channel_info.ID with domain 40.
+        """
+        if combined_id in (None, ""):
+            return []
+        sql = """
+            SELECT
+                ci.id + :channel_keyid_offset AS new_id,
+                ci.id AS channel_id,
+                ci.chan_name AS chan_name,
+                ti.id AS terminal_id,
+                ti.combined_id AS combined_id
+            FROM d5000.dms_terminal_info ti
+            JOIN d5000.dms_channel_info ci
+                ON ci.terminal_id = ti.id
+            WHERE ti.combined_id = :combined_id
+              AND (
+                    ci.chan_name IS NULL
+                    OR UPPER(TRIM(ci.chan_name)) NOT LIKE '%DR'
+                  )
+        """
+        return self._query(
+            sql,
+            {
+                "combined_id": int(combined_id),
+                "channel_keyid_offset": int(RMU_CHANNEL_STATUS_KEYID_OFFSET),
+            },
+        )
 
     def get_devices_by_combined_id(self, table_id: int, combined_id: int) -> Tuple[str, List[Dict[str, Any]]]:
         table_name = self.get_table_name(table_id)
@@ -448,6 +558,42 @@ class OracleClient:
             row["_table_name"] = table_name
         return rows
 
+    def get_disconnector_devices_by_name(
+        self,
+        device_name: str,
+        feeder_id: Any = None,
+        table_id: int = 13513,
+    ) -> List[Dict[str, Any]]:
+        """Resolve disconnector/fuse rows by exact NAME.
+
+        Makkah FUSE association intentionally passes ``feeder_id=None`` so
+        FEEDER_ID never participates in target selection.  The optional
+        parameter is retained only for API compatibility with other site
+        variants.
+        """
+        lookup_name = str(device_name or "").strip()
+        if not lookup_name:
+            return []
+        table_name = self.get_table_name(int(table_id))
+        where = "TRIM(name) = :device_name"
+        binds = {"device_name": lookup_name}
+        if feeder_id not in (None, ""):
+            where += " AND feeder_id = :feeder_id"
+            binds["feeder_id"] = int(feeder_id)
+        rows = self._query(
+            f"""
+            SELECT id, code, name, feeder_id, bv_id
+            FROM {table_name}
+            WHERE {where}
+            ORDER BY id
+            """,
+            binds,
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
+
     def get_transformer_device_by_id(
         self,
         table_id: int,
@@ -469,6 +615,118 @@ class OracleClient:
         row["_table_name"] = table_name
         row["_table_id"] = int(table_id)
         return row
+
+    def find_stations_by_name_hint(
+        self,
+        station_hint: str,
+        table_id: int = 405,
+    ) -> List[Dict[str, Any]]:
+        """Resolve a Makkah station caption such as ARF / MNA4.
+
+        The visible drawing title can be shorter than the database station
+        name (for example regional prefixes may be present in 405).  Matching
+        therefore uses a normalized alphanumeric suffix, while exact
+        normalized equality naturally ranks as the same unique result.
+        """
+        hint = "".join(
+            ch for ch in str(station_hint or "").upper() if ch.isalnum()
+        )
+        if not hint:
+            return []
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT id, code, name, bv_id, subarea_id, graph_name
+            FROM {table_name}
+            WHERE REGEXP_REPLACE(UPPER(TRIM(name)), '[^A-Z0-9]', '') = :hint
+               OR REGEXP_REPLACE(UPPER(TRIM(name)), '[^A-Z0-9]', '') LIKE :suffix_hint
+            ORDER BY id
+            """,
+            {"hint": hint, "suffix_hint": f"%{hint}"},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
+
+    def get_bays_by_station(
+        self,
+        station_id: Any,
+        table_id: int = 406,
+    ) -> List[Dict[str, Any]]:
+        """List Bay records for one substation."""
+        if station_id in (None, ""):
+            return []
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT id, code, name, st_id, bv_id, vl_id
+            FROM {table_name}
+            WHERE st_id = :station_id
+            ORDER BY id
+            """,
+            {"station_id": int(station_id)},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
+
+    def get_devices_by_station(
+        self,
+        table_id: int,
+        station_id: Any,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Read model devices owned by one ST_ID.
+
+        Used by Makkah main-network Bus association.  Busbarsection is a
+        station-level pool for this workflow; BAY_ID is intentionally not
+        used when choosing table 410 records.
+        """
+        table_name = self.get_table_name(int(table_id))
+        if station_id in (None, ""):
+            return table_name, []
+        rows = self._query(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE st_id = :station_id
+            ORDER BY id
+            """,
+            {"station_id": int(station_id)},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return table_name, rows
+
+    def get_devices_by_bay(
+        self,
+        table_id: int,
+        bay_id: Any,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Read model devices owned by one BAY_ID.
+
+        Main-network tables 407/408/409 all expose BAY_ID.  SELECT * is used
+        intentionally because those station tables do not share the DMS
+        FEEDER_ID/COMBINED_ID column contract.
+        """
+        table_name = self.get_table_name(int(table_id))
+        if bay_id in (None, ""):
+            return table_name, []
+        rows = self._query(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE bay_id = :bay_id
+            ORDER BY id
+            """,
+            {"bay_id": int(bay_id)},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return table_name, rows
 
     def get_breaker_by_id(
         self,
@@ -608,7 +866,7 @@ class OracleClient:
             table_name = self.get_table_name(405)
             rows = self._query(
                 f"""
-                SELECT id, name, bv_id
+                SELECT id, code, name, bv_id, subarea_id, graph_name
                 FROM {table_name}
                 WHERE id = :station_id
                 """,
@@ -738,6 +996,134 @@ class OracleClient:
                 row["display_name"] = str(row.get("name") or "").strip()
 
         return rows
+
+
+    @staticmethod
+    def _rmu_poke_lookup_key(value: Any) -> str:
+        return " ".join(str(value or "").strip().split()).casefold()
+
+    def resolve_rmu_poke_contexts(
+        self,
+        rmu_names,
+    ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
+        """Resolve smart RMU names for Poke target generation.
+
+        This is a SELECT-only helper copied from the proven GFileStudio Poke
+        workflow.  Each RMU is resolved independently through:
+
+            13501 dms_combined_device.NAME
+              -> FEEDER_ID
+              -> 13500 dms_feeder_device
+              -> 405 substation
+              -> subcontrolarea
+
+        The returned ``feeder_full_name`` is used only to build the target
+        ``<subarea>-<station>-<feeder>-<RMU>.com.pic.g`` filename.  Missing or
+        duplicated rows are returned in ``issues`` instead of aborting the
+        complete G file.
+        """
+        requested = []
+        seen = set()
+        for raw in rmu_names or []:
+            name = " ".join(str(raw or "").strip().split())
+            key = self._rmu_poke_lookup_key(name)
+            if name and key not in seen:
+                seen.add(key)
+                requested.append(name)
+        if not requested:
+            return {}, {}
+
+        combined_table = self.get_table_name(13501)
+        feeder_table = self.get_table_name(13500)
+        station_table = self.get_table_name(405)
+        rows_by_key: Dict[str, List[Dict[str, Any]]] = {
+            self._rmu_poke_lookup_key(name): [] for name in requested
+        }
+
+        # Keep well under Oracle's 1000-expression IN limit.
+        chunk_size = 500
+        for start in range(0, len(requested), chunk_size):
+            chunk = requested[start:start + chunk_size]
+            binds = {f"rmu_{i}": name.upper() for i, name in enumerate(chunk)}
+            placeholders = ", ".join(f":rmu_{i}" for i in range(len(chunk)))
+            rows = self._query(
+                f"""
+                SELECT
+                    c.id AS combined_device_id,
+                    c.name AS rmu_name,
+                    c.feeder_id AS combined_feeder_id,
+                    f.id AS feeder_id,
+                    f.name AS feeder_name,
+                    f.code AS feeder_code,
+                    f.st_id AS station_id,
+                    s.name AS station_name,
+                    s.subarea_id AS subarea_id,
+                    a.name AS subcontrolarea_name
+                FROM {combined_table} c
+                LEFT JOIN {feeder_table} f
+                  ON f.id = c.feeder_id
+                LEFT JOIN {station_table} s
+                  ON s.id = f.st_id
+                LEFT JOIN subcontrolarea a
+                  ON a.id = s.subarea_id
+                WHERE UPPER(TRIM(CAST(c.name AS VARCHAR2(128)))) IN ({placeholders})
+                """,
+                binds,
+            )
+            for row in rows:
+                key = self._rmu_poke_lookup_key(row.get("rmu_name"))
+                if key in rows_by_key:
+                    rows_by_key[key].append(dict(row))
+
+        contexts: Dict[str, Dict[str, Any]] = {}
+        issues: Dict[str, str] = {}
+        for requested_name in requested:
+            key = self._rmu_poke_lookup_key(requested_name)
+            rows = rows_by_key.get(key, [])
+            if not rows:
+                issues[key] = (
+                    f"数据库未找到 DMS_COMBINED_DEVICE.NAME={requested_name!r} 的环网柜记录。"
+                )
+                continue
+            unique_by_id = {
+                str(row.get("combined_device_id")): row
+                for row in rows
+                if row.get("combined_device_id") not in (None, "")
+            }
+            if len(unique_by_id) != 1:
+                issues[key] = (
+                    f"数据库中 DMS_COMBINED_DEVICE.NAME={requested_name!r} 返回 "
+                    f"{len(unique_by_id) or len(rows)} 条有效记录，无法唯一确定所属馈线。"
+                )
+                continue
+            row = dict(next(iter(unique_by_id.values())))
+            required = {
+                "combined_device_id": row.get("combined_device_id"),
+                "feeder_id": row.get("feeder_id") or row.get("combined_feeder_id"),
+                "feeder_name": row.get("feeder_name"),
+                "station_name": row.get("station_name"),
+                "subcontrolarea_name": row.get("subcontrolarea_name"),
+            }
+            missing = [name for name, value in required.items() if value in (None, "")]
+            if missing:
+                issues[key] = (
+                    f"RMU {requested_name!r} 的数据库关联信息不完整："
+                    + ", ".join(missing)
+                )
+                continue
+            station_full_name = (
+                f"{str(row.get('subcontrolarea_name')).strip()}-"
+                f"{str(row.get('station_name')).strip()}"
+            )
+            feeder_full_name = (
+                f"{station_full_name}-"
+                f"{str(row.get('feeder_name')).strip()}"
+            )
+            row["station_full_name"] = station_full_name
+            row["feeder_full_name"] = feeder_full_name
+            contexts[key] = row
+
+        return contexts, issues
 
 
     def get_sections_by_feeder_id(

@@ -13,6 +13,20 @@ def normalize_element_key(value: str) -> str:
     return re.sub(r"/+", "/", text).casefold()
 
 
+def devref_matches_file(devref: str, file_name: str) -> bool:
+    """Return True when one devref points to the exact element file name.
+
+    Matching is case-insensitive and path-insensitive, but remains exact on the
+    file basename.  The optional ``:ROOT`` suffix carried by drawing devrefs is
+    ignored through :func:`element_key_candidates`.
+    """
+    target = normalize_element_key(file_name)
+    if not target:
+        return False
+    target = PurePosixPath(target).name
+    return target in set(element_key_candidates(devref))
+
+
 def element_key_candidates(devref: str) -> tuple[str, ...]:
     """Return exact keys that can identify one element definition.
 

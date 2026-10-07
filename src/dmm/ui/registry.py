@@ -1,4 +1,5 @@
 from dmm.ui.widgets.feeder_settings import FeederSettingsWidget
+from dmm.ui.widgets.fuse_settings import FuseSettingsWidget
 from dmm.ui.widgets.pole_switch_settings import PoleSwitchSettingsWidget
 from dmm.ui.widgets.rmu_settings import RmuSettingsWidget
 from dmm.ui.widgets.master_station_settings import MasterStationSettingsWidget
@@ -10,6 +11,7 @@ SETTINGS_WIDGETS = {
     "FEEDER": FeederSettingsWidget,
     "POLE_SWITCH": PoleSwitchSettingsWidget,
     "TRANSFORMER": TransformerSettingsWidget,
+    "FUSE": FuseSettingsWidget,
     "MASTER_STATION": MasterStationSettingsWidget,
 }
 

@@ -47,6 +47,19 @@ class GWriteBackService:
         raise GWriteBackError(f"无法写入属性 {key}：目标标签格式异常")
 
     @staticmethod
+    def _remove_attribute(open_tag: str, key: str) -> str:
+        """Remove one XML opening-tag attribute if it exists.
+
+        This operates only on the already-validated target opening tag, so all
+        unrelated G-file text remains byte-for-byte unchanged.
+        """
+        pattern = re.compile(
+            rf'\s+{re.escape(key)}\s*=\s*(["\']).*?\1',
+            re.DOTALL,
+        )
+        return pattern.sub("", open_tag, count=1)
+
+    @staticmethod
     def _find_exact_open_tag(text: str, tag: str, xml_id: str):
         """Legacy exact locator retained for compatibility/tests.
 
@@ -162,10 +175,18 @@ class GWriteBackService:
             xml_id = str(change.get("xml_id", "")).strip()
             tag = str(change.get("tag", "")).strip()
             attrs = dict(change.get("attributes", {}))
-            normalized_changes.append((tag, xml_id, attrs))
+            remove_attrs = [
+                str(key).strip()
+                for key in change.get("remove_attributes", []) or []
+                if str(key).strip()
+            ]
+            normalized_changes.append((tag, xml_id, attrs, remove_attrs))
 
         total = len(normalized_changes)
-        target_keys = {(tag, xml_id) for tag, xml_id, _ in normalized_changes}
+        target_keys = {
+            (tag, xml_id)
+            for tag, xml_id, _, _ in normalized_changes
+        }
         self.log(
             f"正在建立 G 文件回写索引：{g_path.name}；"
             f"目标对象数={total}"
@@ -175,7 +196,7 @@ class GWriteBackService:
         # Validate every target against the ORIGINAL file before changing
         # anything.  This preserves the original all-or-nothing uniqueness
         # safety rule, but avoids a full-file regex scan per selected object.
-        for tag, xml_id, _ in normalized_changes:
+        for tag, xml_id, _, _ in normalized_changes:
             matches = indexed.get((tag, xml_id), [])
             if len(matches) != 1:
                 raise GWriteBackError(
@@ -202,12 +223,25 @@ class GWriteBackService:
         applied = []
         progress_step = 100 if total >= 500 else 25 if total >= 100 else 10
 
-        for index, (tag, xml_id, attrs) in enumerate(normalized_changes, start=1):
+        for index, (tag, xml_id, attrs, remove_attrs) in enumerate(
+            normalized_changes,
+            start=1,
+        ):
             key = (tag, xml_id)
             state = target_state[key]
             before_tag = state["current_tag"]
             after_tag = before_tag
             before_attrs = {}
+
+            removed_attrs = {}
+            for attr_key in remove_attrs:
+                attr_re = re.compile(
+                    rf'\b{re.escape(attr_key)}\s*=\s*(["\'])(.*?)\1',
+                    re.DOTALL,
+                )
+                old = attr_re.search(after_tag)
+                removed_attrs[attr_key] = old.group(2) if old else None
+                after_tag = self._remove_attribute(after_tag, attr_key)
 
             for attr_key, value in attrs.items():
                 attr_re = re.compile(
@@ -228,6 +262,7 @@ class GWriteBackService:
                 "xml_id": xml_id,
                 "before": before_attrs,
                 "after": {k: str(v) for k, v in attrs.items()},
+                "removed": removed_attrs,
             })
 
             if (

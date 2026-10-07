@@ -1,4 +1,5 @@
 from dmm.application.modules.feeder import FeederModelModule
+from dmm.application.modules.fuse import FuseModelModule
 from dmm.application.modules.master_station import MasterStationModelModule
 from dmm.application.modules.pole_switch import PoleSwitchModelModule
 from dmm.application.modules.rmu import RmuModelModule
@@ -10,6 +11,7 @@ def get_model_modules():
         RmuModelModule(),
         PoleSwitchModelModule(),
         TransformerModelModule(),
+        FuseModelModule(),
         MasterStationModelModule(),
         FeederModelModule(),
     ]

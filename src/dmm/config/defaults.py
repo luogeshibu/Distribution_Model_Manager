@@ -27,14 +27,15 @@ DEFAULT_DEVICE_RULES = {
     },
 }
 
-# 配网主站设备关联。Bus 的数据库表号没有在当前需求的 SQL 中明确给出，
-# 因此默认保持 0（未配置），避免把母线误写入 breaker/disconnector 表。
+# 配网主站设备关联。主网 Bus 使用 410 / busbarsection，Domain=40。
+# Bus 只使用主网标题确认出的 ST_ID，不检查 BAY_ID；在该站 410 记录池中
+# 任意一对一分配。其它主网设备继续使用已确认的 BAY_ID。
 DEFAULT_MASTER_STATION_RULES = {
     "Bus": {
-        "table_id": 0,
+        "table_id": 410,
         "domain": 40,
-        "table_name": "",
-        "description": "主站母线图元（请配置对应数据库表号）",
+        "table_name": "busbarsection",
+        "description": "主站母线段",
     },
     "CBreaker": {
         "table_id": 407,
@@ -90,6 +91,42 @@ def resolve_rmu_name_positions(mode="FIXED", configured_positions=None):
     # to the Makkah default instead of disabling RMU naming.
     return selected or ["right"]
 
+
+# Makkah standalone pole-device recognition no longer depends on Element
+# Management classifications. Operators maintain exact devref file names here.
+# Every file in this list is a pole switch; users do not classify it as
+# AR/LBS/SEC. Database association therefore requires exactly one 13502 child
+# under the uniquely matched 13501 parent.
+DEFAULT_POLE_SWITCH_ELEMENT_FILES = [
+    "SEC_S.zwk.icn.g",
+    "SEC_NON.zwk.icn.g",
+    "SEC_NON_H.zwk.icn.g",
+    "AR_NON_H.zwk.icn.g",
+]
+
+# Backward-compatibility only for older v4.1.93 settings/tests. New UI and model
+# logic use DEFAULT_POLE_SWITCH_ELEMENT_FILES and ignore the family field.
+DEFAULT_POLE_SWITCH_ELEMENT_RULES = [
+    {"file_name": "SEC_S.zwk.icn.g", "family": "SEC"},
+    {"file_name": "SEC_NON.zwk.icn.g", "family": "SEC"},
+    {"file_name": "SEC_NON_H.zwk.icn.g", "family": "SEC"},
+    {"file_name": "AR_NON_H.zwk.icn.g", "family": "AR"},
+]
+
+DEFAULT_TRANSFORMER_ELEMENT_FILES = [
+    "Transformer_OH.pb.icn.g",
+]
+
+# Makkah fuse identity follows the same operator-maintained devref-file model
+# as pole switches and pole transformers. Every configured file is a fuse;
+# Element Management FUSE classification is not consulted. The defaults below
+# are taken from the supplied Makkah drawings and can be changed from the model
+# page without editing code.
+DEFAULT_FUSE_ELEMENT_FILES = [
+    "Fuse_arrow.zwk.icn.g",
+    "Fuse_NON_SMART.zwk.icn.g",
+]
+
 DEFAULT_RMU_NAME_EXCLUSIONS = [
     "N.O.P",
     "NOP",
@@ -113,17 +150,34 @@ DEFAULT_SETTINGS = {
         "remote_directory": "/home/up8000/data/graph/display/sln",
         "element_directory": "/home/up8000/data/graph/element",
     },
+    # Shared central configuration repository.  Startup never contacts it;
+    # network I/O occurs only after an explicit sync/Admin action.
+    "central_config": {
+        "enabled": True,
+        "host": "172.16.21.27",
+        "port": 22,
+        "username": "up8000",
+        "password": "up8000",
+        "remote_directory": "/home/up8000/nari-international/distribution-model-manager/config",
+    },
+    "machine_id": "",
     "element_catalog": {
         "records": [],
     },
+    # Makkah pole-device identity is driven by exact devref file names maintained
+    # by the operator. Every configured file is a pole switch; no AR/LBS/SEC
+    # classification is required. Element Management is not consulted.
+    "pole_switch_element_files": DEFAULT_POLE_SWITCH_ELEMENT_FILES,
+    "transformer_element_files": DEFAULT_TRANSFORMER_ELEMENT_FILES,
+    "fuse_element_files": DEFAULT_FUSE_ELEMENT_FILES,
     # Name format/color/background settings are hard filters for the global
     # Text-to-device assignment.
     "pole_switch_name_numeric": False,
     "pole_switch_name_format": "ALPHANUMERIC_SPACE",
     "pole_switch_name_colors": ["WHITE"],
     "pole_switch_name_has_background": False,
-    "transformer_name_numeric": True,
-    "transformer_name_format": "NUMERIC",
+    "transformer_name_numeric": False,
+    "transformer_name_format": "AUTO",
     "transformer_name_colors": ["WHITE"],
     "transformer_name_has_background": False,
     "last_file_path": "",

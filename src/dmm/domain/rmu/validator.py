@@ -10,11 +10,16 @@ from typing import Any, Dict, List, Sequence
 from dmm.domain.gfile.parser import GParser, RmuFrame, GObject
 from dmm.config.constants import (
     RMU_RELAY_SIGNAL_CODE,
-    RMU_RELAY_SIGNAL_DEVREF,
+    RMU_RELAY_SIGNAL_CLASSIFICATION,
     RMU_RELAY_SIGNAL_TAG,
     RMU_RELAY_SIGNAL_TABLE_ID,
+    RMU_CHANNEL_STATUS_TAG,
+    RMU_CHANNEL_STATUS_DEVREF_TOKEN,
+    RMU_CHANNEL_STATUS_TABLE_ID,
+    RMU_CHANNEL_STATUS_DOMAIN,
 )
 from dmm.infrastructure.database.oracle import OracleClient
+from dmm.domain.gfile.element_catalog import normalize_element_key, normalized_classification
 
 KEYID_STEP = 2 ** 32
 
@@ -38,6 +43,9 @@ class RmuValidator:
         device_rules: Dict[str, Dict[str, Any]],
         breaker_name_source: str = "GRAPHICAL_TEXT",
         log=None,
+        element_catalog=None,
+        feeder_context_by_frame=None,
+        force_rmu_feeder_correction: bool = False,
     ):
         self.db = db
         self.parser = parser
@@ -48,20 +56,108 @@ class RmuValidator:
         # older callers/settings, but intentionally ignore its value.
         self.breaker_name_source = "GRAPHICAL_TEXT"
         self.log = log or (lambda msg: None)
+        self.element_catalog = element_catalog if isinstance(element_catalog, dict) else {}
+        self._relay_signal_file_keys = self._classified_relay_signal_file_keys(
+            self.element_catalog
+        )
+        self.feeder_context_by_frame = (
+            feeder_context_by_frame if isinstance(feeder_context_by_frame, dict) else {}
+        )
+        self.force_rmu_feeder_correction = bool(force_rmu_feeder_correction)
 
     @staticmethod
-    def _is_normal_relay_signal(elem):
-        """Match only the explicitly designated EFI G element."""
-        if elem.tag != RMU_RELAY_SIGNAL_TAG:
+    def _classified_relay_signal_file_keys(catalog):
+        """Return file keys marked RMU_PWBH_EFI in Element Management.
+
+        The classification is the authoritative discovery source.  Only the
+        marked element-definition file name/path is used to recognize pwbh
+        instances in a drawing; the old NariPd_Normal hard-coded filename is
+        intentionally not used as a fallback.
+        """
+        if not isinstance(catalog, dict):
+            return set()
+        records = catalog.get("records", [])
+        if not isinstance(records, list):
+            return set()
+
+        keys = set()
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if normalized_classification(record) != RMU_RELAY_SIGNAL_CLASSIFICATION:
+                continue
+            for field in ("file_key", "file_name", "element_key"):
+                value = normalize_element_key(record.get(field, ""))
+                if not value:
+                    continue
+                # element_key may be file.g:ROOT_ID; discovery is by file.
+                file_part = value.split(":", 1)[0]
+                if not file_part:
+                    continue
+                keys.add(file_part)
+                keys.add(file_part.rsplit("/", 1)[-1])
+        return {item for item in keys if item}
+
+    def _is_normal_relay_signal(self, elem):
+        """Recognize EFI pwbh only through RMU_PWBH_EFI classification.
+
+        The caller already supplies objects located inside the current RMU
+        frame, so a matching symbol outside an RMU never reaches this method.
+        """
+        if elem.tag != RMU_RELAY_SIGNAL_TAG or not self._relay_signal_file_keys:
             return False
-        devref = norm(elem.attrs.get("devref"))
-        file_part = devref.lstrip("#").split(":", 1)[0].replace("\\", "/")
-        return file_part.rsplit("/", 1)[-1].casefold() == RMU_RELAY_SIGNAL_DEVREF
+        devref = normalize_element_key(elem.attrs.get("devref", ""))
+        file_part = devref.split(":", 1)[0]
+        if not file_part:
+            return False
+        return (
+            file_part in self._relay_signal_file_keys
+            or file_part.rsplit("/", 1)[-1] in self._relay_signal_file_keys
+        )
 
     @staticmethod
     def _relay_keyid(elem):
-        """NariPd_Normal uses slot 1 for the EFI value KeyID."""
+        """The classified EFI pwbh uses slot 1 for the value KeyID."""
         return norm(elem.attrs.get("keyid1"))
+
+    def _get_rmu_records(self, rmu_name: str, feeder_id=None):
+        """Compatibility wrapper for real DB and legacy test doubles."""
+        if feeder_id in (None, ""):
+            return list(self.db.get_rmu_records(rmu_name) or [])
+        try:
+            return list(self.db.get_rmu_records(rmu_name, feeder_id=feeder_id) or [])
+        except TypeError:
+            rows = list(self.db.get_rmu_records(rmu_name) or [])
+            target = int_or_none(feeder_id)
+            return [r for r in rows if int_or_none(r.get("feeder_id")) == target]
+
+    def _linked_combined_ids_in_frame(self, parsed, frame: RmuFrame) -> set[int]:
+        """Return 13501 IDs proven by existing child-device KeyIDs in this frame."""
+        ids: set[int] = set()
+        try:
+            elements = self.parser.find_target_objects_in_frame(
+                parsed, frame, self.device_rules.keys()
+            )
+        except Exception:
+            return ids
+        for elem in elements:
+            key_text = self._relay_keyid(elem) if elem.tag == RMU_RELAY_SIGNAL_TAG else norm(elem.keyid)
+            keyid = int_or_none(key_text)
+            if keyid is None:
+                continue
+            try:
+                decoded = self.db.verify_keyid(keyid) or {}
+                table_id = int_or_none(decoded.get("tab_no"))
+                device_id = int_or_none(decoded.get("device_id"))
+                if table_id is None or device_id is None:
+                    continue
+                rec = self.db.get_device_by_id(table_id, device_id)
+                combined_id = int_or_none((rec or {}).get("combined_id"))
+                if combined_id is not None:
+                    ids.add(combined_id)
+            except Exception:
+                continue
+        return ids
 
     def _resolve_rmu_name(
         self,
@@ -71,118 +167,186 @@ class RmuValidator:
         preassigned_candidates=None,
     ):
         frame_key = (frame.frame.xml_index, frame.frame.xml_id)
-        if preassigned_candidates is None:
-            all_candidates = self.parser.find_label_candidates(
-                parsed,
-                frame,
-                positions,
-            )
-        else:
-            all_candidates = list(
-                preassigned_candidates.get(frame_key, [])
-            )
-        frame.label_candidates = all_candidates
+        frame_id = norm(frame.frame.xml_id)
+        feeder_ctx = dict(self.feeder_context_by_frame.get(frame_id, {}) or {})
 
+        # Direct validator callers from older modules/tests do not provide the
+        # topology context. Preserve the historical NAME-only behavior there;
+        # the Makkah RMU model module always supplies a per-frame context.
+        if frame_id not in self.feeder_context_by_frame:
+            if preassigned_candidates is None:
+                legacy_candidates = self.parser.find_label_candidates(parsed, frame, positions)
+            else:
+                legacy_candidates = list(preassigned_candidates.get(frame_key, []))
+            frame.label_candidates = legacy_candidates
+            if not legacy_candidates:
+                return {
+                    "status": "FAIL",
+                    "reason": "RMU_NAME_NOT_PARSED: 在指定的环网柜名称方向内未解析到有效名称文字",
+                    "candidate_rows": [], "selected": None,
+                }
+            ordered_legacy = sorted(legacy_candidates, key=lambda c: (c.score, c.obj.xml_index, c.text))
+            chosen_legacy = ordered_legacy[0]
+            candidate_rows = []
+            selected_row = None
+            for c in legacy_candidates:
+                records = self._get_rmu_records(c.text)
+                row = {
+                    "name": c.text, "directions": c.direction, "best_score": c.score,
+                    "distance": c.gap, "color": c.color,
+                    "is_green": "YES" if c.is_green else "NO", "xml_id": c.obj.xml_id,
+                    "db_count": len(records), "db_records": records,
+                    "selected_by_rule": "YES" if c is chosen_legacy else "NO",
+                    "selection_reason": "SINGLE_NEAREST_DIRECTION_LABEL" if c is chosen_legacy else "",
+                }
+                candidate_rows.append(row)
+                if c is chosen_legacy:
+                    selected_row = row
+            records = self._get_rmu_records(chosen_legacy.text)
+            if len(records) == 1:
+                return {
+                    "status": "PASS",
+                    "reason": "RMU_CONFIRMED_SINGLE_LABEL" if len(ordered_legacy) == 1 else "RMU_CONFIRMED_NEAREST_LABEL",
+                    "candidate_rows": candidate_rows, "selected": selected_row,
+                }
+            return {
+                "status": "FAIL",
+                "reason": "RMU_DUPLICATE_IN_DATABASE" if len(records) > 1 else "RMU_NOT_FOUND_IN_DATABASE",
+                "candidate_rows": candidate_rows, "selected": selected_row,
+            }
+
+        feeder_id = int_or_none(feeder_ctx.get("feeder_id"))
+        topology_status = norm(feeder_ctx.get("topology_status"))
+        primary_feeder = norm(feeder_ctx.get("primary_feeder"))
+        feeder_error = norm(feeder_ctx.get("error"))
+
+        if feeder_id is None:
+            reason = feeder_error or (
+                f"RMU_FEEDER_TOPOLOGY_UNRESOLVED: status={topology_status or 'UNRESOLVED'}; "
+                f"primary_feeder={primary_feeder or '-'}"
+            )
+            return {
+                "status": "FAIL",
+                "reason": reason,
+                "candidate_rows": [],
+                "selected": None,
+                "feeder_context": feeder_ctx,
+            }
+
+        if preassigned_candidates is None:
+            all_candidates = self.parser.find_label_candidates(parsed, frame, positions)
+        else:
+            all_candidates = list(preassigned_candidates.get(frame_key, []))
+        frame.label_candidates = all_candidates
         if not all_candidates:
             return {
                 "status": "FAIL",
-                "reason": (
-                    "RMU_NAME_NOT_PARSED: "
-                    "在指定的环网柜名称方向内未解析到有效名称文字"
-                ),
+                "reason": "RMU_NAME_NOT_PARSED: 在指定的环网柜名称方向内未解析到有效名称文字",
                 "candidate_rows": [],
                 "selected": None,
+                "feeder_context": feeder_ctx,
             }
 
-        # --------------------------------------------------------------
-        # RMU name selection rule
-        # --------------------------------------------------------------
-        # 1. Candidate ownership has already been resolved by GParser:
-        #    one Text can belong to only one nearest RMU frame.
-        #
-        # 2. The parser has already reduced the selected-direction candidates
-        #    to one nearest Text. Color is not a naming priority.
-        # --------------------------------------------------------------
-        ordered = sorted(
-            all_candidates,
-            key=lambda c: (
-                c.score,
-                c.obj.xml_index,
-                c.text,
-            ),
-        )
-
+        ordered = sorted(all_candidates, key=lambda c: (c.score, c.obj.xml_index, c.text))
         chosen = ordered[0]
         selection_reason = "SINGLE_NEAREST_DIRECTION_LABEL"
-
         chosen_name = norm(getattr(chosen, "text", ""))
         if not chosen_name:
             return {
                 "status": "FAIL",
-                "reason": (
-                    "RMU_NAME_NOT_PARSED: "
-                    "已找到候选文字对象，但解析后的环网柜名称为空"
-                ),
+                "reason": "RMU_NAME_NOT_PARSED: 已找到候选文字对象，但解析后的环网柜名称为空",
                 "candidate_rows": [],
                 "selected": None,
+                "feeder_context": feeder_ctx,
             }
 
+        linked_combined_ids = self._linked_combined_ids_in_frame(parsed, frame)
         candidate_rows = []
         selected_row = None
-
         for c in all_candidates:
-            records = self.db.get_rmu_records(c.text)
+            all_records = self._get_rmu_records(c.text)
+            records = [
+                r for r in all_records
+                if int_or_none(r.get("feeder_id")) == feeder_id
+            ]
             row = {
-                "name": c.text,
-                "directions": c.direction,
-                "best_score": c.score,
-                "distance": c.gap,
-                "color": c.color,
-                "is_green": "YES" if c.is_green else "NO",
-                "xml_id": c.obj.xml_id,
-                "db_count": len(records),
-                "db_records": records,
+                "name": c.text, "directions": c.direction,
+                "best_score": c.score, "distance": c.gap,
+                "color": c.color, "is_green": "YES" if c.is_green else "NO",
+                "xml_id": c.obj.xml_id, "db_count": len(records),
+                "db_records": records, "db_all_name_count": len(all_records),
+                "db_all_name_records": all_records,
                 "selected_by_rule": "YES" if c is chosen else "NO",
-                "selection_reason": (
-                    selection_reason if c is chosen else ""
-                ),
+                "selection_reason": selection_reason if c is chosen else "",
+                "topology_feeder_id": feeder_id,
+                "topology_primary_feeder": primary_feeder,
             }
             candidate_rows.append(row)
-
             if c is chosen:
                 selected_row = row
 
-        records = self.db.get_rmu_records(chosen_name)
-
-        if len(records) == 1:
+        all_records = self._get_rmu_records(chosen_name)
+        matching = [r for r in all_records if int_or_none(r.get("feeder_id")) == feeder_id]
+        if len(matching) == 1:
+            selected_row["db_records"] = matching
+            selected_row["db_count"] = 1
             return {
                 "status": "PASS",
-                "reason": (
-                    "RMU_CONFIRMED_SINGLE_LABEL"
-                    if len(ordered) == 1
-                    else (
-                        "RMU_CONFIRMED_GREEN_LABEL"
-                        if chosen.is_green
-                        else "RMU_CONFIRMED_NEAREST_LABEL"
-                    )
-                ),
+                "reason": "RMU_CONFIRMED_TOPOLOGY_FEEDER",
                 "candidate_rows": candidate_rows,
                 "selected": selected_row,
+                "feeder_context": feeder_ctx,
+                "feeder_correction_needed": False,
+            }
+        if len(matching) > 1:
+            return {
+                "status": "FAIL", "reason": "RMU_DUPLICATE_IN_TOPOLOGY_FEEDER",
+                "candidate_rows": candidate_rows, "selected": selected_row,
+                "feeder_context": feeder_ctx,
             }
 
-        if len(records) > 1:
+        # No same-name RMU exists under the topology feeder.  Only preserve an
+        # already-linked 13501 when current child KeyIDs prove that exact RMU.
+        linked_wrong = [
+            r for r in all_records
+            if int_or_none(r.get("id")) in linked_combined_ids
+        ]
+        unique_linked = {int_or_none(r.get("id")): r for r in linked_wrong if int_or_none(r.get("id")) is not None}
+        if len(unique_linked) == 1:
+            existing = dict(next(iter(unique_linked.values())))
+            old_feeder = int_or_none(existing.get("feeder_id"))
+            selected_row["db_records"] = [existing]
+            selected_row["db_count"] = 1
+            selected_row["feeder_mismatch"] = "YES"
+            selected_row["current_feeder_id"] = old_feeder
+            if not self.force_rmu_feeder_correction:
+                return {
+                    "status": "FAIL",
+                    "reason": (
+                        f"RMU_FEEDER_MISMATCH_FORCE_DISABLED: RMU_ID={existing.get('id')}; "
+                        f"current={old_feeder if old_feeder is not None else 'NULL'}; target={feeder_id}"
+                    ),
+                    "candidate_rows": candidate_rows, "selected": selected_row,
+                    "feeder_context": feeder_ctx,
+                    "feeder_correction_needed": True,
+                }
             return {
-                "status": "FAIL",
-                "reason": "RMU_DUPLICATE_IN_DATABASE",
-                "candidate_rows": candidate_rows,
-                "selected": selected_row,
+                "status": "PASS",
+                "reason": "RMU_CONFIRMED_EXISTING_LINK_FEEDER_CORRECTION",
+                "candidate_rows": candidate_rows, "selected": selected_row,
+                "feeder_context": feeder_ctx,
+                "feeder_correction_needed": True,
+                "current_feeder_id": old_feeder,
             }
 
         return {
             "status": "FAIL",
-            "reason": "RMU_NOT_FOUND_IN_DATABASE",
-            "candidate_rows": candidate_rows,
-            "selected": selected_row,
+            "reason": (
+                f"RMU_NOT_FOUND_IN_TOPOLOGY_FEEDER: feeder={primary_feeder}; "
+                f"FEEDER_ID={feeder_id}; same_name_total={len(all_records)}"
+            ),
+            "candidate_rows": candidate_rows, "selected": selected_row,
+            "feeder_context": feeder_ctx,
         }
 
     @staticmethod
@@ -395,6 +559,7 @@ class RmuValidator:
         rows = [
             row for row in rmu_result.get("device_rows", [])
             if row.get("xml_id")
+            and row.get("association_kind") != "RMU_CHANNEL_STATUS"
         ]
 
         by_logical_name = defaultdict(list)
@@ -1336,6 +1501,193 @@ class RmuValidator:
             )
             rmu_result["device_rows"].append(row)
 
+        # Keep the Makkah RMU discovery/name logic untouched.  If the RMU
+        # identity itself is unresolved, still expose channel_status G objects
+        # in Device Details, but block association because there is no unique
+        # RMU COMBINED_ID that can safely drive the Jazan channel query.
+        raw_status = self.parser.find_target_objects_in_frame(
+            parsed, frame, {RMU_CHANNEL_STATUS_TAG}
+        )
+        channel_status_elements = [
+            elem for elem in raw_status if self._is_channel_status_element(elem)
+        ]
+        self.log(
+            f"  Channel status detection (unresolved RMU): "
+            f"RMU={rmu_result.get('rmu_name') or '-'}; "
+            f"channel_status.zt.icn.g={len(channel_status_elements)}"
+        )
+        duplicate = len(channel_status_elements) > 1
+        for elem in channel_status_elements:
+            row = self._make_channel_status_row(rmu_result, elem)
+            row["current_keyid"] = str(elem.attrs.get("keyid") or "").strip()
+            row["model_linked"] = "YES" if row["current_keyid"] else "NO"
+            if duplicate:
+                self._set_fail(
+                    row,
+                    "CHANNEL_STATUS_GRAPHICAL_DUPLICATE: "
+                    f"当前RMU内发现{len(channel_status_elements)}个"
+                    "channel_status.zt.icn.g，且RMU身份未唯一解析，禁止自动关联。",
+                )
+            else:
+                self._set_fail(row, resolved_reason)
+            rmu_result["device_rows"].append(row)
+
+    @staticmethod
+    def _is_channel_status_element(elem):
+        if str(getattr(elem, "tag", "") or "") != RMU_CHANNEL_STATUS_TAG:
+            return False
+        devref = str((getattr(elem, "attrs", {}) or {}).get("devref") or "")
+        return RMU_CHANNEL_STATUS_DEVREF_TOKEN.casefold() in devref.casefold()
+
+    def _make_channel_status_row(self, rmu_result, elem):
+        # Same database target as Jazan: dms_channel_info / 13566 / domain 40.
+        row = self._default_device_row(
+            rmu_result.get("rmu_name", ""),
+            rmu_result.get("rmu_id", ""),
+            elem,
+            {
+                "table_id": RMU_CHANNEL_STATUS_TABLE_ID,
+                "domain": RMU_CHANNEL_STATUS_DOMAIN,
+                "match_mode": "RMU_CHANNEL_STATUS",
+            },
+            {"table_name": "dms_channel_info"},
+        )
+        row.update({
+            "association_kind": "RMU_CHANNEL_STATUS",
+            "logical_code": "CHANNEL_STATUS",
+            "graphical_name": "channel_status.zt.icn.g",
+            "selected_name_source": "FIXED_DEVREF",
+            "selected_device_name": "CHANNEL_STATUS",
+            "table_id": RMU_CHANNEL_STATUS_TABLE_ID,
+            "configured_domain": RMU_CHANNEL_STATUS_DOMAIN,
+            "table_name": "dms_channel_info",
+            "db_combined_id": rmu_result.get("rmu_id", ""),
+        })
+        return row
+
+    def _validate_channel_status(self, row, elem, rmu_result):
+        """Validate Makkah Channel Status using the Jazan association rule.
+
+        RMU detection and RMU-name resolution remain Makkah-specific and are
+        completed before this method is called.  From that unique RMU ID
+        onward, the database lookup, uniqueness rule, KeyID calculation,
+        verification and link-state handling are the same as Jazan.
+        """
+        rmu_id = int_or_none(rmu_result.get("rmu_id"))
+        if rmu_id is None:
+            self._set_fail(row, "CHANNEL_STATUS_RMU_ID_NOT_RESOLVED")
+            return
+
+        try:
+            matches = self.db.get_channel_status_keyids_by_combined_id(rmu_id)
+        except Exception as exc:
+            self._set_fail(row, f"CHANNEL_STATUS_QUERY_FAILED: {exc}")
+            return
+
+        row["db_match_count"] = len(matches)
+        if len(matches) == 0:
+            self._set_fail(
+                row,
+                f"CHANNEL_STATUS_NOT_FOUND: RMU_ID={rmu_id} 数据库未返回可用channel记录",
+            )
+            return
+        if len(matches) > 1:
+            self._set_fail(
+                row,
+                f"CHANNEL_STATUS_DUPLICATE: RMU_ID={rmu_id} 数据库返回{len(matches)}条channel记录",
+            )
+            return
+
+        match = matches[0]
+        expected_keyid = int_or_none(match.get("new_id"))
+        self.log(
+            f"  Channel状态关联：RMU={rmu_result.get('rmu_name') or '-'}；"
+            f"RMU_ID={rmu_id}；数据库候选=1；KeyID={expected_keyid or '-'}"
+        )
+        if expected_keyid is None:
+            self._set_fail(row, "CHANNEL_STATUS_KEYID_INVALID")
+            return
+
+        channel_id = int_or_none(match.get("channel_id"))
+        if channel_id is None:
+            self._set_fail(row, "CHANNEL_STATUS_CHANNEL_ID_INVALID")
+            return
+
+        try:
+            decoded = self.db.verify_keyid(expected_keyid) or {}
+            keyid_ok = (
+                int_or_none(decoded.get("device_id")) == channel_id
+                and int_or_none(decoded.get("tab_no")) == RMU_CHANNEL_STATUS_TABLE_ID
+                and int_or_none(decoded.get("col_no")) == RMU_CHANNEL_STATUS_DOMAIN
+            )
+        except Exception as exc:
+            self._set_fail(row, f"CHANNEL_STATUS_KEYID_VERIFY_ERROR: {exc}")
+            return
+
+        if not keyid_ok:
+            self._set_fail(
+                row,
+                "CHANNEL_STATUS_KEYID_VERIFY_FAILED: "
+                f"device={decoded.get('device_id')} "
+                f"table={decoded.get('tab_no')} "
+                f"domain={decoded.get('col_no')}",
+            )
+            return
+
+        row.update({
+            "db_device_id": channel_id,
+            "db_code": str(match.get("chan_name") or "").strip(),
+            "db_name": str(match.get("chan_name") or "").strip(),
+            "db_combined_id": rmu_id,
+            "expected_keyid": expected_keyid,
+            "expected_keyid_verified": "YES",
+            "current_keyid": str(elem.attrs.get("keyid") or "").strip(),
+        })
+
+        current_text = str(elem.attrs.get("keyid") or "").strip()
+        if not current_text:
+            row.update({
+                "model_linked": "NO",
+                "model_link_correct": "",
+                "model_link_status": "未关联",
+                "association_action": "需要关联",
+                "writeback_needed": "YES",
+                "association_ready": "YES",
+                "status": "WARN",
+                "severity": "UNLINKED",
+                "reason": "CHANNEL_STATUS_NOT_LINKED",
+            })
+            return
+
+        current_keyid = int_or_none(current_text)
+        if current_keyid == expected_keyid:
+            row.update({
+                "model_linked": "YES",
+                "model_link_correct": "YES",
+                "model_link_status": "已正确关联",
+                "association_action": "无需处理",
+                "writeback_needed": "NO",
+                "association_ready": "YES",
+                "status": "PASS",
+                "severity": "PASS",
+                "reason": "CHANNEL_STATUS_LINK_CORRECT",
+            })
+            return
+
+        row.update({
+            "model_linked": "YES",
+            "model_link_correct": "NO",
+            "model_link_status": "当前KeyID与数据库返回KeyID不一致",
+            "association_action": "允许重新关联",
+            "writeback_needed": "YES",
+            "association_ready": "YES",
+            "status": "RELINK",
+            "severity": "RELINK",
+            "reason": (
+                "CHANNEL_STATUS_KEYID_MISMATCH: "
+                f"当前KeyID={current_text}；目标KeyID={expected_keyid}"
+            ),
+        })
 
     def _fill_db_fields(self, row, dev):
         row.update({
@@ -1347,7 +1699,7 @@ class RmuValidator:
         })
 
     def _validate_relay_signal(self, row, elem, db_set, rule):
-        """Validate NariPd_Normal against dms_relay_sig.CODE exactly."""
+        """Validate the classified EFI pwbh against dms_relay_sig.CODE exactly."""
         row["selected_name_source"] = "FIXED_EFI_INDICATOR"
         row["logical_code"] = RMU_RELAY_SIGNAL_CODE
         row["selected_device_name"] = RMU_RELAY_SIGNAL_CODE
@@ -1759,6 +2111,12 @@ class RmuValidator:
                 "association_block_reasons": [],
                 "device_block_reasons": [],
                 "label_candidates": [],
+                "topology_status": "",
+                "topology_primary_feeder": "",
+                "topology_feeder_id": "",
+                "current_rmu_feeder_id": "",
+                "feeder_correction_needed": "NO",
+                "force_rmu_feeder_correction": "YES" if self.force_rmu_feeder_correction else "NO",
             }
 
             if name_assignment_error:
@@ -1788,6 +2146,14 @@ class RmuValidator:
                     }
 
             rmu_result["label_candidates"] = resolved["candidate_rows"]
+            _fctx = dict(resolved.get("feeder_context", {}) or {})
+            rmu_result["topology_status"] = _fctx.get("topology_status", "")
+            rmu_result["topology_primary_feeder"] = _fctx.get("primary_feeder", "")
+            rmu_result["topology_feeder_id"] = _fctx.get("feeder_id", "")
+            rmu_result["current_rmu_feeder_id"] = resolved.get("current_feeder_id", "")
+            rmu_result["feeder_correction_needed"] = (
+                "YES" if resolved.get("feeder_correction_needed") else "NO"
+            )
             rmu_result["rmu_status"] = resolved["status"]
             rmu_result["rmu_reason"] = resolved["reason"]
             if resolved["status"] == "PASS":
@@ -1892,6 +2258,8 @@ class RmuValidator:
                 continue
 
             rmu_record = selected["db_records"][0]
+            if rmu_result.get("current_rmu_feeder_id") in (None, ""):
+                rmu_result["current_rmu_feeder_id"] = rmu_record.get("feeder_id", "")
             rmu_id = int_or_none(rmu_record.get("id"))
             rmu_result["rmu_id"] = rmu_id
             rmu_result["rmu_ids"] = [rmu_id] if rmu_id is not None else []
@@ -1948,13 +2316,28 @@ class RmuValidator:
             for elem in elements:
                 elements_by_tag[elem.tag].append(elem)
 
-            # Only the explicitly named Normal pwbh object is a relay signal.
-            # Other pwbh objects in the same RMU are unrelated graphics.
+            # Only pwbh objects whose definition file is classified as
+            # RMU_PWBH_EFI are relay signals. Other pwbh objects in the same
+            # RMU are unrelated graphics.
             elements_by_tag[RMU_RELAY_SIGNAL_TAG] = [
                 elem
                 for elem in elements_by_tag.get(RMU_RELAY_SIGNAL_TAG, [])
                 if self._is_normal_relay_signal(elem)
             ]
+
+            # Channel Status is discovered only inside this already-resolved
+            # Makkah RMU frame.  RMU frame/name matching above remains exactly
+            # unchanged; downstream association now follows the Jazan rule.
+            raw_status = self.parser.find_target_objects_in_frame(
+                parsed, frame, {RMU_CHANNEL_STATUS_TAG}
+            )
+            channel_status_elements = [
+                elem for elem in raw_status if self._is_channel_status_element(elem)
+            ]
+            self.log(
+                f"  Channel状态图元识别：RMU={rmu_result.get('rmu_name') or '-'}；"
+                f"channel_status.zt.icn.g={len(channel_status_elements)}"
+            )
 
             # The G file is authoritative for device validation.
             #
@@ -2055,6 +2438,25 @@ class RmuValidator:
                 self._validate_relay_signal(row, elem, db_set, rule)
                 rmu_result["device_rows"].append(row)
 
+            # Per-RMU Channel Status association copied from the Jazan field
+            # behavior after RMU resolution.  More than one matching Status in
+            # one RMU is never guessed; exactly one is queried and validated.
+            if len(channel_status_elements) > 1:
+                for elem in channel_status_elements:
+                    row = self._make_channel_status_row(rmu_result, elem)
+                    self._set_fail(
+                        row,
+                        "CHANNEL_STATUS_GRAPHICAL_DUPLICATE: "
+                        f"当前RMU内发现{len(channel_status_elements)}个"
+                        "channel_status.zt.icn.g，无法唯一确定状态图元。",
+                    )
+                    rmu_result["device_rows"].append(row)
+            else:
+                for elem in channel_status_elements:
+                    row = self._make_channel_status_row(rmu_result, elem)
+                    self._validate_channel_status(row, elem, rmu_result)
+                    rmu_result["device_rows"].append(row)
+
             # Enforce hard one-to-one mapping after all G target rows have
             # been resolved. This catches duplicate logical CODE values
             # or multiple G elements consuming the same database device.
@@ -2143,6 +2545,12 @@ class RmuValidator:
             # when some device rows fail. preview_association() will write only
             # rows with association_ready=YES and writeback_needed=YES.
             rmu_result["association_eligible"] = not unique_reasons
+            for _row in rmu_result.get("device_rows", []):
+                _row["topology_status"] = rmu_result.get("topology_status", "")
+                _row["topology_primary_feeder"] = rmu_result.get("topology_primary_feeder", "")
+                _row["topology_feeder_id"] = rmu_result.get("topology_feeder_id", "")
+                _row["current_rmu_feeder_id"] = rmu_result.get("current_rmu_feeder_id", "")
+                _row["feeder_correction_needed"] = rmu_result.get("feeder_correction_needed", "NO")
 
             action_required = any(
                 row.get("status") in ("WARN", "RELINK", "RMU_RELINK")

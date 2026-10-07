@@ -23,6 +23,10 @@ FEEDER_FIELDS = [
     "classification_reason",
     "region_index",
     "region_identity_confidence",
+    "main_source_feeder_count",
+    "main_source_feeder_ids",
+    "nop_boundary_count",
+    "strict_geometry_repair_count",
     "feeder_resolution_source",
     "feeder_resolution_evidence",
     "fingerprint_match_ratio",
@@ -56,6 +60,12 @@ FEEDLINE_FIELDS = [
     "feeder_name",
     "feeder_resolution_source",
     "topology_region",
+    "ownership_status",
+    "ownership_method",
+    "ownership_candidate_feeder_ids",
+    "ownership_evidence_sources",
+    "ownership_evidence",
+    "ownership_evidence_count",
     "current_feeder_name",
     "order_index",
     "object_type",
@@ -85,6 +95,98 @@ FEEDLINE_FIELDS = [
     "reason",
 ]
 
+# User-facing feeder reports intentionally contain results only.  The full
+# internal schemas above are kept for compatibility/debugging, while these
+# compact schemas hide identification/topology reasoning from HTML/CSV.
+FEEDER_REPORT_FIELDS = [
+    "file_name",
+    "feeder_id",
+    "feeder_name",
+    "station_name",
+    "station_bv_id",
+    "section_nominal_voltage_kv",
+    "section_prefix",
+    "feedline_count",
+    "database_section_count",
+    "planned_create_count",
+    "linked_correct_count",
+    "unlinked_count",
+    "error_count",
+    "association_ready_count",
+    "association_eligible",
+    "status",
+    "severity",
+    "reason",
+]
+
+FEEDLINE_REPORT_FIELDS = [
+    "file_name",
+    "feeder_name",
+    "ownership_status",
+    "topology_primary_feeder",
+    "topology_candidate_feeders",
+    "topology_target_feeder_id",
+    "ownership_method",
+    "assigned_feeder_id",
+    "assigned_feeder_name",
+    "order_index",
+    "object_type",
+    "xml_id",
+    "ls",
+    "planned_section_type",
+    "db_create_needed",
+    "model_linked",
+    "model_link_correct",
+    "current_keyid",
+    "current_device_id",
+    "current_table_id",
+    "current_domain",
+    "current_db_name",
+    "current_db_code",
+    "current_bv_id",
+    "current_feeder_id",
+    "assigned_device_id",
+    "assigned_section_name",
+    "assigned_bv_id",
+    "expected_keyid",
+    "expected_keyid_verified",
+    "association_ready",
+    "writeback_needed",
+    "status",
+    "severity",
+    "reason",
+]
+
+GRAPH_FEEDER_FIELDS = [
+    "file_name",
+    "graph_feeder",
+    "db_feeder_id",
+    "db_code",
+    "db_name",
+    "db_st_id",
+    "match_result",
+]
+
+GRAPH_FEEDER_LABELS = {
+    "file_name": "G文件",
+    "graph_feeder": "图形馈线",
+    "db_feeder_id": "数据库FEEDER_ID",
+    "db_code": "数据库CODE",
+    "db_name": "数据库NAME",
+    "db_st_id": "数据库ST_ID",
+    "match_result": "数据库匹配结果",
+}
+
+GRAPH_FEEDER_LABELS_EN = {
+    "file_name": "G File",
+    "graph_feeder": "Graph Feeder",
+    "db_feeder_id": "Database FEEDER_ID",
+    "db_code": "Database CODE",
+    "db_name": "Database NAME",
+    "db_st_id": "Database ST_ID",
+    "match_result": "Database Match Result",
+}
+
 FEEDER_LABELS = {
     "file_name": "G文件",
     "drawing_type": "最终图纸类型",
@@ -93,6 +195,10 @@ FEEDER_LABELS = {
     "classification_reason": "最终分型判据",
     "region_index": "区域序号",
     "region_identity_confidence": "区域身份置信度",
+    "main_source_feeder_count": "主网确认馈线数量",
+    "main_source_feeder_ids": "主网确认FEEDER_ID集合",
+    "nop_boundary_count": "NOP边界开关数量",
+    "strict_geometry_repair_count": "严格几何补链数量",
     "feeder_resolution_source": "馈线识别方式",
     "feeder_resolution_evidence": "馈线识别依据",
     "fingerprint_match_ratio": "单馈线指纹匹配率",
@@ -126,7 +232,18 @@ FEEDLINE_LABELS = {
     "feeder_name": "馈线名称",
     "feeder_resolution_source": "馈线识别方式",
     "topology_region": "拓扑区域",
+    "ownership_status": "馈线归属状态",
+    "topology_primary_feeder": "拓扑所属馈线",
+    "topology_candidate_feeders": "拓扑候选馈线",
+    "topology_target_feeder_id": "拓扑目标FEEDER_ID",
+    "ownership_method": "馈线归属方法",
+    "ownership_candidate_feeder_ids": "候选FEEDER_ID",
+    "ownership_evidence_sources": "归属证据来源",
+    "ownership_evidence": "归属证据",
+    "ownership_evidence_count": "归属证据数量",
     "current_feeder_name": "当前所属馈线名称",
+    "assigned_feeder_id": "目标馈线ID",
+    "assigned_feeder_name": "目标馈线名称",
     "order_index": "FeedLine序号",
     "object_type": "G图元类型",
     "xml_id": "图元XML ID",
@@ -174,7 +291,7 @@ DEVICE_FIELDS = [
 ]
 
 POLE_FIELDS = [
-    "file_name", "object_type", "xml_id", "device_model", "device_family",
+    "file_name", "object_type", "xml_id", "device_model",
     "devref", "graphical_name", "name_source", "name_distance",
     "name_direction", "name_xml_id", "inside_rmu",
     "key_name", "current_keyid", "current_device_id", "current_table_id",
@@ -191,7 +308,7 @@ POLE_FIELDS = [
 
 POLE_LABELS = {
     "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID（来源：G文件）",
-    "device_model": "柱上开关型号", "device_family": "设备族",
+    "device_model": "柱上开关型号",
     "devref": "devref", "graphical_name": "图上名称", "name_source": "名称来源",
     "name_distance": "名称距离", "name_direction": "名称方向", "name_xml_id": "名称XML ID",
     "inside_rmu": "是否在环网柜内", "key_name": "XML key_name",
@@ -218,7 +335,7 @@ POLE_LABELS = {
 POLE_LABELS_EN = {
     key: value for key, value in {
         "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID (G File)",
-        "device_model": "Pole Switch Model", "device_family": "Device Family",
+        "device_model": "Pole Switch Model",
         "devref": "devref", "graphical_name": "Graphical Name", "name_source": "Name Source",
         "name_distance": "Name Distance", "name_direction": "Name Direction", "name_xml_id": "Name XML ID",
         "inside_rmu": "Inside RMU", "key_name": "XML key_name",
@@ -246,11 +363,10 @@ POLE_LABELS_EN = {
 TRANSFORMER_FIELDS = [
     "file_name", "object_type", "xml_id", "devref", "graphical_name",
     "name_source", "name_distance", "name_direction", "name_xml_id",
-    "feeder_resolution_source", "feeder_id",
-    "feeder_name", "current_keyid", "current_keyid1", "current_keyid2",
+    "current_keyid", "current_keyid1", "current_keyid2",
     "current_device_id", "current_table_id", "current_domain",
-    "current_db_name", "current_db_code", "current_feeder_id",
-    "db_match_count", "db_device_id", "db_code", "db_name", "db_feeder_id",
+    "current_db_name", "current_db_code",
+    "db_match_count", "db_device_id", "db_code", "db_name",
     "table_id", "table_name", "configured_domain", "expected_keyid",
     "expected_keyid_verified", "model_linked", "model_link_correct",
     "model_link_status", "association_action", "association_ready",
@@ -261,15 +377,14 @@ TRANSFORMER_LABELS = {
     "file_name": "G文件", "object_type": "G图元类型", "xml_id": "图元XML ID（来源：G文件）",
     "devref": "devref", "graphical_name": "图上名称", "name_source": "名称来源",
     "name_distance": "名称距离", "name_direction": "名称方向", "name_xml_id": "名称XML ID",
-    "feeder_resolution_source": "馈线识别方式", "feeder_id": "目标馈线ID",
-    "feeder_name": "目标馈线名称（来源：数据库）", "current_keyid": "当前KeyID（来源：G文件）",
+"current_keyid": "当前KeyID（来源：G文件）",
     "current_keyid1": "当前keyid1", "current_keyid2": "当前keyid2",
     "current_device_id": "当前设备ID（来源：数据库）", "current_table_id": "当前表号（KeyID反解/数据库定义）",
     "current_domain": "当前域号（KeyID反解/数据库定义）", "current_db_name": "当前模型设备NAME（来源：数据库）",
-    "current_db_code": "当前模型设备CODE（来源：数据库）", "current_feeder_id": "当前模型馈线ID（来源：数据库）",
+    "current_db_code": "当前模型设备CODE（来源：数据库）",
     "db_match_count": "13505匹配数", "db_device_id": "目标设备ID",
     "db_code": "目标设备CODE（来源：数据库）", "db_name": "目标设备NAME（来源：数据库）",
-    "db_feeder_id": "目标设备馈线ID（来源：数据库）", "table_id": "目标表号（来源：数据库定义）",
+"table_id": "目标表号（来源：数据库定义）",
     "table_name": "目标数据库表（来源：数据库）", "configured_domain": "目标域号（来源：数据库定义）",
     "expected_keyid": "期望KeyID（程序计算）", "expected_keyid_verified": "期望KeyID校验（数据库）",
     "model_linked": "是否已关联", "model_link_correct": "当前模型是否正确",
@@ -282,15 +397,14 @@ TRANSFORMER_LABELS_EN = {
     "file_name": "G File", "object_type": "G Object Type", "xml_id": "XML ID (G File)",
     "devref": "devref", "graphical_name": "Graphical Name", "name_source": "Name Source",
     "name_distance": "Name Distance", "name_direction": "Name Direction", "name_xml_id": "Name XML ID",
-    "feeder_resolution_source": "Feeder Resolution Source", "feeder_id": "Target Feeder ID",
-    "feeder_name": "Target Feeder Name (Database)", "current_keyid": "Current KeyID (G File)",
+"current_keyid": "Current KeyID (G File)",
     "current_keyid1": "Current keyid1", "current_keyid2": "Current keyid2",
     "current_device_id": "Current Device ID (Database)", "current_table_id": "Current Table ID (Decoded/DB Definition)",
     "current_domain": "Current Domain (Decoded/DB Definition)", "current_db_name": "Current Model NAME (Database)",
-    "current_db_code": "Current Model CODE (Database)", "current_feeder_id": "Current Model Feeder ID (Database)",
+    "current_db_code": "Current Model CODE (Database)",
     "db_match_count": "13505 Match Count", "db_device_id": "Target Device ID",
     "db_code": "Target Device CODE (Database)", "db_name": "Target Device NAME (Database)",
-    "db_feeder_id": "Target Feeder ID (Database)", "table_id": "Target Table ID (Database Definition)",
+"table_id": "Target Table ID (Database Definition)",
     "table_name": "Target Database Table (Database)", "configured_domain": "Target Domain (Database Definition)",
     "expected_keyid": "Expected KeyID (Calculated)", "expected_keyid_verified": "Expected KeyID Check (Database)",
     "model_linked": "Model Linked", "model_link_correct": "Current Model Correct",
@@ -298,6 +412,42 @@ TRANSFORMER_LABELS_EN = {
     "association_ready": "Ready for Association", "writeback_needed": "Write-back Needed",
     "status": "Status", "severity": "Status Type", "reason": "Details",
 }
+
+
+FUSE_FIELDS = [
+    "file_name", "object_type", "xml_id", "devref", "derived_fuse_name",
+    "transformer_assignment_status", "transformer_assignment_reason",
+    "transformer_owner_fuse_xml_id", "transformer_claim_count",
+    "nearest_transformer_name", "nearest_transformer_xml_id", "nearest_transformer_distance",
+    "transformer_name_direction", "transformer_name_priority", "transformer_name_distance",
+    "transformer_name_xml_id", "transformer_name_resolution_status", "transformer_13505_match_count",
+    "current_keyid", "current_device_id", "current_table_id", "current_domain",
+    "current_db_name", "current_db_code", "db_match_count", "db_device_id",
+    "db_code", "db_name", "db_bv_id", "table_id", "table_name", "configured_domain",
+    "expected_keyid", "expected_keyid_verified", "model_linked", "model_link_correct",
+    "model_link_status", "association_action", "association_ready", "writeback_needed",
+    "status", "severity", "reason",
+]
+
+FUSE_LABELS = {
+    "file_name":"G文件", "object_type":"G图元类型", "xml_id":"熔断器XML ID", "devref":"devref",
+    "derived_fuse_name":"计算熔断器名称", "transformer_assignment_status":"柱上变压器分配状态",
+    "transformer_assignment_reason":"柱上变压器分配说明", "transformer_owner_fuse_xml_id":"占用FUSE XML ID",
+    "transformer_claim_count":"同一变压器FUSE候选数", "nearest_transformer_name":"匹配柱上变压器名称",
+    "nearest_transformer_xml_id":"最近柱上变压器XML ID", "nearest_transformer_distance":"熔断器到变压器距离",
+    "transformer_name_direction":"变压器名称方向", "transformer_name_priority":"变压器名称优先级",
+    "transformer_name_distance":"变压器名称距离", "transformer_name_xml_id":"变压器名称Text XML ID",
+    "transformer_name_resolution_status":"柱上变压器名称数据库校验", "transformer_13505_match_count":"13505 NAME匹配数",
+    "current_keyid":"当前KeyID", "current_device_id":"当前设备ID", "current_table_id":"当前表号", "current_domain":"当前域号",
+    "current_db_name":"当前模型NAME", "current_db_code":"当前模型CODE", "db_match_count":"13513 NAME匹配数",
+    "db_device_id":"目标设备ID", "db_code":"目标设备CODE", "db_name":"目标设备NAME", "db_bv_id":"目标BV_ID",
+    "table_id":"目标表号", "table_name":"目标数据库表", "configured_domain":"目标域号",
+    "expected_keyid":"期望KeyID", "expected_keyid_verified":"期望KeyID校验", "model_linked":"是否已关联",
+    "model_link_correct":"当前模型是否正确", "model_link_status":"当前模型状态", "association_action":"处理建议",
+    "association_ready":"可进入关联流程", "writeback_needed":"是否需要回写", "status":"状态", "severity":"状态类型", "reason":"说明",
+}
+FUSE_LABELS_EN = {key: key.replace("_", " ").title() for key in FUSE_FIELDS}
+FUSE_LABELS_EN.update({"file_name":"G File", "xml_id":"Fuse XML ID", "derived_fuse_name":"Derived Fuse NAME", "nearest_transformer_name":"Matched Transformer Name", "reason":"Details"})
 
 MASTER_STATION_FIELDS = [
     "file_name", "object_type", "xml_id", "key_name", "logical_code",
@@ -473,6 +623,8 @@ FEEDER_LABELS_EN = {
     "region_identity_confidence": "Region Identity Confidence", "feeder_resolution_source": "Feeder Resolution Source",
     "feeder_resolution_evidence": "Feeder Resolution Evidence", "fingerprint_match_ratio": "Single-feeder Fingerprint Match",
     "current_feeder_ids": "Current FEEDER_ID Set", "current_feeder_count": "Current FEEDER_ID Count",
+    "main_source_feeder_count": "Confirmed Source Feeder Count", "main_source_feeder_ids": "Confirmed Source FEEDER_ID Set",
+    "nop_boundary_count": "NOP Boundary Switch Count", "strict_geometry_repair_count": "Strict Geometry Repair Count",
     "majority_feeder_id": "Majority FEEDER_ID", "majority_feeder_count": "Majority FEEDER_ID Rows",
     "anomaly_count": "Abnormal FeedLine Count", "feeder_db_count": "13500 DB Match Count",
     "feeder_id": "Feeder ID", "feeder_name": "Database Feeder Name",
@@ -486,7 +638,13 @@ FEEDER_LABELS_EN = {
 
 FEEDLINE_LABELS_EN = {
     "file_name": "G File", "feeder_name": "Feeder Name", "feeder_resolution_source": "Feeder Resolution Source",
-    "topology_region": "Topology Region", "current_feeder_name": "Current Feeder Name", "order_index": "FeedLine Index",
+    "topology_region": "Topology Region", "ownership_status": "Feeder Ownership Status",
+    "topology_primary_feeder": "Topology Feeder", "topology_candidate_feeders": "Topology Candidate Feeders",
+    "topology_target_feeder_id": "Topology Target FEEDER_ID",
+    "ownership_method": "Feeder Ownership Method", "ownership_candidate_feeder_ids": "Candidate FEEDER_IDs",
+    "ownership_evidence_sources": "Ownership Evidence Sources", "ownership_evidence": "Ownership Evidence",
+    "ownership_evidence_count": "Ownership Evidence Count", "current_feeder_name": "Current Feeder Name",
+    "assigned_feeder_id": "Target Feeder ID", "assigned_feeder_name": "Target Feeder Name", "order_index": "FeedLine Index",
     "object_type": "G Object Type", "xml_id": "XML ID", "ls": "ls", "planned_section_type": "SECTION_TYPE",
     "db_create_needed": "Create DB Section", "model_linked": "Model Linked", "model_link_correct": "Current Model Correct",
     "current_keyid": "Current KeyID", "current_device_id": "Current DB Section ID", "current_table_id": "Current Table ID",
@@ -860,6 +1018,19 @@ def flatten_transformer_rows(reports):
     return rows
 
 
+def flatten_fuse_rows(reports):
+    rows = []
+    for report in reports:
+        file_name = report.get("file_name", "")
+        for item in report.get("fuse_rows", []) or []:
+            row = dict(item)
+            for coordinate in ("x", "y", "w", "h"):
+                row.pop(coordinate, None)
+            row["file_name"] = file_name
+            rows.append(row)
+    return rows
+
+
 def flatten_master_station_rows(reports):
     rows = []
     for report in reports:
@@ -949,6 +1120,10 @@ def _is_transformer_reports(reports):
     )
 
 
+def _is_fuse_reports(reports):
+    return bool(reports and str(reports[0].get("report_type", "")).upper() == "FUSE")
+
+
 def _is_feeder_reports(reports):
     return bool(
         reports
@@ -991,6 +1166,10 @@ def flatten_feeder_rows(reports):
             "classification_reason": report.get("classification_reason", ""),
             "region_index": report.get("region_index", ""),
             "region_identity_confidence": report.get("region_identity_confidence", ""),
+            "main_source_feeder_count": report.get("main_source_feeder_count", ""),
+            "main_source_feeder_ids": report.get("main_source_feeder_ids", ""),
+            "nop_boundary_count": report.get("nop_boundary_count", ""),
+            "strict_geometry_repair_count": report.get("strict_geometry_repair_count", ""),
             "feeder_resolution_source": report.get(
                 "feeder_resolution_source",
                 report.get("feeder_hint_source", ""),
@@ -1052,6 +1231,28 @@ def flatten_feeder_rows(reports):
     return rows
 
 
+def flatten_graph_feeder_rows(reports):
+    """Flatten the common Makkah graph-feeder inventory attached to reports."""
+    rows = []
+    seen = set()
+    for report in reports or []:
+        fallback_file_name = report.get("file_name", "")
+        for source in report.get("graph_feeder_inventory", []) or []:
+            row = dict(source)
+            row["file_name"] = row.get("file_name") or fallback_file_name
+            key = (
+                str(row.get("file_name", "")),
+                str(row.get("graph_feeder", "")),
+                str(row.get("db_feeder_id", "")),
+                str(row.get("match_result", "")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    return rows
+
+
 def flatten_feedline_rows(reports):
     rows = []
     for report in reports:
@@ -1070,7 +1271,11 @@ def flatten_feedline_rows(reports):
             item.pop("topology_component", None)
             item.pop("topology_cross_region", None)
             item["file_name"] = file_name
-            item["feeder_name"] = feeder_name
+            item["feeder_name"] = (
+                item.get("assigned_feeder_name")
+                or item.get("current_feeder_name")
+                or feeder_name
+            )
             item["feeder_resolution_source"] = resolution_source
             rows.append(item)
 
@@ -1147,6 +1352,21 @@ def write_report(report, output_dir, domain_rules):
         export_html_bundle(reports, html_path, domain_rules)
         return html_path
 
+    if _is_fuse_reports(reports):
+        _write_csv(
+            output_dir / "fuse_details.csv",
+            flatten_fuse_rows(reports),
+            FUSE_FIELDS,
+            FUSE_LABELS,
+        )
+        (output_dir / "report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        html_path = output_dir / "index.html"
+        export_html_bundle(reports, html_path, domain_rules)
+        return html_path
+
     if _is_master_station_reports(reports):
         _write_csv(
             output_dir / "master_station_details.csv",
@@ -1187,6 +1407,26 @@ def write_report(report, output_dir, domain_rules):
 
 
 
+def _append_graph_feeder_csv(paths, reports, base, *, english, language):
+    rows = flatten_graph_feeder_rows(reports)
+    if not rows:
+        return list(paths)
+    feeder_path = base.with_name(
+        base.name + ("_graph_feeders.csv" if english else "_图形馈线.csv")
+    )
+    _write_csv(
+        feeder_path,
+        rows,
+        GRAPH_FEEDER_FIELDS,
+        GRAPH_FEEDER_LABELS_EN if english else GRAPH_FEEDER_LABELS,
+        language=language,
+    )
+    # Keep the historical return contract unchanged so existing UI buttons
+    # continue to point at the model-specific CSV files.  The common feeder
+    # CSV is emitted beside them with a deterministic file name.
+    return list(paths)
+
+
 def export_csv_bundle(reports, export_path, language="zh_CN"):
     export_path = Path(export_path)
     base = (
@@ -1210,7 +1450,9 @@ def export_csv_bundle(reports, export_path, language="zh_CN"):
             POLE_LABELS_EN if english else POLE_LABELS,
             language=language,
         )
-        return [pole_path]
+        return _append_graph_feeder_csv(
+            [pole_path], reports, base, english=english, language=language
+        )
 
     if _is_transformer_reports(reports):
         transformer_path = base.with_name(
@@ -1223,7 +1465,24 @@ def export_csv_bundle(reports, export_path, language="zh_CN"):
             TRANSFORMER_LABELS_EN if english else TRANSFORMER_LABELS,
             language=language,
         )
-        return [transformer_path]
+        return _append_graph_feeder_csv(
+            [transformer_path], reports, base, english=english, language=language
+        )
+
+    if _is_fuse_reports(reports):
+        fuse_path = base.with_name(
+            base.name + ("_fuse_details.csv" if english else "_熔断器明细.csv")
+        )
+        _write_csv(
+            fuse_path,
+            flatten_fuse_rows(reports),
+            FUSE_FIELDS,
+            FUSE_LABELS_EN if english else FUSE_LABELS,
+            language=language,
+        )
+        return _append_graph_feeder_csv(
+            [fuse_path], reports, base, english=english, language=language
+        )
 
     if _is_master_station_reports(reports):
         master_path = base.with_name(
@@ -1236,7 +1495,9 @@ def export_csv_bundle(reports, export_path, language="zh_CN"):
             MASTER_STATION_LABELS_EN if english else MASTER_STATION_LABELS,
             language=language,
         )
-        return [master_path]
+        return _append_graph_feeder_csv(
+            [master_path], reports, base, english=english, language=language
+        )
 
     if _is_feeder_reports(reports):
         feeder_path = base.with_name(
@@ -1248,18 +1509,24 @@ def export_csv_bundle(reports, export_path, language="zh_CN"):
         _write_csv(
             feeder_path,
             flatten_feeder_rows(reports),
-            FEEDER_FIELDS,
+            FEEDER_REPORT_FIELDS,
             FEEDER_LABELS_EN if english else FEEDER_LABELS,
             language=language,
         )
         _write_csv(
             section_path,
             flatten_feedline_rows(reports),
-            FEEDLINE_FIELDS,
+            FEEDLINE_REPORT_FIELDS,
             FEEDLINE_LABELS_EN if english else FEEDLINE_LABELS,
             language=language,
         )
-        return [feeder_path, section_path]
+        return _append_graph_feeder_csv(
+            [feeder_path, section_path],
+            reports,
+            base,
+            english=english,
+            language=language,
+        )
 
     rmu_path = base.with_name(base.name + ("_rmu_summary.csv" if english else "_环网柜汇总.csv"))
     dev_path = base.with_name(base.name + ("_device_details.csv" if english else "_设备明细.csv"))
@@ -1279,7 +1546,59 @@ def export_csv_bundle(reports, export_path, language="zh_CN"):
         language=language,
     )
 
-    return [rmu_path, dev_path]
+    return _append_graph_feeder_csv(
+        [rmu_path, dev_path], reports, base, english=english, language=language
+    )
+
+
+def _table_interaction_script(language="zh_CN"):
+    """Shared client-side behavior for report table text/color filters and row selection."""
+    english = normalize_language(language) == "en_US"
+    script = """<script>
+function toggleSelectedRow(cb) {
+  const row = cb.closest('tr');
+  if (!row) return;
+  row.classList.toggle('row-selected', cb.checked);
+}
+
+function getReportRowColor(row) {
+  if (row.classList.contains('pass')) return 'green';
+  if (row.classList.contains('warn')) return 'yellow';
+  if (row.classList.contains('relink') || row.classList.contains('create')) return 'orange';
+  if (row.classList.contains('rmu-relink')) return 'purple';
+  if (row.classList.contains('blocked') || row.classList.contains('info')) return 'blue';
+  if (row.classList.contains('fail')) return 'red';
+  return '';
+}
+
+function filterReportTable(tableId) {
+  const table = document.getElementById(tableId);
+  if (!table || !table.tBodies || !table.tBodies.length) return;
+  const textInput = document.getElementById(tableId + '-text-filter');
+  const colorSelect = document.getElementById(tableId + '-color-filter');
+  const query = String(textInput ? textInput.value : '').trim().toLocaleUpperCase();
+  const color = String(colorSelect ? colorSelect.value : 'all');
+  const rows = Array.from(table.tBodies[0].rows);
+  let visible = 0;
+  for (const row of rows) {
+    const haystack = String(row.textContent || '').toLocaleUpperCase();
+    const textMatched = !query || haystack.includes(query);
+    const rowColor = getReportRowColor(row);
+    const colorMatched = color === 'all' || rowColor === color;
+    const matched = textMatched && colorMatched;
+    row.style.display = matched ? '' : 'none';
+    if (matched) visible += 1;
+  }
+  const counter = document.getElementById(tableId + '-count');
+  if (counter) {
+    const filtered = Boolean(query) || color !== 'all';
+    counter.textContent = filtered
+      ? (__IS_ENGLISH__ ? ('Matched ' + visible + ' / ' + rows.length + ' rows') : ('匹配 ' + visible + ' / ' + rows.length + ' 行'))
+      : (__IS_ENGLISH__ ? (rows.length + ' rows') : ('共 ' + rows.length + ' 行'));
+  }
+}
+</script>"""
+    return script.replace("__IS_ENGLISH__", "true" if english else "false")
 
 def _table_html(
     rows,
@@ -1649,6 +1968,7 @@ def _export_feeder_html_bundle(reports, export_path, domain_rules, language="zh_
     export_path = Path(export_path)
     feeder_rows = flatten_feeder_rows(reports)
     feedline_rows = flatten_feedline_rows(reports)
+    graph_feeder_rows = flatten_graph_feeder_rows(reports)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     language = normalize_language(language)
     english = language == "en_US"
@@ -1660,9 +1980,23 @@ def _export_feeder_html_bundle(reports, export_path, domain_rules, language="zh_
         for tag, rule in domain_rules.items()
     )
 
+    graph_feeder_table = _table_html(
+        graph_feeder_rows,
+        GRAPH_FEEDER_FIELDS,
+        GRAPH_FEEDER_LABELS_EN if english else GRAPH_FEEDER_LABELS,
+        "match_result",
+        selectable=False,
+        table_id="graph-feeder-table",
+        filter_placeholder=(
+            "Enter a graph feeder name, FEEDER_ID, or station ID"
+            if english else "输入图形馈线名称、FEEDER_ID 或 ST_ID"
+        ),
+        language=language,
+    )
+
     feeder_table = _table_html(
         feeder_rows,
-        FEEDER_FIELDS,
+        FEEDER_REPORT_FIELDS,
         FEEDER_LABELS_EN if english else FEEDER_LABELS,
         "status",
         selectable=True,
@@ -1672,7 +2006,7 @@ def _export_feeder_html_bundle(reports, export_path, domain_rules, language="zh_
     )
     feedline_table = _table_html(
         feedline_rows,
-        FEEDLINE_FIELDS,
+        FEEDLINE_REPORT_FIELDS,
         FEEDLINE_LABELS_EN if english else FEEDLINE_LABELS,
         "status",
         selectable=True,
@@ -1682,9 +2016,9 @@ def _export_feeder_html_bundle(reports, export_path, domain_rules, language="zh_
     )
 
     feeder_rule_intro = (
-        "Feeder resolution uses exactly the operator-selected independent source: G-root facID, file name, or manual input. An existing facID is current-state evidence only and does not override the selected source. File-name mode supports both single files and batch folders; each file independently resolves its substation and feeder token (for example ABH + 03 -> AH303, while AH303 is used directly) and must produce one unique 13500 / dms_feeder_device match. Replacing a different existing facID/cross-feeder section association requires the explicit override option. Substation 405 determines feeder ownership; section BV_ID is selected from the station voltage levels. The only database write allowed is INSERT into 13503 / dms_section_device, using model Domain 1."
+        "This report shows feeder-section model results. All feeders shown by the drawing and their 13500 database comparison results are listed in the Graph Feeders table."
         if english else
-        "馈线识别规则：FACID、文件名、人工输入三种来源相互独立，本次只使用用户明确选择的来源。已有 G.facID 仅作为当前关联状态，不再强制覆盖用户选择。文件名模式同时支持单文件和批量目录，每个文件独立解析变电站与馈线号，例如 ABH + 03 可在站内唯一解析为 AH303，文件名已带 AH303 时则直接使用完整馈线号；最终必须唯一匹配 13500 / dms_feeder_device。若目标与当前 facID/馈线段归属不同，只有显式启用覆盖选项后才允许重关联。405 / substation 用于确定馈线所属变电站；创建馈线段的 BV_ID 从该站 402 / voltagelevel 中选择。唯一允许写入的数据库表是 13503 / dms_section_device，模型域号为 1。"
+        "本报告展示馈线段模型处理结果；当前图形中的全部馈线及其 13500 数据库对比结果见“图形馈线”表。"
     )
     feeder_status_desc = {
         "pass": "The FeedLine is already linked to a database section under this feeder with the correct table ID and Domain." if english else "当前 FeedLine 已经关联到本馈线下的数据库馈线段，表号/域号均正确。",
@@ -1692,15 +2026,20 @@ def _export_feeder_html_bundle(reports, export_path, domain_rules, language="zh_
         "create": "There are not enough available 13503 sections under this feeder. A new dms_section_device record must be created before generating the KeyID and associating this FeedLine." if english else "当前馈线数据库中没有足够的可用 13503 馈线段；该 FeedLine 需要先单独创建新的 dms_section_device 记录，再生成正确 KeyID 并完成关联。",
         "fail": "The feeder cannot be uniquely resolved, an existing feeder conflict has not been explicitly authorized for override, or another hard error prevents safe association." if english else "馈线无法唯一解析、现有馈线冲突未明确启用人工覆盖、无法安全确定目标或其它硬错误。",
     }
-    feeder_summary_intro = (
-        "A feeder is resolved from exactly one source: root facID, file name, or manual input. The selected source must uniquely match 13500 / dms_feeder_device. If uniqueness cannot be established, the result is FAIL and no section is created or associated."
+    graph_feeder_intro = (
+        "This table lists every feeder title found from the current drawing's main-network Bay frames, including database matches and unmatched/ambiguous results. No discovered feeder is omitted."
         if english else
-        "馈线通过三种互相独立的来源之一确定：G 根节点 facID、文件名、人工输入。默认使用 facID；所选来源必须单独唯一匹配到 13500 / dms_feeder_device，不与另外两种来源交叉分析。无法唯一确认时直接 FAIL，不创建馈线段，也不执行 FeedLine 关联。馈线报告不再包含任何 RMU / 环网柜拓扑判定字段。"
+        "本表必须完整列出当前 G 图主网 Bay 框识别到的所有馈线标题，并展示对应数据库匹配结果；即使未匹配或不唯一也保留显示，不遗漏任何已发现馈线。"
+    )
+    feeder_summary_intro = (
+        "This table summarizes topology-driven feeder allocation. Each FeedLine is validated only against its own topology-resolved feeder."
+        if english else
+        "本表展示按拓扑所属馈线执行的校验/分配汇总；每条 FeedLine 只允许关联到自己拓扑唯一确认的馈线。"
     )
     feedline_detail_intro = (
-        "After the feeder is uniquely confirmed, the program queries 13503 / dms_section_device for that FEEDER_ID. Existing correct links are preserved without geometric SEC reordering. Unlinked or stale FeedLines use available unoccupied sections first; only the real shortage is created. Association then completes LINK / RELINK using refreshed database records."
+        "This table shows each FeedLine's topology feeder, target FEEDER_ID, feeder-section creation, and association result."
         if english else
-        "唯一馈线确认后，程序查询该 FEEDER_ID 下的 13503 / dms_section_device。已正确关联到本馈线且表号/域号正确的 FeedLine 保持原关联，不按图形几何顺序强制重排 SEC；未关联或旧关联失效的 FeedLine 才使用当前馈线未占用的现有馈线段，真实数量不足时仅按短缺数量生成 SECnnn 创建计划。执行模型关联时先补齐缺失记录、重新查询数据库，再完成 LINK / RELINK。表格左侧复选框仅用于人工标记。"
+        "本表展示每条 FeedLine 的拓扑所属馈线、目标 FEEDER_ID、馈线段创建与关联结果。"
     )
 
     text = f"""<!doctype html>
@@ -1783,6 +2122,12 @@ td.select-col{{background:inherit}}
   </div>
 
   <div class="card">
+    <h2>{("All Feeders Found in Drawing" if english else "本图识别馈线（全部）")}</h2>
+    <p>{esc(graph_feeder_intro)}</p>
+    {graph_feeder_table}
+  </div>
+
+  <div class="card">
     <h2>{("Feeder Summary" if english else "馈线汇总")}</h2>
     <p>{esc(feeder_summary_intro)}</p>
     {feeder_table}
@@ -1851,11 +2196,13 @@ def _export_pole_html_bundle(reports, export_path, domain_rules, language="zh_CN
     labels = POLE_LABELS_EN if english else POLE_LABELS
     title = "Pole Switch Model Report" if english else "柱上开关模型报告"
     intro = (
-        "Only CBreakerDis objects whose element file is marked LBS, SEC, or AR in Element Management are included. "
-        "Each device independently resolves its name from the nearest eligible Text; RMU and connection topology are not analyzed."
+        "Only objects whose devref file name is present in the operator-maintained pole-switch list are included. "
+        "Every configured file is treated directly as a pole switch; AR/LBS/SEC classification and Element Management classifications are not used. "
+        "The 13501 parent and its 13502 child must both be unique before association."
         if english
         else
-        "本报告只展示 CBreakerDis 且对应图元文件在图元管理中标记为 LBS/SEC/AR 的柱上开关，"
+        "本报告只展示 devref 文件名命中用户维护【柱上开关图元名单】的对象；名单中的图元统一直接认定为柱上开关，"
+        "不再区分 AR/LBS/SEC，也不读取图元管理分类。13501 父设备和 13502 子设备都必须唯一后才允许关联。"
         "每个设备独立取最近合规 Text；Text.ts 中的换行名称会合并为空格后保留，"
         "kV、A、V 等单位文字不作为名称，"
         "并输出数据库链路和 KeyID 校验结果。"
@@ -1925,14 +2272,14 @@ def _export_transformer_html_bundle(reports, export_path, domain_rules, language
     labels = TRANSFORMER_LABELS_EN if english else TRANSFORMER_LABELS
     title = "Pole Transformer Model Report" if english else "柱上变压器模型报告"
     intro = (
-        "Only TransformerDis objects marked Transformer_OH in Element Management are included. "
+        "Only objects whose devref file name is present in the operator-maintained pole-transformer list are included; Element Management classification is not used. "
         "Each device independently resolves its name from the nearest eligible Text. "
-        "The feeder uses G-root facID, with a unique facName fallback; connection topology is not analyzed."
+        "Makkah association is name-only and does not resolve or validate any feeder ID; connection topology is not analyzed."
         if english
         else
-        "本报告只展示图元管理中标记为 Transformer_OH 的 TransformerDis 图元。"
-        "每个设备独立取整张 G 图中最近的合规 Text 直接解析，"
-        "馈线使用 G 根 facID，查不到时仅使用唯一 facName 兜底，不分析连接拓扑。"
+        "本报告只展示 devref 文件名命中用户维护【柱上变压器图元名单】的对象，图元管理 TRANSFORMER_OH 分类不再参与识别。"
+        "每个设备独立取整张 G 图中最近的合规 Text 直接解析。"
+        "麦加版本只按名称唯一查询 13505，不识别、不要求也不校验 FEEDER_ID，不分析连接拓扑。"
     )
     domain_rows = "<tr><td>TransformerDis</td><td>13505</td><td>1</td></tr>"
     table = _table_html(
@@ -1943,9 +2290,9 @@ def _export_transformer_html_bundle(reports, export_path, domain_rules, language
         selectable=True,
         table_id="transformer-table",
         filter_placeholder=(
-            "Enter a transformer name, feeder ID, devref, or XML ID"
+            "Enter a transformer name, devref, or XML ID"
             if english
-            else "输入变压器名称、馈线ID、devref 或 XML ID"
+            else "输入变压器名称、devref 或 XML ID"
         ),
         language=language,
     )
@@ -1978,15 +2325,37 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
 <div class="card"><h2>{'Status Legend' if english else '状态颜色说明'}</h2>
 <div class="status-list">
   <div class="status-item pass"><strong>{'Green PASS' if english else '绿色 PASS'}</strong><span>{'The current keyid1/keyid2 pair points to the correct transformer; no action is required.' if english else '当前 keyid1/keyid2 均已关联到正确的数据库变压器，无需处理。'}</span></div>
-  <div class="status-item warn"><strong>{'Yellow UNLINKED' if english else '黄色 UNLINKED'}</strong><span>{'The Text name, feeder, and 13505 target are unique; the transformer can be linked.' if english else '图上 Text 名称、馈线和 13505 目标均唯一，可以关联。'}</span></div>
+  <div class="status-item warn"><strong>{'Yellow UNLINKED' if english else '黄色 UNLINKED'}</strong><span>{'The Text name and 13505 target are unique; the transformer can be linked.' if english else '图上 Text 名称和 13505 目标均唯一，可以关联。'}</span></div>
   <div class="status-item relink"><strong>{'Orange RELINK' if english else '橙色 RELINK'}</strong><span>{'The existing transformer KeyID pair is stale or incomplete; the unique 13505 target can be written again.' if english else '已有变压器 KeyID 不完整或已失效，当前唯一 13505 目标可以重新关联。'}</span></div>
   <div class="status-item rmu-relink"><strong>{'Purple RMU_RELINK' if english else '紫色 RMU_RELINK'}</strong><span>{'Reserved for the shared association status palette.' if english else '沿用统一设备关联颜色体系的保留状态。'}</span></div>
   <div class="status-item blocked"><strong>{'Blue BLOCKED' if english else '蓝色 BLOCKED'}</strong><span>{'Manual confirmation is required.' if english else '需要人工确认。'}</span></div>
-  <div class="status-item fail"><strong>{'Red FAIL' if english else '红色 FAIL'}</strong><span>{'The feeder, name, target device, or Expected KeyID cannot be determined safely.' if english else '馈线、名称、目标设备或 Expected KeyID 无法安全确定。'}</span></div>
+  <div class="status-item fail"><strong>{'Red FAIL' if english else '红色 FAIL'}</strong><span>{'The name, target device, or Expected KeyID cannot be determined safely.' if english else '名称、目标设备或 Expected KeyID 无法安全确定。'}</span></div>
 </div></div>
 <div class="card"><h2>{'Pole Transformer Details' if english else '柱上变压器明细'}</h2>{table}</div>
 </main>
 </body></html>"""
+    export_path.write_text(text, encoding="utf-8")
+    return export_path
+
+
+def _export_fuse_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
+    export_path = Path(export_path)
+    language = normalize_language(language)
+    english = language == "en_US"
+    rows = flatten_fuse_rows(reports)
+    labels = FUSE_LABELS_EN if english else FUSE_LABELS
+    title = "Fuse Model Report" if english else "熔断器模型报告"
+    intro = (
+        "Only objects whose exact devref basenames are in the operator-maintained fuse element list are processed. Each fuse nominates its nearest configured pole transformer; one transformer can belong to only one fuse. Transformer naming reuses the Makkah pole-transformer rule with rectangle-edge distance up to 200. Makkah does not resolve or validate FEEDER_ID: 13505 and 13513 are both accepted only when NAME is unique."
+        if english else
+        "只处理用户在【熔断器模型配置】中维护的 devref 图元文件名单命中的图元；只要加入名单就认定为熔断器，不再读取【图元管理】FUSE 分类。每个熔断器只提名最近的用户配置柱上变压器，同一柱上变压器只能分给一个熔断器；变压器名称复用麦加规则，矩形最小边缘距离最大200。麦加不识别、不要求、不校验 FEEDER_ID：13505 和 13513 都只按 NAME 唯一匹配，唯一即关联。"
+    )
+    table = _table_html(rows, FUSE_FIELDS, labels, "status", selectable=True, table_id="fuse-table", filter_placeholder=("Enter fuse/transformer name or XML ID" if english else "输入熔断器名称、柱上变压器名称或XML ID"), language=language)
+    text = f"""<!doctype html><html lang=\"{'en' if english else 'zh-CN'}\"><head><meta charset=\"utf-8\"><title>{esc(title)}</title>
+<style>body{{font-family:\"Microsoft YaHei\",\"Segoe UI\",Arial,sans-serif;margin:0;background:#F3F7F5;color:#17372E}}header{{background:#006B52;color:white;padding:24px 32px;border-bottom:5px solid #00B578}}main{{padding:24px 30px}}.card{{background:white;border:1px solid #D3E3DC;border-radius:10px;padding:16px;margin-bottom:18px}}table{{border-collapse:collapse;width:100%;font-size:12px}}th{{background:#006B52;color:white;position:sticky;top:0}}th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowrap}}.scroll{{overflow:auto;max-height:700px}}.pass{{background:#EAF8F2}}.warn{{background:#FFF8DE}}.relink{{background:#FFE8CC}}.fail{{background:#FFF0F0}}.blocked,.info{{background:#EAF3FF}}.table-filter{{display:flex;align-items:center;gap:10px;margin:10px 0 12px;flex-wrap:wrap}}.table-filter-input{{width:min(560px,70vw);padding:8px 11px;border:1px solid #D3E3DC;border-radius:6px}}</style></head>
+<body><header><h1>{esc(title)}</h1><div>{esc(APP_NAME if not english else APP_NAME_EN)}　v{esc(APP_VERSION)}</div></header><main>
+<div class=\"card\"><h2>{'Association Rules' if english else '关联规则'}</h2><p>{esc(intro)}</p><table><thead><tr><th>Classification</th><th>Table ID</th><th>Domain</th><th>Database Table</th></tr></thead><tbody><tr><td>FUSE</td><td>13513</td><td>40</td><td>dms_disconnector_device</td></tr></tbody></table></div>
+<div class=\"card\"><h2>{'Fuse Details' if english else '熔断器明细'}</h2>{table}</div></main>{_table_interaction_script(language)}</body></html>"""
     export_path.write_text(text, encoding="utf-8")
     return export_path
 
@@ -2049,38 +2418,89 @@ th,td{{border:1px solid #D3E3DC;padding:6px 8px;text-align:left;white-space:nowr
     return export_path
 
 
+def _append_graph_feeder_html(path, reports, language="zh_CN"):
+    rows = flatten_graph_feeder_rows(reports)
+    if not rows:
+        return Path(path)
+
+    language = normalize_language(language)
+    english = language == "en_US"
+    labels = GRAPH_FEEDER_LABELS_EN if english else GRAPH_FEEDER_LABELS
+    title = "Graph Feeders" if english else "图形馈线"
+
+    header_cells = "".join(
+        f"<th style='background:#006B52;color:#fff;border:1px solid #D3E3DC;padding:6px 8px;white-space:nowrap'>{esc(labels[field])}</th>"
+        for field in GRAPH_FEEDER_FIELDS
+    )
+    body_rows = []
+    for row in rows:
+        cells = "".join(
+            f"<td style='border:1px solid #D3E3DC;padding:6px 8px;white-space:nowrap'>{esc(row.get(field, ''))}</td>"
+            for field in GRAPH_FEEDER_FIELDS
+        )
+        body_rows.append(f"<tr>{cells}</tr>")
+
+    card = (
+        "<div class='card' style='background:#fff;border:1px solid #D3E3DC;"
+        "border-radius:10px;padding:16px;margin-bottom:18px'>"
+        f"<h2>{esc(title)}</h2>"
+        "<div style='overflow:auto;max-height:650px'>"
+        "<table style='border-collapse:collapse;width:100%;font-size:12px'>"
+        f"<thead><tr>{header_cells}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table></div></div>"
+    )
+
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    if "<main>" in text:
+        text = text.replace("<main>", "<main>\n" + card, 1)
+    elif "</main>" in text:
+        text = text.replace("</main>", card + "\n</main>", 1)
+    else:
+        text = text.replace("</body>", card + "\n</body>", 1)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def export_html_bundle(reports, export_path, domain_rules, language="zh_CN"):
     if _is_pole_reports(reports):
-        return _export_pole_html_bundle(
+        path = _export_pole_html_bundle(
             reports,
             export_path,
             domain_rules,
             language=language,
         )
-    if _is_transformer_reports(reports):
-        return _export_transformer_html_bundle(
+    elif _is_transformer_reports(reports):
+        path = _export_transformer_html_bundle(
             reports,
             export_path,
             domain_rules,
             language=language,
         )
-    if _is_feeder_reports(reports):
-        return _export_feeder_html_bundle(
+    elif _is_fuse_reports(reports):
+        path = _export_fuse_html_bundle(
+            reports, export_path, domain_rules, language=language
+        )
+    elif _is_feeder_reports(reports):
+        path = _export_feeder_html_bundle(
             reports,
             export_path,
             domain_rules,
             language=language,
         )
-    if _is_master_station_reports(reports):
-        return _export_master_station_html_bundle(
+    elif _is_master_station_reports(reports):
+        path = _export_master_station_html_bundle(
             reports,
             export_path,
             domain_rules,
             language=language,
         )
-    return _export_rmu_html_bundle(
-        reports,
-        export_path,
-        domain_rules,
-        language=language,
-    )
+    else:
+        path = _export_rmu_html_bundle(
+            reports,
+            export_path,
+            domain_rules,
+            language=language,
+        )
+    return _append_graph_feeder_html(path, reports, language=language)

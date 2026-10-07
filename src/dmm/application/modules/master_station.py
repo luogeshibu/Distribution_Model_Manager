@@ -8,6 +8,10 @@ from pathlib import Path
 from dmm.application.modules.base import ModelModule
 from dmm.config.defaults import DEFAULT_MASTER_STATION_RULES
 from dmm.domain.gfile.parser import GParser
+from dmm.domain.gfile.master_station_frames import (
+    find_master_station_frames,
+    objects_inside_frame,
+)
 from dmm.domain.rmu.validator import int_or_none
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 
@@ -44,8 +48,10 @@ class MasterStationModelModule(ModelModule):
     module_id = "MASTER_STATION"
     display_name = "配网主站设备关联"
     description = (
-        "以每个 CBreaker 为锚点查找最近的 RMU 矩形框，只检查该框内部设备或保护信号的已有关联，"
-        "再反查厂站/馈线并按 G 文件 key_name 中的 CODE 精确关联主站设备表；不分析拓扑。"
+        "按含 CBreaker 的主网矩形框识别 Bay：每个框只使用最近的无背景合法馈线标题（颜色不限）"
+        "（如 MNA4-12 / ARF2-07 / SHM1-AH341_X），解析变电站和完整馈线编号后确定唯一 BAY_ID；"
+        "框内 Bus 只按已确认 ST_ID 从 410/busbarsection 任意取未使用记录；"
+        "CBreaker / Disconnector / GroundDisconnector 继续按对应 BAY_ID 关联，不分析全图拓扑。"
     )
     SUPPORTED_OPERATIONS = ("VALIDATE", "PREVIEW_ASSOCIATION", "APPLY_ASSOCIATION")
 
@@ -56,6 +62,14 @@ class MasterStationModelModule(ModelModule):
         for tag, default in DEFAULT_MASTER_STATION_RULES.items():
             item = dict(default)
             item.update(saved.get(tag, {}) or {})
+            # v4.1.74: Bus 410 / Domain 40 is now a fixed Makkah rule.
+            # Older Workspace settings may still persist the previous placeholder
+            # table_id=0; do not allow that stale value to disable Bus linking.
+            if tag == "Bus":
+                item["table_id"] = 410
+                item["domain"] = 40
+                item["table_name"] = "busbarsection"
+                item["description"] = "主站母线段"
             result[tag] = item
         return result
 
@@ -73,8 +87,12 @@ class MasterStationModelModule(ModelModule):
             "Disconnector": "31",
             "GroundDisconnector": "31",
         }.get(str(row.get("object_type") or ""), "41")
+        object_type = str(row.get("object_type") or "")
         return {
-            "app": "6500000",
+            # Main-network equipment follows the field DBI/G-file convention:
+            # Bus / CBreaker / Disconnector / GroundDisconnector all write
+            # app=100000.  State remains type-specific below.
+            "app": "100000",
             "voltype": bv_id,
             "p_ReportType": "1",
             "state": state,
@@ -335,7 +353,275 @@ class MasterStationModelModule(ModelModule):
             return context_station == record_station
         return True
 
-    def _resolve_object(self, obj, db, rules, context=None, context_error="", context_meta=None):
+    @staticmethod
+    def _norm_business(value):
+        return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+    @staticmethod
+    def _numeric_token_equal(left, right):
+        a = str(left or "").strip()
+        b = str(right or "").strip()
+        if not a.isdigit() or not b.isdigit():
+            return False
+        try:
+            return int(a) == int(b)
+        except ValueError:
+            return False
+
+    @classmethod
+    def _select_station(cls, rows, station_hint):
+        hint = cls._norm_business(station_hint)
+        exact = [row for row in rows if cls._norm_business(row.get("name")) == hint]
+        if exact:
+            return exact if len(exact) != 1 else exact
+        suffix = [
+            row for row in rows
+            if cls._norm_business(row.get("name")).endswith(hint)
+        ]
+        return suffix
+
+    @classmethod
+    def _rank_feeder_like_rows(cls, rows, full_label, feeder_hint):
+        """Return only the unique best-rank feeder/Bay candidates.
+
+        Full visible labels are strongest.  Local feeder numbers (07 vs 7)
+        are accepted only inside the already-resolved station.
+        """
+        full_norm = cls._norm_business(full_label)
+        feeder_norm = cls._norm_business(feeder_hint)
+        ranked = []
+        for row in rows:
+            values = [
+                str(row.get("graph_name") or "").strip(),
+                str(row.get("code") or "").strip(),
+                str(row.get("name") or "").strip(),
+            ]
+            norms = [cls._norm_business(value) for value in values if value]
+            rank = None
+            if full_norm and full_norm in norms:
+                rank = 0
+            elif feeder_norm and feeder_norm in norms:
+                rank = 1
+            elif any(
+                cls._numeric_token_equal(value, feeder_hint)
+                for value in values
+            ):
+                rank = 2
+            elif full_norm and any(
+                norm and full_norm.endswith(norm) for norm in norms
+            ):
+                rank = 3
+            if rank is not None:
+                ranked.append((rank, row))
+        if not ranked:
+            return []
+        best = min(rank for rank, _row in ranked)
+        return [row for rank, row in ranked if rank == best]
+
+    @classmethod
+    def _resolve_frame_context(cls, frame_info, db, cache):
+        """Resolve one CBreaker frame to station -> feeder -> BAY_ID.
+
+        The frame itself is the business boundary.  No nearest-RMU or global
+        topology fallback is allowed.
+        """
+        cache_key = frame_info.frame.xml_index
+        if cache_key in cache:
+            return cache[cache_key]
+
+        meta = {
+            "master_frame_xml_id": frame_info.frame.xml_id,
+            "master_frame_xml_index": frame_info.frame.xml_index,
+            "source_breaker_xml_id": (
+                frame_info.breaker.xml_id if frame_info.breaker else ""
+            ),
+            "source_breaker_count": len(frame_info.breakers),
+            "feeder_label": frame_info.feeder_label,
+            "feeder_label_text_xml_id": (
+                frame_info.label_obj.xml_id if frame_info.label_obj else ""
+            ),
+            "feeder_label_distance": (
+                round(frame_info.label_distance, 3)
+                if frame_info.label_distance is not None else ""
+            ),
+        }
+
+        if len(frame_info.breakers) != 1:
+            result = (
+                None,
+                "MASTER_STATION_FRAME_CBREAKER_NOT_UNIQUE: "
+                f"主网框内 CBreaker 数量={len(frame_info.breakers)}，"
+                "无法唯一确定 Bay，禁止自动关联。",
+                meta,
+            )
+            cache[cache_key] = result
+            return result
+
+        if not frame_info.feeder_label:
+            result = (
+                None,
+                "MASTER_STATION_WHITE_FEEDER_LABEL_NOT_FOUND: "
+                "主网框附近未找到 200 G 距离以内、无背景且格式合法的馈线名称（颜色不限）"
+                "（格式如 MNA4-12 / ARF2-07 / SHM1-AH341_X），禁止借用其它框标题。",
+                meta,
+            )
+            cache[cache_key] = result
+            return result
+
+        try:
+            stations = db.find_stations_by_name_hint(frame_info.station_hint)
+        except Exception as exc:
+            result = (
+                None,
+                f"MASTER_STATION_STATION_LOOKUP_ERROR: {exc}",
+                meta,
+            )
+            cache[cache_key] = result
+            return result
+        stations = cls._select_station(stations, frame_info.station_hint)
+        if len(stations) != 1:
+            result = (
+                None,
+                "MASTER_STATION_STATION_NOT_UNIQUE: "
+                f"名称={frame_info.station_hint} 匹配变电站数={len(stations)}。",
+                meta,
+            )
+            cache[cache_key] = result
+            return result
+        station = stations[0]
+        station_id = int_or_none(station.get("id"))
+        if station_id is None:
+            result = (None, "MASTER_STATION_STATION_ID_INVALID", meta)
+            cache[cache_key] = result
+            return result
+
+        # Bay is the authoritative main-network ownership key.  Resolve it
+        # directly inside the already-confirmed station using the visible
+        # MNA4-12 / ARF2-07 caption.  Feeder-table resolution is useful for
+        # reporting and feeder ownership, but is not allowed to block direct
+        # station-device association once the Bay itself is unique.
+        try:
+            bays = db.get_bays_by_station(station_id)
+        except Exception as exc:
+            result = (
+                None,
+                f"MASTER_STATION_BAY_LOOKUP_ERROR: {exc}",
+                meta,
+            )
+            cache[cache_key] = result
+            return result
+        bay_candidates = cls._rank_feeder_like_rows(
+            bays,
+            frame_info.feeder_label,
+            frame_info.feeder_hint,
+        )
+        if len(bay_candidates) != 1:
+            result = (
+                None,
+                "MASTER_STATION_BAY_NOT_UNIQUE: "
+                f"{frame_info.feeder_label} 在变电站 {station.get('name') or frame_info.station_hint} "
+                f"内匹配 Bay 数={len(bay_candidates)}。",
+                meta,
+            )
+            cache[cache_key] = result
+            return result
+        bay = bay_candidates[0]
+        bay_id = int_or_none(bay.get("id"))
+        if bay_id is None:
+            result = (None, "MASTER_STATION_BAY_ID_INVALID", meta)
+            cache[cache_key] = result
+            return result
+
+        # Feeder information is best-effort context after the Bay is known.
+        # Main-station device association remains Bay-driven even if 13500 uses
+        # a naming convention that does not uniquely match the visible title.
+        feeder = {}
+        feeder_id = None
+        try:
+            feeders = cls._rank_feeder_like_rows(
+                db.get_feeders_by_station(station_id),
+                frame_info.feeder_label,
+                frame_info.feeder_hint,
+            )
+            if len(feeders) == 1:
+                feeder = feeders[0]
+                feeder_id = int_or_none(feeder.get("id"))
+            elif hasattr(db, "find_feeders_by_bay"):
+                bay_hint = str(bay.get("code") or bay.get("name") or "").strip()
+                by_bay = db.find_feeders_by_bay(bay_hint, station_id)
+                if len(by_bay) == 1:
+                    feeder = by_bay[0]
+                    feeder_id = int_or_none(feeder.get("id"))
+        except Exception:
+            feeder = {}
+            feeder_id = None
+
+        try:
+            _breaker_table, breaker_rows = db.get_devices_by_bay(407, bay_id)
+        except Exception as exc:
+            result = (
+                None,
+                f"MASTER_STATION_BREAKER_BAY_LOOKUP_ERROR: {exc}",
+                meta,
+            )
+            cache[cache_key] = result
+            return result
+        if len(breaker_rows) != 1:
+            result = (
+                None,
+                "MASTER_STATION_BREAKER_BAY_NOT_UNIQUE: "
+                f"BAY_ID={bay_id} 对应 breaker 数={len(breaker_rows)}，"
+                "无法把图内 CBreaker 唯一落到数据库设备。",
+                meta,
+            )
+            cache[cache_key] = result
+            return result
+        breaker_row = breaker_rows[0]
+        breaker_bay = int_or_none(breaker_row.get("bay_id"))
+        breaker_station = int_or_none(breaker_row.get("st_id"))
+        if breaker_bay != bay_id or (
+            breaker_station is not None and breaker_station != station_id
+        ):
+            result = (
+                None,
+                "MASTER_STATION_BREAKER_BAY_CONTEXT_MISMATCH: "
+                "breaker.ST_ID/BAY_ID 与标题解析出的变电站/Bay 不一致。",
+                meta,
+            )
+            cache[cache_key] = result
+            return result
+
+        context = {
+            "source": "CBREAKER_FRAME_WHITE_LABEL_BAY",
+            "master_frame_xml_id": frame_info.frame.xml_id,
+            "master_frame_xml_index": frame_info.frame.xml_index,
+            "source_breaker_xml_id": frame_info.breaker.xml_id,
+            "source_breaker_db_id": int_or_none(breaker_row.get("id")) or "",
+            "source_breaker_db_code": str(breaker_row.get("code") or "").strip(),
+            "feeder_label": frame_info.feeder_label,
+            "feeder_label_text_xml_id": (
+                frame_info.label_obj.xml_id if frame_info.label_obj else ""
+            ),
+            "feeder_label_distance": meta["feeder_label_distance"],
+            "station_id": station_id,
+            "station_name": str(station.get("name") or "").strip(),
+            "feeder_id": feeder_id,
+            "feeder_code": str(feeder.get("code") or "").strip(),
+            "feeder_name": str(
+                feeder.get("graph_name") or feeder.get("name") or ""
+            ).strip(),
+            "bay_id": bay_id,
+            "bay_code": str(bay.get("code") or "").strip(),
+            "bay_name": str(bay.get("name") or "").strip(),
+        }
+        result = (context, "", meta)
+        cache[cache_key] = result
+        return result
+
+    def _resolve_object(
+        self, obj, db, rules, context=None, context_error="", context_meta=None,
+        assigned_record=None, assigned_table_name="", assignment_error="",
+    ):
         tag = obj.tag
         rule = dict(rules.get(tag, {}) or {})
         table_id = int(rule.get("table_id", 0) or 0)
@@ -368,12 +654,12 @@ class MasterStationModelModule(ModelModule):
         }
         if context_meta:
             row.update({
-                "context_rmu_frame_xml_id": context_meta.get("rmu_frame_xml_id", ""),
-                "context_rmu_id": context_meta.get("rmu_id", ""),
-                "context_rmu_name": context_meta.get("rmu_name", ""),
-                "context_anchor_type": context_meta.get("context_anchor_type", ""),
-                "context_anchor_xml_id": context_meta.get("context_anchor_xml_id", ""),
-                "context_anchor_keyid": context_meta.get("context_anchor_keyid", ""),
+                "context_master_frame_xml_id": context_meta.get("master_frame_xml_id", ""),
+                "context_source_breaker_xml_id": context_meta.get("source_breaker_xml_id", ""),
+                "context_source_breaker_count": context_meta.get("source_breaker_count", ""),
+                "context_feeder_label": context_meta.get("feeder_label", ""),
+                "context_feeder_label_text_xml_id": context_meta.get("feeder_label_text_xml_id", ""),
+                "context_feeder_label_distance": context_meta.get("feeder_label_distance", ""),
             })
         if context:
             row.update({
@@ -384,40 +670,88 @@ class MasterStationModelModule(ModelModule):
                 "context_feeder_code": context.get("feeder_code", ""),
                 "context_feeder_name": context.get("feeder_name", ""),
                 "context_bay_id": context.get("bay_id", ""),
-                "context_rmu_frame_xml_id": context.get("rmu_frame_xml_id", ""),
-                "context_rmu_id": context.get("rmu_id", ""),
-                "context_rmu_name": context.get("rmu_name", ""),
-                "context_anchor_type": context.get("context_anchor_type", ""),
-                "context_anchor_xml_id": context.get("context_anchor_xml_id", ""),
-                "context_anchor_keyid": context.get("context_anchor_keyid", ""),
+                "context_bay_code": context.get("bay_code", ""),
+                "context_bay_name": context.get("bay_name", ""),
+                "context_master_frame_xml_id": context.get("master_frame_xml_id", ""),
+                "context_source_breaker_xml_id": context.get("source_breaker_xml_id", ""),
+                "context_source_breaker_db_id": context.get("source_breaker_db_id", ""),
+                "context_source_breaker_db_code": context.get("source_breaker_db_code", ""),
+                "context_feeder_label": context.get("feeder_label", ""),
+                "context_feeder_label_text_xml_id": context.get("feeder_label_text_xml_id", ""),
+                "context_feeder_label_distance": context.get("feeder_label_distance", ""),
             })
         if context_error:
-            row["reason"] = (
-                f"{context_error}"
-            )
+            row["reason"] = str(context_error)
             return row
+
         self._current_link(row, db)
-        if not code:
-            row["reason"] = "MASTER_STATION_CODE_NOT_FOUND: G 图元 key_name 中未找到设备 CODE。"
-            return row
         if table_id <= 0:
             row["reason"] = "MASTER_STATION_TABLE_NOT_CONFIGURED: 该图元尚未配置数据库表号。"
             return row
-        try:
-            table_name, records = db.get_devices_by_code(table_id, code)
-            records = [
-                record for record in records
-                if self._record_matches_context(record, context, db)
-            ]
-            row["table_name"] = table_name
-        except Exception as exc:
-            row["reason"] = f"MASTER_STATION_TABLE_LOOKUP_ERROR: {exc}"
+        bay_id = int_or_none((context or {}).get("bay_id"))
+        station_id = int_or_none((context or {}).get("station_id"))
+        if tag == "Bus":
+            if station_id is None:
+                row["reason"] = "MASTER_STATION_STATION_CONTEXT_MISSING: 当前主网框没有唯一 ST_ID。"
+                return row
+        elif bay_id is None:
+            row["reason"] = "MASTER_STATION_BAY_CONTEXT_MISSING: 当前主网框没有唯一 BAY_ID。"
             return row
+
+        if assignment_error and tag == "Bus":
+            row["reason"] = str(assignment_error)
+            return row
+
+        if assigned_record is not None and tag == "Bus":
+            records = [dict(assigned_record)]
+            if assigned_table_name:
+                row["table_name"] = str(assigned_table_name)
+        else:
+            try:
+                if tag == "Bus" and hasattr(db, "get_devices_by_station"):
+                    table_name, records = db.get_devices_by_station(table_id, station_id)
+                else:
+                    table_name, records = db.get_devices_by_bay(table_id, bay_id)
+                row["table_name"] = table_name
+            except Exception as exc:
+                scope = "STATION" if tag == "Bus" else "BAY"
+                row["reason"] = f"MASTER_STATION_{scope}_DEVICE_LOOKUP_ERROR: {exc}"
+                return row
+
+        # CBreaker is already the authoritative breaker used to prove the Bay.
+        # Use that exact DB row instead of relying on key_name, which is empty in
+        # the supplied Makkah G files.
+        if tag == "CBreaker":
+            expected_breaker_id = int_or_none((context or {}).get("source_breaker_db_id"))
+            if expected_breaker_id is not None:
+                records = [
+                    record for record in records
+                    if int_or_none(record.get("id")) == expected_breaker_id
+                ]
+
+        # Bus assignments are prepared once per main-network frame before this
+        # method is called.  Bus intentionally ignores BAY_ID: table 410 is
+        # filtered only by the confirmed station ST_ID, then graphics are paired
+        # with any unused busbarsection rows in a stable arbitrary order.
+        #
+        # Disconnector/GroundDisconnector may legitimately have multiple rows in
+        # one Bay, so their graphical key_name CODE may disambiguate.  Never
+        # guess by order or global distance when CODE is absent.
+        if len(records) > 1 and code and tag not in {"CBreaker", "Bus"}:
+            code_records = [
+                record for record in records
+                if str(record.get("code") or "").strip() == code
+            ]
+            if code_records:
+                records = code_records
+
         row["db_match_count"] = len(records)
         if len(records) != 1:
             row["reason"] = (
-                "MASTER_STATION_CODE_NOT_UNIQUE: "
-                f"table={table_id} CODE={code} 匹配记录数={len(records)}。"
+                "MASTER_STATION_BAY_DEVICE_NOT_UNIQUE: "
+                f"table={table_id} BAY_ID={bay_id}"
+                + (f" CODE={code}" if code else "")
+                + f" 匹配记录数={len(records)}；禁止按顺序或距离猜测。"
             )
             return row
 
@@ -426,6 +760,24 @@ class MasterStationModelModule(ModelModule):
         if device_id is None:
             row["reason"] = "MASTER_STATION_DEVICE_ID_INVALID: 数据库 ID 无效。"
             return row
+        record_bay = int_or_none(record.get("bay_id"))
+        if tag != "Bus" and record_bay is not None and record_bay != bay_id:
+            row["reason"] = "MASTER_STATION_DEVICE_BAY_MISMATCH: 设备 BAY_ID 与主网框 BAY_ID 不一致。"
+            return row
+        if tag == "Bus":
+            record_station = int_or_none(record.get("st_id"))
+            context_station = int_or_none((context or {}).get("station_id"))
+            if (
+                record_station is not None
+                and context_station is not None
+                and record_station != context_station
+            ):
+                row["reason"] = (
+                    "MASTER_STATION_BUS_STATION_MISMATCH: "
+                    "410/busbarsection.ST_ID 与主网框变电站不一致。"
+                )
+                return row
+
         expected = self._expected_keyid(device_id, domain)
         row.update({
             "db_device_id": device_id,
@@ -471,50 +823,189 @@ class MasterStationModelModule(ModelModule):
                 "association_action": "关联主站设备" if not row.get("current_keyid") else "重新关联主站设备",
                 "writeback_needed": "YES",
                 "association_ready": "YES",
-                "reason": "MASTER_STATION_ASSOCIATION_READY",
+                "reason": (
+                    "MASTER_STATION_BUS_ASSOCIATION_READY_BY_STATION"
+                    if tag == "Bus" else "MASTER_STATION_ASSOCIATION_READY_BY_BAY"
+                ),
             })
         return row
+
+    @staticmethod
+    def _prepare_bus_assignments(db, bus_objects, table_id, domain, context):
+        """Allocate table-410 Bus rows from the confirmed station only.
+
+        Makkah Bus association deliberately ignores BAY_ID.  After the main
+        frame has established a unique station ST_ID, all 410/busbarsection rows
+        under that station are candidates.  Each graphical Bus receives any one
+        unused row.  Existing valid links are preserved first; remaining Bus
+        elements use stable XML order and database-ID order so repeated runs do
+        not reshuffle the arbitrary mapping.
+        """
+        bus_objects = list(bus_objects or [])
+        if not bus_objects:
+            return {}, "", ""
+
+        station_id = int_or_none((context or {}).get("station_id"))
+        if station_id is None:
+            return {}, "", "MASTER_STATION_STATION_CONTEXT_MISSING: 当前主网框没有唯一 ST_ID。"
+
+        try:
+            if hasattr(db, "get_devices_by_station"):
+                table_name, records = db.get_devices_by_station(int(table_id), station_id)
+            else:
+                # Compatibility for older adapters/test doubles.  Production
+                # OracleDatabase provides get_devices_by_station().
+                bay_id = int_or_none((context or {}).get("bay_id"))
+                table_name, records = db.get_devices_by_bay(int(table_id), bay_id)
+        except Exception as exc:
+            return {}, "", f"MASTER_STATION_STATION_DEVICE_LOOKUP_ERROR: {exc}"
+
+        records = [
+            dict(item) for item in (records or [])
+            if int_or_none(item.get("st_id")) in (None, station_id)
+        ]
+        if len(records) < len(bus_objects):
+            return (
+                {},
+                str(table_name or "busbarsection"),
+                "MASTER_STATION_BUS_COUNT_MISMATCH: "
+                f"ST_ID={station_id} 图形 Bus 数={len(bus_objects)}，"
+                f"410/busbarsection 可用数={len(records)}；可用记录不足。",
+            )
+
+        buses = sorted(bus_objects, key=lambda obj: int(getattr(obj, "xml_index", 0) or 0))
+        records = sorted(
+            records,
+            key=lambda item: (
+                int_or_none(item.get("id")) is None,
+                int_or_none(item.get("id")) or 0,
+                str(item.get("code") or ""),
+                str(item.get("name") or ""),
+            ),
+        )
+        record_by_id = {
+            int_or_none(item.get("id")): item
+            for item in records
+            if int_or_none(item.get("id")) is not None
+        }
+        assignments = {}
+        used_ids = set()
+
+        # Preserve an existing valid 410/Domain-40 link when the device belongs
+        # to this station, regardless of its BAY_ID.
+        for obj in buses:
+            current_keyid = int_or_none(getattr(obj, "keyid", None))
+            if current_keyid is None:
+                continue
+            try:
+                decoded = db.verify_keyid(current_keyid)
+            except Exception:
+                continue
+            if (
+                int_or_none(decoded.get("tab_no")) != int(table_id)
+                or int_or_none(decoded.get("col_no")) != int(domain)
+            ):
+                continue
+            device_id = int_or_none(decoded.get("device_id"))
+            if device_id in record_by_id and device_id not in used_ids:
+                assignments[obj.xml_index] = record_by_id[device_id]
+                used_ids.add(device_id)
+
+        remaining_buses = [obj for obj in buses if obj.xml_index not in assignments]
+        remaining_records = [
+            item for item in records
+            if int_or_none(item.get("id")) not in used_ids
+        ]
+        for obj, record in zip(remaining_buses, remaining_records):
+            assignments[obj.xml_index] = record
+
+        return assignments, str(table_name or "busbarsection"), ""
 
     def _analyze_file(self, db, g_file, settings, log_callback, progress_callback=None):
         parsed = GParser().parse(g_file)
         rules = self._rules(settings)
-        frames = GParser().find_rmu_frames(parsed)
-        breakers = [obj for obj in parsed.objects if obj.tag == "CBreaker"]
+        frames = find_master_station_frames(parsed)
         context_cache = {}
+
+        target_objects = [obj for obj in parsed.objects if obj.tag in TARGET_TAGS]
+        framed_items = []
+        seen = set()
+        for frame_info in frames:
+            inside = objects_inside_frame(parsed, frame_info.frame, TARGET_TAGS)
+            for obj in inside:
+                if obj.xml_index in seen:
+                    continue
+                seen.add(obj.xml_index)
+                framed_items.append((frame_info, obj))
+        outside_count = sum(1 for obj in target_objects if obj.xml_index not in seen)
+
         if log_callback:
-            if frames:
-                log_callback(
-                    f"[{Path(g_file).name}] 主站设备关联按局部范围执行："
-                    f"断路器={len(breakers)}；环网柜矩形框={len(frames)}；"
-                    "每个对象只使用最近断路器对应 RMU 框内的已有关联。"
-                )
-            else:
-                log_callback(
-                    f"[{Path(g_file).name}] 主站设备关联阻断："
-                    "G 文件未找到环网柜矩形框，该图环网柜请手动关联。"
-                )
-        objects = [obj for obj in parsed.objects if obj.tag in TARGET_TAGS]
+            log_callback(
+                f"[{Path(g_file).name}] 主站 Bay 框识别："
+                f"含 CBreaker 的最内层矩形框={len(frames)}；"
+                f"框内目标图元={len(framed_items)}；框外忽略={outside_count}。"
+            )
+
         rows = []
-        total = max(len(objects), 1)
-        for index, obj in enumerate(objects, 1):
-            obj.attrs["_file_name"] = Path(g_file).name
-            context, context_error, context_meta = self._resolve_local_context(
-                parsed, obj, breakers, frames, db, context_cache
+        total = max(len(framed_items), 1)
+        current = 0
+        for frame_info in frames:
+            context, context_error, context_meta = self._resolve_frame_context(
+                frame_info, db, context_cache
             )
-            if log_callback and context:
-                log_callback(
-                    f"[{Path(g_file).name}] {obj.tag} XML ID={obj.xml_id or '-'}："
-                    f"最近 RMU 框={context.get('rmu_frame_xml_id') or '-'}；"
-                    f"关联锚点={context.get('context_anchor_type') or '-'}"
-                    f"/{context.get('context_anchor_xml_id') or '-'}；"
-                    f"馈线={context.get('feeder_code') or context.get('feeder_id') or '-'}。"
+            if log_callback:
+                if context:
+                    log_callback(
+                        f"[{Path(g_file).name}] 主网框 XML ID={frame_info.frame.xml_id or '-'}："
+                        f"无背景合法标题（颜色不限）={context.get('feeder_label') or '-'}；"
+                        f"变电站={context.get('station_name') or context.get('station_id') or '-'}；"
+                        f"馈线={context.get('feeder_name') or context.get('feeder_code') or context.get('feeder_id') or '-'}；"
+                        f"BAY_ID={context.get('bay_id') or '-'}。"
+                    )
+                else:
+                    log_callback(
+                        f"[{Path(g_file).name}] 主网框 XML ID={frame_info.frame.xml_id or '-'}："
+                        f"{context_error}"
+                    )
+
+            frame_objects = objects_inside_frame(parsed, frame_info.frame, TARGET_TAGS)
+            bus_objects = [obj for obj in frame_objects if obj.tag == "Bus"]
+            bus_assignments = {}
+            bus_table_name = ""
+            bus_assignment_error = ""
+            if context and bus_objects:
+                bus_rule = dict(rules.get("Bus", {}) or {})
+                bus_assignments, bus_table_name, bus_assignment_error = self._prepare_bus_assignments(
+                    db,
+                    bus_objects,
+                    int(bus_rule.get("table_id", 410) or 410),
+                    int(bus_rule.get("domain", 40) or 40),
+                    context,
                 )
-            row = self._resolve_object(
-                obj, db, rules, context, context_error, context_meta
-            )
-            rows.append(row)
-            if progress_callback:
-                progress_callback(index, total, f"正在处理主站设备 {index}/{len(objects)}")
+
+            for obj in frame_objects:
+                if any(existing.get("_xml_index") == obj.xml_index for existing in rows):
+                    continue
+                current += 1
+                obj.attrs["_file_name"] = Path(g_file).name
+                row = self._resolve_object(
+                    obj, db, rules, context, context_error, context_meta,
+                    assigned_record=bus_assignments.get(obj.xml_index) if obj.tag == "Bus" else None,
+                    assigned_table_name=bus_table_name if obj.tag == "Bus" else "",
+                    assignment_error=bus_assignment_error if obj.tag == "Bus" else "",
+                )
+                row["_xml_index"] = obj.xml_index
+                rows.append(row)
+                if progress_callback:
+                    progress_callback(
+                        current,
+                        total,
+                        f"正在处理主站 Bay 框设备 {current}/{len(framed_items)}",
+                    )
+
+        for row in rows:
+            row.pop("_xml_index", None)
+
         if log_callback:
             log_callback(
                 f"[{Path(g_file).name}] 配网主站设备识别完成：图元={len(rows)}；"
@@ -526,20 +1017,35 @@ class MasterStationModelModule(ModelModule):
             "report_type": "MASTER_STATION",
             "master_station_rows": rows,
             "association_context": {
-                "mode": "nearest_cbreaker_nearest_rmu",
-                "rmu_frame_count": len(frames),
-                "cbreaker_count": len(breakers),
-                "message": "每个对象按最近断路器对应的最近环网柜框内关联反查。",
+                "mode": "cbreaker_frame_white_label_bay",
+                "master_frame_count": len(frames),
+                "framed_target_count": len(framed_items),
+                "outside_frame_ignored_count": outside_count,
+                "message": (
+                    "只处理含 CBreaker 的最内层主网矩形框；"
+                    "每框使用最近的无背景合法馈线标题（颜色不限）解析变电站/馈线/BAY_ID；"
+                    "Bus 仅按已确认 ST_ID 从 410/busbarsection 任意一对一选择，"
+                    "CBreaker/Disconnector/GroundDisconnector 继续按 BAY_ID 关联。"
+                ),
             },
             "summary": {
                 "master_station_count": len(rows),
+                "master_station_frame_count": len(frames),
+                "master_station_outside_frame_ignored": outside_count,
                 "master_station_pass": sum(1 for row in rows if row.get("status") == "PASS"),
                 "master_station_fail": sum(1 for row in rows if row.get("status") == "FAIL"),
                 "master_station_unlinked": sum(1 for row in rows if row.get("status") == "UNLINKED"),
                 "master_station_relink": sum(1 for row in rows if row.get("status") == "RELINK"),
-                "association_ready_count": sum(1 for row in rows if row.get("association_ready") == "YES" and row.get("writeback_needed") == "YES"),
-                "feeder_context_ready": "LOCAL_PER_RMU",
-                "feeder_context_message": "未使用全局设备兜底；无 RMU 或框内无有效关联时逐对象阻断。",
+                "association_ready_count": sum(
+                    1 for row in rows
+                    if row.get("association_ready") == "YES"
+                    and row.get("writeback_needed") == "YES"
+                ),
+                "feeder_context_ready": "FRAME_BAY",
+                "feeder_context_message": (
+                    "CBreaker 框 + 无背景合法馈线标题（颜色不限） -> 变电站/馈线/BAY_ID；"
+                    "不依赖环网柜已有 KeyID，也不执行全图拓扑推断。"
+                ),
             },
         }
 
@@ -611,17 +1117,68 @@ class MasterStationModelModule(ModelModule):
         executable = defaultdict(list)
         execution_rows = []
         for source_file, changes in preview_data.get("changes_by_file", {}).items():
+            # Execution is not allowed to trust a stale validation snapshot.
+            # Re-run the current database/Bay/ST_ID checks once for this file,
+            # then require every selected XML object to resolve to the SAME
+            # target table/domain/device/Expected-KeyID that the user reviewed.
+            refreshed_report = self._analyze_file(
+                db, source_file, settings, log_callback, progress_callback=None
+            )
+            refreshed_rows = {
+                (str(item.get("object_type") or ""), str(item.get("xml_id") or "")): item
+                for item in refreshed_report.get("master_station_rows", [])
+            }
             for change in changes:
                 row = dict(change.get("validated_row", {}) or {})
-                if row.get("association_ready") != "YES":
+                key = (str(row.get("object_type") or ""), str(row.get("xml_id") or ""))
+                fresh = dict(refreshed_rows.get(key, {}) or {})
+                if not fresh:
                     row["_execution_result"] = "SKIPPED"
+                    row["reason"] = (
+                        "MASTER_STATION_EXECUTION_RECHECK_MISSING: "
+                        "执行前重新校验时未找到当前目标图元。"
+                    )
                     execution_rows.append((change, row))
                     continue
+                if fresh.get("association_ready") != "YES" or fresh.get("writeback_needed") != "YES":
+                    row["_execution_result"] = "SKIPPED"
+                    row["reason"] = (
+                        "MASTER_STATION_EXECUTION_RECHECK_BLOCKED: "
+                        + str(fresh.get("reason") or "数据库当前目标不再满足自动关联条件。")
+                    )
+                    execution_rows.append((change, row))
+                    continue
+
+                original_target = (
+                    int_or_none(row.get("table_id")),
+                    int_or_none(row.get("configured_domain")),
+                    int_or_none(row.get("db_device_id")),
+                    int_or_none(row.get("expected_keyid")),
+                )
+                current_target = (
+                    int_or_none(fresh.get("table_id")),
+                    int_or_none(fresh.get("configured_domain")),
+                    int_or_none(fresh.get("db_device_id")),
+                    int_or_none(fresh.get("expected_keyid")),
+                )
+                if current_target != original_target:
+                    row["_execution_result"] = "SKIPPED"
+                    row["reason"] = (
+                        "MASTER_STATION_EXECUTION_TARGET_CHANGED: "
+                        f"校验目标={original_target}，执行前数据库目标={current_target}；"
+                        "禁止在未重新确认的情况下写入不同目标。"
+                    )
+                    execution_rows.append((change, row))
+                    continue
+
                 refreshed = dict(change)
-                refreshed["attributes"] = self._attributes_for_row(row)
+                refreshed["validated_row"] = fresh
+                # BV_ID is taken from the freshly rechecked DB row, while the
+                # approved target identity remains unchanged.
+                refreshed["attributes"] = self._attributes_for_row(fresh)
                 executable[source_file].append(refreshed)
-                row["_execution_result"] = "READY"
-                execution_rows.append((refreshed, row))
+                fresh["_execution_result"] = "READY"
+                execution_rows.append((refreshed, fresh))
 
         output_dir = Path(output_g_dir)
         output_dir.mkdir(parents=True, exist_ok=True)

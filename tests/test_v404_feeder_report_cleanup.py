@@ -23,7 +23,7 @@ def test_feedline_schema_has_no_topology_region_columns():
     assert "region_assignment_method" not in writer.FEEDLINE_FIELDS
 
 
-def test_feeder_report_uses_only_direct_identification_wording():
+def test_feeder_report_hides_identification_logic_from_user_output():
     source = (
         Path(__file__).parents[1]
         / "src/dmm/infrastructure/reporting/writer.py"
@@ -40,8 +40,13 @@ def test_feeder_report_uses_only_direct_identification_wording():
     for text in obsolete:
         assert text not in source
 
-    assert "facID" in source and "文件名" in source and "人工输入" in source
-    assert "馈线报告不再包含任何 RMU / 环网柜拓扑判定字段" in source
+    assert "馈线识别规则：FACID、文件名、人工输入" not in source
+    assert "本报告展示馈线段模型处理结果" in source
+    assert "图形馈线" in source
+    assert "feeder_resolution_source" not in writer.FEEDER_REPORT_FIELDS
+    assert "feeder_resolution_evidence" not in writer.FEEDER_REPORT_FIELDS
+    assert "ownership_method" not in writer.FEEDLINE_REPORT_FIELDS
+    assert "ownership_evidence" not in writer.FEEDLINE_REPORT_FIELDS
 
 
 def test_feeder_summary_contains_new_database_preparation_fields():

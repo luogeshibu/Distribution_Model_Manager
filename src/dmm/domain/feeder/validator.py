@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from dmm.domain.gfile.parser import GParser, GObject, ParsedG, Box
 from dmm.domain.feeder.topology import FeederDrawingTopologyClassifier
+from dmm.domain.feeder.ownership import FeederOwnershipResolver
 from dmm.config.constants import (
     RMU_LABEL_SEARCH_MAX_DISTANCE,
     RMU_LABEL_EDGE_TOLERANCE,
@@ -86,9 +87,12 @@ class FeederValidator:
     """
     Feeder G-file validator for single and multi-feeder ring drawings.
 
-    Feeder identity is taken from the nearest already-associated RMU,
-    pole-switch, or pole-transformer model.  A nearby unassociated device is
-    an explicit blocker rather than a reason to guess from text or filenames.
+    Single-feeder files keep the existing RMU/device validation path. Makkah
+    multi-feeder ring drawings use feeder ownership resolution: main-station
+    CBreaker sources establish the feeder set, trusted associated devices add
+    local FEEDER_ID evidence, NOP labels stop propagation, and only strict
+    endpoint geometry repairs missing XML links. Conflicts are blocked rather
+    than guessed from global nearest-device distance.
 
     FeedLine mapping:
       - already-linked FeedLine: only verify its current KeyID resolves to
@@ -423,9 +427,18 @@ class FeederValidator:
         """Resolve a linked RMU/switch/transformer object to its feeder.
 
         FeedLine association is deliberately downstream of the other model
-        modules.  Only an already-written KeyID is accepted as evidence; a
-        nearby symbol without a resolvable model is therefore a hard warning.
+        modules. Only an already-written KeyID is accepted as evidence. The
+        result is cached per XML object because multi-feeder ownership analysis
+        may consult the same linked device several times.
         """
+        cache = getattr(self, "_model_reference_cache", None)
+        if cache is None:
+            cache = {}
+            self._model_reference_cache = cache
+        cache_key = str(obj.xml_id or f"@{obj.xml_index}")
+        if cache_key in cache:
+            return cache[cache_key]
+
         raw_keyids = []
         for key in ("keyid", "keyid1", "keyid2"):
             value = norm(obj.attrs.get(key))
@@ -464,7 +477,7 @@ class FeederValidator:
                 feeder_id = int_or_none(rmu.get("feeder_id"))
             if feeder_id is None:
                 continue
-            return {
+            result = {
                 "keyid": raw_keyid,
                 "device_id": device_id,
                 "table_id": table_id,
@@ -472,6 +485,9 @@ class FeederValidator:
                 "device_name": norm(device.get("name") or device.get("code")),
                 "device": device,
             }
+            cache[cache_key] = result
+            return result
+        cache[cache_key] = None
         return None
 
     def _nearest_feedline_reference(
@@ -2147,29 +2163,44 @@ class FeederValidator:
         anchors = region.get("rmu_anchors", [])
         trusted = [a for a in anchors if a.get("trusted")]
         ignored = [a for a in anchors if not a.get("trusted")]
-        nearest_refs = {
-            obj.xml_id: self._nearest_feedline_reference(parsed, obj, anchors)
-            for obj in feedlines
-        }
-        nearby_feeder_ids = sorted({
-            int(ref["model"]["feeder_id"])
-            for ref in nearest_refs.values()
-            if ref.get("model")
-            and int_or_none(ref["model"].get("feeder_id")) is not None
-        })
-        feeder_ids = sorted({
-            int(a["feeder_id"])
-            for a in trusted
-            if int_or_none(a.get("feeder_id")) is not None
-        } | set(nearby_feeder_ids))
+        ownership_by_feedline = dict(region.get("ownership_by_feedline", {}) or {})
+        confirmed_feeder_id = int_or_none(region.get("confirmed_feeder_id"))
+        ownership_mode = confirmed_feeder_id is not None or bool(ownership_by_feedline)
+
+        if ownership_mode:
+            nearest_refs = {}
+            nearby_feeder_ids = []
+            feeder_ids = [confirmed_feeder_id] if confirmed_feeder_id is not None else []
+            assignment_method = "MAIN_SOURCE+LOCAL_TOPOLOGY+NOP"
+            drawing_type = "FEEDER_OWNERSHIP"
+        else:
+            nearest_refs = {
+                obj.xml_id: self._nearest_feedline_reference(parsed, obj, anchors)
+                for obj in feedlines
+            }
+            nearby_feeder_ids = sorted({
+                int(ref["model"]["feeder_id"])
+                for ref in nearest_refs.values()
+                if ref.get("model")
+                and int_or_none(ref["model"].get("feeder_id")) is not None
+            })
+            feeder_ids = sorted({
+                int(a["feeder_id"])
+                for a in trusted
+                if int_or_none(a.get("feeder_id")) is not None
+            } | set(nearby_feeder_ids))
+            assignment_method = "RMU_TOPOLOGY+FEEDER_ID"
+            drawing_type = "RMU_TOPOLOGY"
 
         report = {
             "report_type": "FEEDER",
             "g_file": str(parsed.path),
             "file_name": parsed.path.name,
-            "drawing_type": "RMU_TOPOLOGY",
+            "drawing_type": drawing_type,
             "region_index": region.get("region_index", 1),
-            "region_assignment_method": "RMU_TOPOLOGY+FEEDER_ID",
+            "region_assignment_method": assignment_method,
+            "feeder_resolution_source": assignment_method,
+            "feeder_resolution_evidence": region.get("feeder_resolution_evidence", ""),
             "feeder_hint": "",
             "feeder_normalized_hint": "",
             "feeder_hint_source": "NOT_USED",
@@ -2187,7 +2218,7 @@ class FeederValidator:
                 f"{a.get('rmu_name', '')}({a.get('rmu_type', 'UNKNOWN')})"
                 for a in trusted
             ),
-            "trusted_feeder_ids": ", ".join(str(x) for x in feeder_ids),
+            "trusted_feeder_ids": ", ".join(str(x) for x in feeder_ids if x is not None),
             "ignored_rmu_details": " | ".join(
                 f"{a.get('rmu_name') or '-'}({a.get('rmu_type', 'UNKNOWN')}):{a.get('reason')}"
                 for a in ignored
@@ -2195,26 +2226,39 @@ class FeederValidator:
             "rmu_reference_rows": [
                 {k: v for k, v in a.items() if k != "frame"} for a in anchors
             ],
+            "main_source_feeder_count": region.get("main_source_feeder_count", ""),
+            "main_source_feeder_ids": region.get("main_source_feeder_ids", ""),
+            "nop_boundary_count": region.get("nop_boundary_count", ""),
+            "strict_geometry_repair_count": region.get("strict_geometry_repair_count", ""),
         }
 
         def blocked(reason):
             report["reason"] = reason
             for idx, obj in enumerate(feedlines, start=1):
                 row = self._new_row(obj, idx)
+                ownership = ownership_by_feedline.get(obj.xml_id, {})
                 row.update({
                     "drawing_type": report["drawing_type"],
                     "region_index": report["region_index"],
                     "region_assignment_method": report["region_assignment_method"],
-                    "topology_component": report["region_index"],
+                    "topology_component": ownership.get("component", report["region_index"]),
+                    "ownership_status": ownership.get("status", ""),
+                    "ownership_method": ownership.get("method", ""),
+                    "ownership_candidate_feeder_ids": ownership.get("candidate_feeder_ids", ""),
+                    "ownership_evidence": ownership.get("evidence", ""),
                     "status": "FAIL",
                     "severity": "BLOCKED",
-                    "reason": reason,
+                    "reason": ownership.get("reason") or reason,
                 })
                 report["feedline_rows"].append(row)
             report["summary"] = self._summary(report)
             return report
 
-        if not trusted and not nearby_feeder_ids:
+        forced_block_reason = str(region.get("forced_block_reason") or "").strip()
+        if forced_block_reason:
+            return blocked(forced_block_reason)
+
+        if not ownership_mode and not trusted and not nearby_feeder_ids:
             return blocked(
                 "NO_NEARBY_ASSOCIATED_DEVICE_MODEL: 未关联附近设备模型，"
                 "馈线段无法创建模型或者关联模型"
@@ -2227,8 +2271,11 @@ class FeederValidator:
                 "FEEDER_RMU_CONFLICT: 当前连接区域的可信环网柜来自不同FEEDER_ID，"
                 f"禁止自动关联，请人工确认。{detail}"
             )
-        if len(feeder_ids) != 1:
-            return blocked("FEEDER_ID_NOT_CONFIRMED_BY_RMU")
+        if len(feeder_ids) != 1 or feeder_ids[0] is None:
+            return blocked(
+                "FEEDER_OWNERSHIP_NOT_CONFIRMED"
+                if ownership_mode else "FEEDER_ID_NOT_CONFIRMED_BY_RMU"
+            )
 
         feeder_id = feeder_ids[0]
         report["feeder_id"] = feeder_id
@@ -2316,47 +2363,70 @@ class FeederValidator:
                 "region_assignment_method": report["region_assignment_method"],
                 "topology_component": report["region_index"],
             })
-            nearby = nearest_refs.get(obj.xml_id, {})
-            nearby_model = nearby.get("model") or {}
-            row.update({
-                "nearest_device_type": nearby.get("type", ""),
-                "nearest_device_xml_id": nearby.get("xml_id", ""),
-                "nearest_device_distance": nearby.get("distance", ""),
-                "nearest_device_model": (
-                    "YES" if nearby_model else "NO"
-                ),
-                "nearest_device_feeder_id": nearby_model.get("feeder_id", ""),
-                "nearest_device_name": nearby_model.get("device_name", ""),
-            })
-            if not nearby_model:
+            ownership = ownership_by_feedline.get(obj.xml_id, {})
+            if ownership_mode:
                 row.update({
-                    "status": "FAIL",
-                    "severity": "NEARBY_MODEL_MISSING",
-                    "association_ready": "NO",
-                    "writeback_needed": "NO",
-                    "reason": (
-                        "NEARBY_DEVICE_MODEL_NOT_ASSOCIATED: "
-                        f"最近设备={nearby.get('type') or '未找到'}；"
-                        "未关联附近设备模型，馈线段无法创建模型或者关联模型"
-                    ),
+                    "topology_component": ownership.get("component", report["region_index"]),
+                    "ownership_status": ownership.get("status", ""),
+                    "ownership_method": ownership.get("method", ""),
+                    "ownership_candidate_feeder_ids": ownership.get("candidate_feeder_ids", ""),
+                    "ownership_evidence_sources": ownership.get("evidence_sources", ""),
+                    "ownership_evidence": ownership.get("evidence", ""),
+                    "ownership_evidence_count": ownership.get("evidence_count", ""),
                 })
-                rows.append(row)
-                continue
-            nearby_feeder_id = int_or_none(nearby_model.get("feeder_id"))
-            if nearby_feeder_id is not None and nearby_feeder_id != feeder_id:
+                owned_id = int_or_none(ownership.get("feeder_id"))
+                if owned_id != feeder_id or ownership.get("status") not in {"CONFIRMED", "INHERITED"}:
+                    row.update({
+                        "status": "FAIL",
+                        "severity": "OWNERSHIP_BLOCKED",
+                        "association_ready": "NO",
+                        "writeback_needed": "NO",
+                        "reason": ownership.get("reason") or "FEEDER_OWNERSHIP_NOT_CONFIRMED",
+                    })
+                    rows.append(row)
+                    continue
+            else:
+                nearby = nearest_refs.get(obj.xml_id, {})
+                nearby_model = nearby.get("model") or {}
                 row.update({
-                    "status": "FAIL",
-                    "severity": "NEARBY_FEEDER_CONFLICT",
-                    "association_ready": "NO",
-                    "writeback_needed": "NO",
-                    "reason": (
-                        "NEARBY_DEVICE_FEEDER_CONFLICT: 最近已关联设备"
-                        f"属于FEEDER_ID={nearby_feeder_id}，"
-                        f"当前连接区域为FEEDER_ID={feeder_id}"
+                    "nearest_device_type": nearby.get("type", ""),
+                    "nearest_device_xml_id": nearby.get("xml_id", ""),
+                    "nearest_device_distance": nearby.get("distance", ""),
+                    "nearest_device_model": (
+                        "YES" if nearby_model else "NO"
                     ),
+                    "nearest_device_feeder_id": nearby_model.get("feeder_id", ""),
+                    "nearest_device_name": nearby_model.get("device_name", ""),
                 })
-                rows.append(row)
-                continue
+                if not nearby_model:
+                    row.update({
+                        "status": "FAIL",
+                        "severity": "NEARBY_MODEL_MISSING",
+                        "association_ready": "NO",
+                        "writeback_needed": "NO",
+                        "reason": (
+                            "NEARBY_DEVICE_MODEL_NOT_ASSOCIATED: "
+                            f"最近设备={nearby.get('type') or '未找到'}；"
+                            "未关联附近设备模型，馈线段无法创建模型或者关联模型"
+                        ),
+                    })
+                    rows.append(row)
+                    continue
+                nearby_feeder_id = int_or_none(nearby_model.get("feeder_id"))
+                if nearby_feeder_id is not None and nearby_feeder_id != feeder_id:
+                    row.update({
+                        "status": "FAIL",
+                        "severity": "NEARBY_FEEDER_CONFLICT",
+                        "association_ready": "NO",
+                        "writeback_needed": "NO",
+                        "reason": (
+                            "NEARBY_DEVICE_FEEDER_CONFLICT: 最近已关联设备"
+                            f"属于FEEDER_ID={nearby_feeder_id}，"
+                            f"当前连接区域为FEEDER_ID={feeder_id}"
+                        ),
+                    })
+                    rows.append(row)
+                    continue
             if not obj.keyid:
                 row["status"] = "WARN"
                 row["severity"] = "UNLINKED"
@@ -2554,10 +2624,16 @@ class FeederValidator:
         ready_count = sum(1 for row in rows if row.get("association_ready") == "YES" and row.get("writeback_needed") == "YES")
         report["status"] = "WARN" if fail_count else "PASS"
         report["severity"] = "PARTIAL_ERROR" if fail_count else "PASS"
-        report["reason"] = (
-            f"FEEDER_RMU_TOPOLOGY_CONFIRMED: FEEDER_ID={feeder_id}; "
-            f"可信RMU={len(trusted)}; 忽略RMU={len(ignored)}; 可关联={ready_count}; 错误={fail_count}"
-        )
+        if ownership_mode:
+            report["reason"] = (
+                f"FEEDER_OWNERSHIP_CONFIRMED: FEEDER_ID={feeder_id}; "
+                f"主网/已关联设备证据完成局部归属；可关联={ready_count}; 错误={fail_count}"
+            )
+        else:
+            report["reason"] = (
+                f"FEEDER_RMU_TOPOLOGY_CONFIRMED: FEEDER_ID={feeder_id}; "
+                f"可信RMU={len(trusted)}; 忽略RMU={len(ignored)}; 可关联={ready_count}; 错误={fail_count}"
+            )
         report["summary"] = self._summary(report)
         return report
     def validate_file_with_feeder_record(
@@ -2678,34 +2754,142 @@ class FeederValidator:
                 f"{anchor.get('reason')}"
             )
 
-        regions = self._build_topology_regions(parsed, rmu_anchors)
-        regions = self._coalesce_regions_by_confirmed_feeder(regions, parsed)
-        region_reports = [
-            self._validate_rmu_topology_region(parsed, region)
-            for region in regions
-        ]
-
-        # Any FeedLine that somehow never entered a component is explicitly
-        # blocked instead of silently ignored.
-        assigned_ids = {
-            row.get("xml_id")
-            for report in region_reports
-            for row in report.get("feedline_rows", [])
-        }
         all_feedlines = [obj for obj in parsed.objects if obj.tag == FEEDLINE_TAG]
-        orphan = [obj for obj in all_feedlines if obj.xml_id not in assigned_ids]
-        if orphan:
-            orphan_region = {
-                "region_index": len(region_reports) + 1,
-                "feedlines": orphan,
-                "rmu_anchors": [],
-            }
-            region_reports.append(
-                self._validate_rmu_topology_region(parsed, orphan_region)
+        source_cbreaker_count = sum(1 for obj in parsed.objects if obj.tag == "CBreaker")
+        use_ownership_resolver = (
+            str(drawing_mode or "AUTO").upper() == "MULTI"
+            or source_cbreaker_count >= 2
+        )
+
+        if use_ownership_resolver:
+            # Makkah ring overview drawings: feeder ownership is resolved from
+            # main-station feeder sources + already-associated local devices.
+            # NOP labels stop propagation; incomplete XML links are repaired
+            # only with strict endpoint geometry.  We never use global nearest
+            # device distance as the primary feeder decision.
+            self._model_reference_cache = {}
+            ownership_result = FeederOwnershipResolver(
+                self.db,
+                feeder_table_id=self.feeder_table_id,
+                log=self.log,
+            ).resolve(
+                parsed,
+                rmu_anchors,
+                self._model_reference_for_object,
+            )
+            ownership = ownership_result.get("ownership", {})
+            own_summary = ownership_result.get("summary", {})
+            source_anchors = ownership_result.get("source_anchors", [])
+
+            self.log(
+                f"[{parsed.path.name}] 麦加馈线归属：主网CBreaker={own_summary.get('source_cbreaker_count', 0)}；"
+                f"已确认主网馈线={own_summary.get('resolved_source_feeder_count', 0)}；"
+                f"NOP边界开关={own_summary.get('nop_boundary_switch_count', 0)}；"
+                f"严格补链={own_summary.get('strict_geometry_repair_count', 0)}；"
+                f"FeedLine确认={own_summary.get('confirmed_count', 0)}；"
+                f"继承={own_summary.get('inherited_count', 0)}；"
+                f"冲突={own_summary.get('conflict_count', 0)}；"
+                f"未确定={own_summary.get('unresolved_count', 0)}"
             )
 
+            by_id = {obj.xml_id: obj for obj in all_feedlines}
+            grouped = defaultdict(list)
+            for xml_id, item in ownership.items():
+                status = str(item.get("status") or "UNRESOLVED")
+                feeder_id = int_or_none(item.get("feeder_id"))
+                if status in {"CONFIRMED", "INHERITED"} and feeder_id is not None:
+                    key = ("FEEDER", feeder_id)
+                else:
+                    key = (status, str(item.get("candidate_feeder_ids") or ""))
+                if xml_id in by_id:
+                    grouped[key].append(by_id[xml_id])
+
+            regions = []
+            source_ids_text = ",".join(
+                str(x) for x in own_summary.get("resolved_source_feeder_ids", [])
+            )
+            for key, objects in grouped.items():
+                objects = sorted(objects, key=self._feedline_sort_key)
+                if not objects:
+                    continue
+                region_ownership = {
+                    obj.xml_id: ownership.get(obj.xml_id, {})
+                    for obj in objects
+                }
+                common = {
+                    "feedlines": objects,
+                    "ownership_by_feedline": region_ownership,
+                    "main_source_feeder_count": own_summary.get("resolved_source_feeder_count", 0),
+                    "main_source_feeder_ids": source_ids_text,
+                    "nop_boundary_count": own_summary.get("nop_boundary_switch_count", 0),
+                    "strict_geometry_repair_count": own_summary.get("strict_geometry_repair_count", 0),
+                }
+                if key[0] == "FEEDER":
+                    feeder_id = int(key[1])
+                    matching_sources = [
+                        a for a in source_anchors
+                        if int_or_none(a.get("feeder_id")) == feeder_id
+                    ]
+                    common.update({
+                        "confirmed_feeder_id": feeder_id,
+                        "rmu_anchors": [
+                            a for a in rmu_anchors
+                            if int_or_none(a.get("feeder_id")) == feeder_id
+                        ],
+                        "feeder_resolution_evidence": " | ".join(
+                            f"CBreaker:{a.get('label')}->{feeder_id}"
+                            for a in matching_sources
+                        ) or "LOCAL_ASSOCIATED_DEVICE_EVIDENCE",
+                    })
+                else:
+                    common.update({
+                        "rmu_anchors": [],
+                        "forced_block_reason": (
+                            "FEEDER_OWNERSHIP_CONFLICT: 同一局部连接区域出现多个馈线证据，禁止自动关联。"
+                            if key[0] == "CONFLICT"
+                            else "FEEDER_OWNERSHIP_UNRESOLVED: 缺少可靠主网/已关联设备证据，禁止猜测。"
+                        ),
+                    })
+                regions.append(common)
+
+            regions.sort(
+                key=lambda r: self._feedline_sort_key(r["feedlines"][0])
+                if r.get("feedlines") else (10**18, 10**18, 10**18)
+            )
+            for idx, region in enumerate(regions, start=1):
+                region["region_index"] = idx
+            region_reports = [
+                self._validate_rmu_topology_region(parsed, region)
+                for region in regions
+            ]
+        else:
+            regions = self._build_topology_regions(parsed, rmu_anchors)
+            regions = self._coalesce_regions_by_confirmed_feeder(regions, parsed)
+            region_reports = [
+                self._validate_rmu_topology_region(parsed, region)
+                for region in regions
+            ]
+
+            # Any FeedLine that somehow never entered a component is explicitly
+            # blocked instead of silently ignored.
+            assigned_ids = {
+                row.get("xml_id")
+                for report in region_reports
+                for row in report.get("feedline_rows", [])
+            }
+            orphan = [obj for obj in all_feedlines if obj.xml_id not in assigned_ids]
+            if orphan:
+                orphan_region = {
+                    "region_index": len(region_reports) + 1,
+                    "feedlines": orphan,
+                    "rmu_anchors": [],
+                }
+                region_reports.append(
+                    self._validate_rmu_topology_region(parsed, orphan_region)
+                )
+
         self.log(
-            f"[{parsed.path.name}] 拓扑连接区域={len(region_reports)}；"
+            f"[{parsed.path.name}] 馈线归属区域={len(region_reports)}；"
             f"FeedLine={len(all_feedlines)}"
         )
         for report in region_reports:
@@ -2721,8 +2905,10 @@ class FeederValidator:
             "report_type": "FEEDER_FILE",
             "g_file": str(parsed.path),
             "file_name": parsed.path.name,
-            "drawing_type": "RMU_TOPOLOGY",
+            "drawing_type": ("FEEDER_OWNERSHIP" if use_ownership_resolver else "RMU_TOPOLOGY"),
             "feeder_regions": region_reports,
+            "main_source_anchors": (source_anchors if use_ownership_resolver else []),
+            "ownership_summary": (own_summary if use_ownership_resolver else {}),
             "rmu_reference_rows": [
                 {k: v for k, v in a.items() if k != "frame"}
                 for a in rmu_anchors

@@ -8,6 +8,11 @@ from pathlib import Path
 from dmm.application.modules.base import ModelModule
 from dmm.domain.feeder.validator import FeederValidator, natural_section_key, int_or_none
 from dmm.domain.gfile.parser import GParser
+from dmm.domain.gfile.master_station_frames import find_master_station_frames
+from dmm.domain.feeder.ring_discovery import discover_makkah_ring_feeders
+from dmm.domain.graphics_cleanup.feedline_feeder_topology import (
+    analyze_feedline_feeder_topology_file,
+)
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 from dmm.domain.feeder.topology import FeederDrawingTopologyClassifier
 from dmm.config.defaults import (
@@ -22,9 +27,12 @@ class FeederModelModule(ModelModule):
     module_id = "FEEDER"
     display_name = "馈线模型"
     description = (
-        "馈线模型校验、数据库缺失馈线段补齐及安全回写。"
-        "必须先完成环网柜、柱上开关或柱上变压器模型关联；"
-        "每条 FeedLine 按距离取最近的已关联设备作为馈线依据，组合大图按拓扑审计。"
+        "麦加环网图馈线关联：先扫描所有最内层且含 CBreaker 的主网 Bay 框，"
+        "唯一确认图中各主网馈线；再复用图形工作区的 FeedLine 拓扑归属逻辑，"
+        "按 link/node_area、严格几何补链和红色 NOP 支路级断点，为每条 FeedLine "
+        "确定唯一所属馈线。随后只在该所属馈线下复用已有 13503；若数量不足，"
+        "也只在该所属馈线下创建实际缺少的 dms_section_device。冲突/未确定的 "
+        "FeedLine 不猜测、不跨馈线分配。"
     )
     SUPPORTED_OPERATIONS = (
         "VALIDATE",
@@ -1031,9 +1039,9 @@ class FeederModelModule(ModelModule):
         used to challenge an already-correct association.
         """
         report["section_create_plan"] = []
-        if not bool(settings.get("auto_create_missing_sections", True)):
-            return report
-
+        # Makkah fixed rule: once any one feeder in the current ring drawing
+        # is confirmed, every missing 13503 section required by this G file
+        # must be planned for creation.  This is not operator-optional.
         feeder_id = int_or_none(report.get("feeder_id"))
         if feeder_id is None:
             return report
@@ -1345,6 +1353,759 @@ class FeederModelModule(ModelModule):
         report["summary"] = FeederValidator._summary(report)
         return report
 
+    @classmethod
+    def _ring_filename_feeder_labels(cls, g_file):
+        """Return feeder-like labels encoded by *this* Makkah ring filename.
+
+        Ring drawings commonly contain several feeder tokens in one filename,
+        for example ``...-GVCM-04-MOB3ARF-06-ARF3-21.sln.pic.g``.  Makkah
+        only needs one database-unique feeder from the current drawing, so
+        these tokens are valid fallback evidence when a main-station Bay frame
+        cannot be recognised.
+        """
+        name = Path(g_file).name
+        stem = re.sub(r"\.sln\.pic(?:\([^)]*\))?\.g$", "", name, flags=re.I)
+        stem = re.sub(r"\.g$", "", stem, flags=re.I)
+        out = []
+        seen = set()
+        for match in re.finditer(
+            r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]{1,15})[-_](\d{1,3})(?!\d)",
+            stem,
+        ):
+            prefix = str(match.group(1) or "").upper()
+            if prefix in {"MAK", "XXX", "PART", "PIC", "SLN"}:
+                continue
+            label = f"{prefix}-{match.group(2)}"
+            key = cls._normalize_lookup_text(label)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(label)
+        return out
+
+    def _unique_ring_feeder_by_label(self, db, label, feeder_table_id):
+        """Resolve one exact feeder label to exactly one 13500 record."""
+        try:
+            rows = db.find_feeders_by_name_hint(label, table_id=feeder_table_id)
+        except Exception:
+            return None
+        unique = {}
+        normalized_label = self._normalize_lookup_text(label)
+        for row in rows:
+            rid = int_or_none(row.get("id"))
+            if rid is None:
+                continue
+            display = self._normalize_lookup_text(
+                row.get("display_name")
+                or f"{row.get('station_name','')} {row.get('name','')}"
+            )
+            business = {
+                self._normalize_lookup_text(row.get("name", "")),
+                self._normalize_lookup_text(row.get("code", "")),
+                self._normalize_lookup_text(row.get("graph_name", "")),
+            }
+            if (
+                display == normalized_label
+                or display.endswith(normalized_label)
+                or normalized_label in business
+            ):
+                unique[rid] = row
+        if len(unique) != 1:
+            return None
+        return dict(next(iter(unique.values())))
+
+    def _resolve_any_ring_feeder(self, db, g_file, settings, log_callback):
+        """Resolve all strict main-network feeders and keep a stable fallback.
+
+        The authoritative Makkah chain is:
+        CBreaker frame -> nearest frame title -> substation.NAME ->
+        substation.ID -> dms_feeder_device.ST_ID -> feeder NAME/CODE.
+        """
+        feeder_table_id = int(settings.get("feeder_table_id", 13500))
+        candidates = discover_makkah_ring_feeders(
+            db,
+            g_file,
+            feeder_table_id=feeder_table_id,
+            station_table_id=405,
+            log_callback=None,
+        )
+        if not candidates:
+            return None, []
+
+        selected = dict(candidates[0])
+        log_callback(
+            f"[{Path(g_file).name}] 麦加馈线模型已确认主网馈线={len(candidates)} 条；"
+            f"首条={selected.get('_ring_label') or selected.get('display_name') or selected.get('name')} -> "
+            f"FEEDER_ID={selected.get('id')}；ST_ID={selected.get('st_id')}。"
+            "下一步将按 FeedLine 拓扑逐条确定所属馈线；复用和新建 13503 都限定在"
+            "该 FeedLine 自己的所属馈线内，不再使用跨馈线统一资源池。"
+        )
+        return selected, [dict(row) for row in candidates]
+
+    @staticmethod
+    def _ring_candidate_display(feeder):
+        return str(
+            feeder.get("_ring_label")
+            or feeder.get("display_name")
+            or feeder.get("name")
+            or feeder.get("id")
+            or ""
+        ).strip()
+
+    def _validate_makkah_ring_feeder_pool(
+        self,
+        db,
+        g_file,
+        candidates,
+        settings,
+        log_callback,
+    ):
+        """Validate a Makkah ring drawing using per-FeedLine topology ownership.
+
+        v4.1.124 rule:
+        - first reuse the independent ``FeedLine -> feeder`` topology analyser;
+        - a FeedLine may be associated only when topology resolves exactly one
+          main-network feeder label;
+        - that label must map to exactly one database-confirmed 13500 feeder;
+        - existing/free 13503 rows are consumed only from that exact feeder;
+        - genuine shortages are created under that exact feeder, never under a
+          drawing-wide fallback feeder and never from a cross-feeder pool.
+
+        Conflict/unresolved topology is intentionally blocked instead of being
+        guessed. Existing links are preserved only when their 13503.FEEDER_ID
+        matches the topology-resolved feeder (Domain-only errors keep the same
+        13503.ID and only repair the KeyID domain).
+        """
+        g_file = Path(g_file)
+        parsed = GParser().parse(g_file)
+        validator = self._validator(db, settings, log_callback)
+        section_table_id = int(settings.get("section_table_id", 13503))
+        expected_domain = int(settings.get("section_domain", 1))
+        feeder_table_id = int(settings.get("feeder_table_id", 13500))
+
+        candidate_rows = [dict(item) for item in (candidates or [])]
+        candidate_by_id = {}
+        candidate_order = []
+        candidate_ids_by_label = defaultdict(set)
+        for feeder in candidate_rows:
+            feeder_id = int_or_none(feeder.get("id"))
+            if feeder_id is None:
+                continue
+            if feeder_id not in candidate_by_id:
+                candidate_by_id[feeder_id] = feeder
+                candidate_order.append(feeder_id)
+            # The topology analyser and ring discovery both use the exact Bay
+            # title.  Keep a few deterministic aliases for older/test records,
+            # but never fuzzy-match a topology label to a different feeder.
+            aliases = [
+                feeder.get("_ring_label"),
+                feeder.get("display_name"),
+            ]
+            station_name = str(feeder.get("station_name") or "").strip()
+            feeder_name = str(feeder.get("name") or "").strip()
+            feeder_code = str(feeder.get("code") or "").strip()
+            if station_name and feeder_name:
+                aliases.append(f"{station_name}-{feeder_name}")
+            if station_name and feeder_code:
+                aliases.append(f"{station_name}-{feeder_code}")
+            for alias in aliases:
+                normalized = self._normalize_lookup_text(alias)
+                if normalized:
+                    candidate_ids_by_label[normalized].add(feeder_id)
+
+        feedlines = sorted(
+            [obj for obj in parsed.objects if obj.tag == "FeedLine"],
+            key=validator._feedline_sort_key,
+        )
+        selected = candidate_rows[0] if candidate_rows else {}
+        selected_id = int_or_none(selected.get("id"))
+        selected_name = self._ring_candidate_display(selected)
+
+        try:
+            topology = analyze_feedline_feeder_topology_file(g_file)
+        except Exception as exc:
+            topology = {
+                "summary": {
+                    "feedline_count": len(feedlines),
+                    "confirmed_count": 0,
+                    "conflict_count": 0,
+                    "unresolved_count": len(feedlines),
+                    "source_feeder_labels": [],
+                    "nop_boundary_count": 0,
+                    "strict_geometry_repair_count": 0,
+                },
+                "feedline_rows": [],
+            }
+            topology_error = str(exc)
+        else:
+            topology_error = ""
+
+        topology_rows = {
+            str(row.get("feedline_xml_id") or ""): dict(row)
+            for row in (topology.get("feedline_rows") or [])
+            if str(row.get("feedline_xml_id") or "")
+        }
+        topo_summary = dict(topology.get("summary") or {})
+
+        report = {
+            "report_type": "FEEDER",
+            "g_file": str(g_file),
+            "file_name": g_file.name,
+            "drawing_type": "MAKKAH_RING_MULTI_FEEDER_TOPOLOGY",
+            "drawing_mode": "MAKKAH_RING",
+            "region_index": 1,
+            "region_assignment_method": "FEEDLINE_TOPOLOGY_OWNER",
+            "feeder_resolution_source": "FEEDLINE_TOPOLOGY_OWNER",
+            "feeder_resolution_evidence": (
+                "复用图形工作区馈线段所属馈线分析：主网CBreaker + link/node_area + "
+                "严格几何补链 + 红色NOP支路级断点；每条FeedLine只使用唯一可达馈线。"
+            ),
+            "feeder_records": candidate_rows,
+            # Legacy summary fields keep a deterministic first feeder only;
+            # each FeedLine carries its real target in assigned_feeder_*.
+            "feeder_id": selected_id or "",
+            "feeder_name": selected_name,
+            "ring_candidate_feeder_count": len(candidate_order),
+            "ring_candidate_feeder_ids": ", ".join(str(x) for x in candidate_order),
+            "ring_candidate_feeder_names": ", ".join(
+                self._ring_candidate_display(candidate_by_id[x]) for x in candidate_order
+            ),
+            "ring_candidate_feeders": [
+                {
+                    "feeder_id": feeder_id,
+                    "feeder_name": self._ring_candidate_display(candidate_by_id[feeder_id]),
+                    "station_name": candidate_by_id[feeder_id].get("station_name", ""),
+                    "st_id": candidate_by_id[feeder_id].get("st_id", ""),
+                    "db_code": candidate_by_id[feeder_id].get("code", ""),
+                    "db_name": candidate_by_id[feeder_id].get("name", ""),
+                }
+                for feeder_id in candidate_order
+            ],
+            "main_source_feeder_count": len(topo_summary.get("source_feeder_labels") or []),
+            "main_source_feeder_ids": ", ".join(str(x) for x in candidate_order),
+            "nop_boundary_count": int(topo_summary.get("nop_boundary_count") or 0),
+            "strict_geometry_repair_count": int(topo_summary.get("strict_geometry_repair_count") or 0),
+            "feedline_topology_confirmed_count": int(topo_summary.get("confirmed_count") or 0),
+            "feedline_topology_conflict_count": int(topo_summary.get("conflict_count") or 0),
+            "feedline_topology_unresolved_count": int(topo_summary.get("unresolved_count") or 0),
+            "feedline_rows": [],
+            "section_create_plan": [],
+            "section_create_targets": [],
+            "association_eligible": bool(candidate_order) and not topology_error,
+            "status": "PASS" if candidate_order and not topology_error else "FAIL",
+            "severity": "PASS" if candidate_order and not topology_error else "BLOCKED",
+            "reason": "",
+            "feeder_root_writeback_needed": "NO",
+            "feeder_root_current_facid": self._root_facid(parsed),
+            "feeder_root_expected_facid": "",
+        }
+
+        if not candidate_order or topology_error:
+            if topology_error:
+                block_reason = f"FEEDLINE_TOPOLOGY_ANALYSIS_FAILED: {topology_error}"
+            else:
+                block_reason = "MAKKAH_RING_FEEDER_NOT_FOUND"
+            report.update(
+                association_eligible=False,
+                status="FAIL",
+                severity="BLOCKED",
+                reason=block_reason,
+            )
+            for order, obj in enumerate(feedlines, start=1):
+                row = validator._new_row(obj, order)
+                row.update(
+                    status="FAIL", severity="BLOCKED",
+                    association_ready="NO", writeback_needed="NO",
+                    db_create_needed="NO", reason=block_reason,
+                )
+                report["feedline_rows"].append(row)
+            report["summary"] = FeederValidator._summary(report)
+            return report
+
+        # Query each database-confirmed feeder independently. There is no
+        # cross-feeder allocation pool in v4.1.124.
+        sections_by_feeder = {}
+        total_section_count = 0
+        for feeder_id in candidate_order:
+            try:
+                _, db_rows = db.get_sections_by_feeder_id(
+                    feeder_id, table_id=section_table_id
+                )
+            except TypeError:
+                _, db_rows = db.get_sections_by_feeder_id(feeder_id)
+            db_rows = [dict(row) for row in (db_rows or [])]
+            db_rows.sort(key=natural_section_key)
+            for section in db_rows:
+                section.setdefault("feeder_id", feeder_id)
+            sections_by_feeder[feeder_id] = db_rows
+            total_section_count += len(db_rows)
+        report["available_count"] = total_section_count
+
+        owner_cache = {}
+        current_meta = {}
+        valid_usage = defaultdict(list)
+        for obj in feedlines:
+            meta = {
+                "device_id": None, "table_id": None, "domain": None,
+                "section": None, "owner_id": None, "verify_error": "",
+            }
+            if obj.keyid:
+                try:
+                    verified = db.verify_keyid(int(obj.keyid))
+                    did = int_or_none(verified.get("device_id"))
+                    tab = int_or_none(verified.get("tab_no"))
+                    dom = int_or_none(verified.get("col_no"))
+                    section = None
+                    owner_id = None
+                    if did is not None and tab == section_table_id:
+                        section = db.get_device_by_id(section_table_id, did)
+                        if section:
+                            section = dict(section)
+                            owner_id = int_or_none(section.get("feeder_id"))
+                    meta.update({
+                        "device_id": did, "table_id": tab, "domain": dom,
+                        "section": section, "owner_id": owner_id,
+                    })
+                    if (
+                        section is not None
+                        and owner_id in candidate_by_id
+                        and tab == section_table_id
+                        and did is not None
+                    ):
+                        valid_usage[did].append(str(obj.xml_id))
+                except Exception as exc:
+                    meta["verify_error"] = str(exc)
+            current_meta[str(obj.xml_id)] = meta
+
+        duplicate_ids = {did for did, ids in valid_usage.items() if len(ids) > 1}
+        used_ids_by_feeder = defaultdict(set)
+        pending_by_feeder = defaultdict(list)
+        rows = []
+
+        def feeder_display_name(feeder_id):
+            if feeder_id in candidate_by_id:
+                return self._ring_candidate_display(candidate_by_id[feeder_id])
+            if feeder_id is None:
+                return ""
+            if feeder_id not in owner_cache:
+                try:
+                    owner_cache[feeder_id] = db.get_feeder_info(
+                        feeder_id, table_id=feeder_table_id
+                    ) or {}
+                except TypeError:
+                    owner_cache[feeder_id] = db.get_feeder_info(feeder_id) or {}
+                except Exception:
+                    owner_cache[feeder_id] = {}
+            owner = owner_cache[feeder_id]
+            return str(owner.get("display_name") or owner.get("name") or feeder_id)
+
+        for order, obj in enumerate(feedlines, start=1):
+            row = validator._new_row(obj, order)
+            original_ls = str(obj.attrs.get("ls", "") or "").strip()
+            normalized_ls, section_type, ls_changed, ls_valid = self._normalize_feedline_ls(original_ls)
+            topo = topology_rows.get(str(obj.xml_id), {})
+            topo_status = str(topo.get("status") or "UNRESOLVED").upper()
+            topo_primary = str(topo.get("primary_feeder") or "").strip()
+            topo_candidates = str(topo.get("candidate_feeders") or "").strip()
+            topo_reason = str(topo.get("reason") or "").strip()
+            row.update({
+                "ls_original": original_ls,
+                "ls": normalized_ls if ls_changed else original_ls,
+                "ls_normalized": normalized_ls,
+                "ls_normalization_needed": "YES" if ls_changed else "NO",
+                "planned_section_type": section_type if section_type is not None else "",
+                "ring_valid_feeder_ids": report["ring_candidate_feeder_ids"],
+                "ownership_status": topo_status,
+                "ownership_method": "FEEDLINE_TOPOLOGY_OWNER",
+                "topology_primary_feeder": topo_primary,
+                "topology_candidate_feeders": topo_candidates,
+                "ownership_evidence": topo_reason,
+            })
+
+            meta = current_meta.get(str(obj.xml_id), {})
+            did = int_or_none(meta.get("device_id"))
+            tab = int_or_none(meta.get("table_id"))
+            dom = int_or_none(meta.get("domain"))
+            section = meta.get("section")
+            owner_id = int_or_none(meta.get("owner_id"))
+            row["current_device_id"] = did or ""
+            row["current_table_id"] = tab or ""
+            row["current_domain"] = dom if dom is not None else ""
+            row["current_feeder_id"] = owner_id or ""
+            row["current_feeder_name"] = feeder_display_name(owner_id)
+            if section:
+                row["current_db_name"] = str(section.get("name") or "")
+                row["current_db_code"] = str(section.get("code") or "")
+                row["current_bv_id"] = section.get("bv_id", "")
+
+            if not ls_valid:
+                row.update(
+                    status="FAIL", severity="ERROR", model_link_correct="NO",
+                    association_ready="NO", writeback_needed="NO",
+                    db_create_needed="NO",
+                    reason=f"INVALID_FEEDLINE_LS: ls={original_ls!r}",
+                )
+                rows.append(row)
+                continue
+
+            if topo_status != "CONFIRMED" or not topo_primary:
+                row.update(
+                    status="FAIL",
+                    severity="TOPOLOGY_CONFLICT" if topo_status == "CONFLICT" else "TOPOLOGY_UNRESOLVED",
+                    model_link_correct="",
+                    association_ready="NO",
+                    writeback_needed="NO",
+                    db_create_needed="NO",
+                    reason=(
+                        f"FEEDLINE_TOPOLOGY_{topo_status}: "
+                        f"{topo_reason or '无法唯一确定所属馈线，禁止自动关联/建库。'}"
+                    ),
+                )
+                rows.append(row)
+                continue
+
+            target_ids = candidate_ids_by_label.get(
+                self._normalize_lookup_text(topo_primary), set()
+            )
+            if len(target_ids) != 1:
+                row.update(
+                    status="FAIL", severity="TOPOLOGY_FEEDER_DB_NOT_UNIQUE",
+                    model_link_correct="",
+                    association_ready="NO", writeback_needed="NO",
+                    db_create_needed="NO",
+                    reason=(
+                        "TOPOLOGY_FEEDER_DB_NOT_UNIQUE: "
+                        f"图形所属馈线={topo_primary!r}；数据库确认匹配数={len(target_ids)}。"
+                    ),
+                )
+                rows.append(row)
+                continue
+
+            target_feeder_id = next(iter(target_ids))
+            row["assigned_feeder_id"] = target_feeder_id
+            row["assigned_feeder_name"] = feeder_display_name(target_feeder_id)
+            row["topology_target_feeder_id"] = target_feeder_id
+
+            valid_target_owner = (
+                section is not None
+                and owner_id == target_feeder_id
+                and tab == section_table_id
+                and did is not None
+            )
+            duplicate = did is not None and did in duplicate_ids
+            if valid_target_owner and not duplicate and dom == expected_domain:
+                used_ids_by_feeder[target_feeder_id].add(did)
+                row.update({
+                    "assigned_device_id": did,
+                    "assigned_section_name": str(section.get("name") or ""),
+                    "assigned_bv_id": section.get("bv_id", ""),
+                    "expected_keyid": int(obj.keyid),
+                    "expected_keyid_verified": "YES",
+                    "db_create_needed": "NO",
+                    "model_link_correct": "YES",
+                    "association_ready": "YES",
+                    "writeback_needed": "NO",
+                    "status": "PASS",
+                    "severity": "PASS",
+                    "reason": (
+                        "MODEL_ALREADY_LINKED_TO_TOPOLOGY_FEEDER: "
+                        f"{topo_primary} -> FEEDER_ID={target_feeder_id}"
+                    ),
+                })
+            elif valid_target_owner and not duplicate and dom != expected_domain:
+                used_ids_by_feeder[target_feeder_id].add(did)
+                expected_keyid, verified_ok, _ = validator._verify_expected_keyid(did)
+                bv_id = str(section.get("bv_id", "") or "").strip()
+                row.update({
+                    "assigned_device_id": did,
+                    "assigned_section_name": str(section.get("name") or ""),
+                    "assigned_bv_id": section.get("bv_id", ""),
+                    "expected_keyid": expected_keyid,
+                    "expected_keyid_verified": "YES" if verified_ok else "NO",
+                    "relink_same_section": "YES",
+                    "db_create_needed": "NO",
+                    "model_link_correct": "NO",
+                })
+                if not bv_id:
+                    row.update(
+                        status="FAIL", severity="ERROR",
+                        association_ready="NO", writeback_needed="NO",
+                        reason="BV_ID_EMPTY: 当前馈线段BV_ID为空，禁止重写模型",
+                    )
+                elif not verified_ok:
+                    row.update(
+                        status="FAIL", severity="ERROR",
+                        association_ready="NO", writeback_needed="NO",
+                        reason="EXPECTED_KEYID_VERIFY_FAILED",
+                    )
+                else:
+                    row.update(
+                        status="WARN", severity="RELINK",
+                        association_ready="YES", writeback_needed="YES",
+                        reason=(
+                            "DOMAIN_RELINK_READY: 当前13503已属于拓扑确认馈线 "
+                            f"{topo_primary}/FEEDER_ID={target_feeder_id}，仅Domain错误 "
+                            f"current={dom}, expected={expected_domain}；保持原13503.ID不变。"
+                        ),
+                    )
+            else:
+                row["model_link_correct"] = "NO" if obj.keyid else ""
+                row["db_create_needed"] = "NO"
+                row["status"] = "WARN"
+                row["severity"] = "DUPLICATE_LINK" if duplicate else ("RELINK" if obj.keyid else "UNLINKED")
+                if duplicate:
+                    row["reason"] = (
+                        "DUPLICATE_LINK: 同一13503被多个FeedLine重复使用；"
+                        f"device_id={did}; XML={','.join(valid_usage.get(did, []))}; "
+                        f"本FeedLine拓扑目标={topo_primary}/FEEDER_ID={target_feeder_id}。"
+                    )
+                elif obj.keyid and owner_id not in (None, target_feeder_id):
+                    row["reason"] = (
+                        "MODEL_RELINK_REQUIRED_TO_TOPOLOGY_FEEDER: "
+                        f"当前FEEDER_ID={owner_id or '-'}；"
+                        f"拓扑目标={topo_primary}/FEEDER_ID={target_feeder_id}。"
+                    )
+                elif obj.keyid:
+                    row["reason"] = (
+                        "MODEL_RELINK_REQUIRED: 当前13503不存在、表号不正确或无法验证；"
+                        f"拓扑目标={topo_primary}/FEEDER_ID={target_feeder_id}。"
+                    )
+                else:
+                    row["reason"] = (
+                        "MODEL_NOT_LINKED: "
+                        f"拓扑目标={topo_primary}/FEEDER_ID={target_feeder_id}。"
+                    )
+                pending_by_feeder[target_feeder_id].append(row)
+            rows.append(row)
+
+        # Allocate only inside each FeedLine's topology-resolved feeder.
+        shortage_by_feeder = defaultdict(list)
+        for feeder_id in candidate_order:
+            available = []
+            for section in sections_by_feeder.get(feeder_id, []):
+                did = int_or_none(section.get("id"))
+                if did is None or did in used_ids_by_feeder.get(feeder_id, set()):
+                    continue
+                available.append(section)
+            available.sort(key=natural_section_key)
+            pending = sorted(
+                pending_by_feeder.get(feeder_id, []),
+                key=lambda row: int(row.get("order_index") or 10**9),
+            )
+            pool_index = 0
+            for row in pending:
+                if pool_index >= len(available):
+                    shortage_by_feeder[feeder_id].append(row)
+                    continue
+                section = available[pool_index]
+                pool_index += 1
+                did = int_or_none(section.get("id"))
+                if did is None:
+                    shortage_by_feeder[feeder_id].append(row)
+                    continue
+                expected_keyid, verified_ok, _ = validator._verify_expected_keyid(did)
+                bv_id = str(section.get("bv_id", "") or "").strip()
+                row.update({
+                    "assigned_feeder_id": feeder_id,
+                    "assigned_feeder_name": feeder_display_name(feeder_id),
+                    "assigned_device_id": did,
+                    "assigned_section_name": str(section.get("name") or ""),
+                    "planned_section_name": str(section.get("name") or ""),
+                    "assigned_bv_id": section.get("bv_id", ""),
+                    "expected_keyid": expected_keyid,
+                    "expected_keyid_verified": "YES" if verified_ok else "NO",
+                    "db_create_needed": "NO",
+                })
+                if not bv_id:
+                    row.update(
+                        status="FAIL", severity="ERROR", association_ready="NO",
+                        writeback_needed="NO", reason="BV_ID_EMPTY",
+                    )
+                elif not verified_ok:
+                    row.update(
+                        status="FAIL", severity="ERROR", association_ready="NO",
+                        writeback_needed="NO", reason="EXPECTED_KEYID_VERIFY_FAILED",
+                    )
+                else:
+                    row.update(
+                        status="WARN",
+                        severity="RELINK" if row.get("model_linked") == "YES" else "UNLINKED",
+                        association_ready="YES", writeback_needed="YES",
+                        reason=(
+                            "MODEL_RELINK_READY_FROM_TOPOLOGY_FEEDER"
+                            if row.get("model_linked") == "YES"
+                            else "MODEL_NOT_LINKED_READY_FROM_TOPOLOGY_FEEDER"
+                        ) + f": FEEDER_ID={feeder_id}",
+                    )
+
+        # Plan genuine shortages independently under every topology owner.
+        plans = []
+        create_targets = []
+        for feeder_id in candidate_order:
+            shortage = shortage_by_feeder.get(feeder_id, [])
+            if not shortage:
+                continue
+
+            feeder = dict(candidate_by_id[feeder_id])
+            try:
+                db_feeder = db.get_feeder_info(feeder_id, table_id=feeder_table_id) or {}
+            except TypeError:
+                db_feeder = db.get_feeder_info(feeder_id) or {}
+            except Exception:
+                db_feeder = {}
+            feeder.update(db_feeder)
+            feeder.setdefault("id", feeder_id)
+            feeder.setdefault("st_id", candidate_by_id[feeder_id].get("st_id"))
+            existing_sections = sections_by_feeder.get(feeder_id, [])
+            prefix = self._section_prefix(feeder, existing_sections)
+            station_id = int_or_none(feeder.get("st_id"))
+            try:
+                voltage = (
+                    db.get_preferred_feeder_section_voltage(station_id)
+                    if station_id is not None else None
+                ) or {}
+            except Exception:
+                voltage = {}
+            bv_id = voltage.get("bv_id")
+
+            if not prefix or bv_id in (None, ""):
+                for row in shortage:
+                    row.update(
+                        status="FAIL", severity="ERROR", association_ready="NO",
+                        writeback_needed="NO", db_create_needed="NO",
+                        reason=(
+                            "SECTION_NOT_AVAILABLE_AND_TARGET_FEEDER_CREATE_METADATA_UNRESOLVED: "
+                            f"FEEDER_ID={feeder_id}；无法取得有效命名前缀/BV_ID。"
+                        ),
+                    )
+                continue
+
+            existing_names = {
+                str(item.get("name") or "").strip().upper()
+                for item in existing_sections
+                if str(item.get("name") or "").strip()
+            }
+            planned_names = set()
+
+            def next_name():
+                suffix = 1
+                while True:
+                    name = f"{prefix}_SEC{suffix:03d}"
+                    key = name.upper()
+                    if key not in existing_names and key not in planned_names:
+                        planned_names.add(key)
+                        return name
+                    suffix += 1
+
+            target_plan_count = 0
+            for row in shortage:
+                section_type = self._section_type_from_ls(row.get("ls", ""))
+                if section_type is None:
+                    row.update(
+                        status="FAIL", severity="ERROR", association_ready="NO",
+                        writeback_needed="NO", db_create_needed="NO",
+                        reason=f"UNKNOWN_FEEDLINE_LS: ls={row.get('ls')!r}",
+                    )
+                    continue
+                planned_name = next_name()
+                row.update({
+                    "assigned_feeder_id": feeder_id,
+                    "assigned_feeder_name": feeder_display_name(feeder_id),
+                    "assigned_device_id": "",
+                    "assigned_section_name": planned_name,
+                    "planned_section_name": planned_name,
+                    "assigned_bv_id": int(bv_id),
+                    "planned_section_type": section_type,
+                    "expected_keyid": "",
+                    "expected_keyid_verified": "",
+                    "db_create_needed": "YES",
+                    "association_ready": "YES",
+                    "writeback_needed": "YES",
+                    "status": "WARN",
+                    "severity": "CREATE_PENDING",
+                    "reason": (
+                        f"DB_SECTION_CREATE_PENDING_FOR_TOPOLOGY_FEEDER: {planned_name}; "
+                        f"FEEDER_ID={feeder_id}; topology={row.get('topology_primary_feeder')}; "
+                        f"ls={row.get('ls')!r} -> SECTION_TYPE={section_type}"
+                    ),
+                })
+                plans.append({
+                    "name": planned_name,
+                    "feeder_id": feeder_id,
+                    "feeder_name": feeder_display_name(feeder_id),
+                    "bv_id": int(bv_id),
+                    "section_type": section_type,
+                    "order_index": row.get("order_index", ""),
+                    "xml_id": row.get("xml_id", ""),
+                })
+                target_plan_count += 1
+
+            if target_plan_count:
+                create_targets.append({
+                    "feeder_id": feeder_id,
+                    "feeder_name": feeder_display_name(feeder_id),
+                    "prefix": prefix,
+                    "bv_id": int(bv_id),
+                    "nomvol": voltage.get("nomvol", ""),
+                    "station_name": feeder.get("station_name", ""),
+                    "planned_create_count": target_plan_count,
+                })
+
+        report["feedline_rows"] = rows
+        report["section_create_plan"] = plans
+        report["section_create_targets"] = create_targets
+        report["planned_create_count"] = len(plans)
+        if len(create_targets) == 1:
+            target = create_targets[0]
+            report["section_prefix"] = target["prefix"]
+            report["section_station_bv_id"] = target["bv_id"]
+            report["section_nominal_voltage_kv"] = target["nomvol"]
+            report["section_station_name"] = target["station_name"]
+        elif len(create_targets) > 1:
+            report["section_prefix"] = " | ".join(
+                f"{item['feeder_id']}:{item['prefix']}" for item in create_targets
+            )
+            report["section_station_bv_id"] = " | ".join(
+                f"{item['feeder_id']}:{item['bv_id']}" for item in create_targets
+            )
+            report["section_nominal_voltage_kv"] = " | ".join(
+                f"{item['feeder_id']}:{item['nomvol']}" for item in create_targets
+            )
+            report["section_station_name"] = " | ".join(
+                str(item.get("station_name") or "") for item in create_targets
+            )
+
+        fail_count = sum(1 for row in rows if row.get("status") == "FAIL")
+        ready_count = sum(
+            1 for row in rows
+            if row.get("association_ready") == "YES" and row.get("writeback_needed") == "YES"
+        )
+        linked_correct = sum(1 for row in rows if row.get("model_link_correct") == "YES")
+        report["status"] = "WARN" if fail_count or ready_count else "PASS"
+        report["severity"] = "PARTIAL_ERROR" if fail_count else ("ASSOCIATION_READY" if ready_count else "PASS")
+        report["reason"] = (
+            f"MAKKAH_RING_TOPOLOGY_FEEDER_VALIDATED: feeders={len(candidate_order)}; "
+            f"topology_confirmed={report['feedline_topology_confirmed_count']}; "
+            f"topology_conflict={report['feedline_topology_conflict_count']}; "
+            f"topology_unresolved={report['feedline_topology_unresolved_count']}; "
+            f"already_correct={linked_correct}; ready={ready_count}; "
+            f"create={len(plans)}; create_feeders={len(create_targets)}; errors={fail_count}"
+        )
+        report["summary"] = FeederValidator._summary(report)
+
+        creation_text = ", ".join(
+            f"{item['feeder_name'] or item['feeder_id']}:{item['planned_create_count']}"
+            for item in create_targets
+        ) or "0"
+        log_callback(
+            f"[{g_file.name}] 麦加馈线拓扑归属校验：有效馈线={len(candidate_order)}；"
+            f"FeedLine拓扑确认={report['feedline_topology_confirmed_count']}；"
+            f"冲突={report['feedline_topology_conflict_count']}；"
+            f"未确定={report['feedline_topology_unresolved_count']}；"
+            f"已正确关联={linked_correct}；待关联/修复={ready_count}；"
+            f"按所属馈线新建13503={len(plans)}（{creation_text}）；错误={fail_count}。"
+        )
+        return report
+
     def validate(
         self,
         db,
@@ -1353,7 +2114,6 @@ class FeederModelModule(ModelModule):
         log_callback,
         progress_callback=None,
     ):
-        validator = self._validator(db, settings, log_callback)
         reports = []
         aggregate = {
             "feeder_files": 0,
@@ -1364,143 +2124,43 @@ class FeederModelModule(ModelModule):
             "feedline_fail": 0,
             "association_ready": 0,
         }
-
         total = max(len(files), 1)
-        profiles = {
-            Path(g_file): self._drawing_profile(g_file, settings)
-            for g_file in files
-        }
-        directory_mode = bool(settings.get("input_is_directory", False))
-        fingerprints = []
-        if directory_mode:
-            for fp_file, profile in profiles.items():
-                if profile.get("drawing_type") != "SINGLE_FEEDER":
-                    continue
-                fp = self._build_single_file_fingerprint(
-                    db, fp_file, profile, settings, log_callback
-                )
-                if fp:
-                    fingerprints.append(fp)
-            log_callback(
-                f"目录馈线模式：使用当前所选馈线识别来源逐文件独立解析；"
-                f"已建立可信单馈线指纹={len(fingerprints)}。"
-            )
-
         for idx, g_file in enumerate(files, start=1):
             g_file = Path(g_file)
-            profile = profiles[g_file]
-            drawing_type = profile.get("drawing_type")
-            override_note = ""
-            if profile.get("drawing_type_overridden") == "YES":
-                override_note = (
-                    f" | 人工确认={profile.get('drawing_mode')}"
-                    f" | 自动识别={profile.get('automatic_drawing_type')}"
-                    f"({profile.get('automatic_classification_reason', '')})"
-                )
-            log_callback(
-                f"[{idx}/{len(files)}] 正在处理馈线模型：{g_file.name} | "
-                f"类型={drawing_type} | CBreaker={profile.get('source_cbreaker_count', 0)} | "
-                f"置信度={profile.get('classification_confidence', '')} | "
-                f"Bus={profile.get('bus_count')} "
-                f"(有效母线={profile.get('effective_busbar_count', 0)}) | "
-                f"源分支={profile.get('feeder_source_branch_count', 0)} | "
-                f"标题锚点={profile.get('feeder_title_count', 0)} | "
-                f"FeedLine={profile.get('feedline_count')} | "
-                f"判据={profile.get('classification_reason', '')}"
-                f"{override_note}"
+            log_callback(f"[{idx}/{len(files)}] 正在处理麦加环网图馈线：{g_file.name}")
+            feeder, candidates = self._resolve_any_ring_feeder(
+                db, g_file, settings, log_callback
             )
-
-            if drawing_type == "MULTI_FEEDER_COMPOSITE":
-                # Makkah ring diagrams contain multiple feeders in one G file.
-                # They use the same nearest-associated-device path as a single
-                # drawing; each validated region keeps its own feeder ID, while
-                # the validator coalesces disconnected fragments of one feeder
-                # before section allocation.
-                file_report = validator.validate_file(
-                    g_file,
-                    drawing_mode="MULTI",
-                )
-            elif drawing_type == "AMBIGUOUS":
+            if feeder is None:
                 file_report = self._unresolved_file_report(
                     g_file,
-                    "DRAWING_TYPE_AMBIGUOUS: 无法可靠判定单馈线/组合大图；只报告，不自动关联。",
+                    "MAKKAH_RING_FEEDER_NOT_FOUND: 当前环网图所有含 CBreaker 的主网 Bay 框均未通过 Station -> ST_ID -> dms_feeder_device 唯一确认到馈线。",
                 )
-                file_report["drawing_type"] = "AMBIGUOUS"
                 region_reports = file_report.get("feeder_regions") or [file_report]
-            else:
-                # Feeder identity is now derived only from the nearest already
-                # associated RMU/switch/transformer model.  The old FACID,
-                # filename and manual feeder-name inputs are intentionally not
-                # consulted here.
-                file_report = validator.validate_file(
-                    g_file,
-                    drawing_mode=str(
-                        settings.get("feeder_drawing_mode", "AUTO")
-                        or "AUTO"
-                    ).upper(),
-                )
-            if drawing_type != "AMBIGUOUS":
-                region_reports = file_report.get("feeder_regions") or [file_report]
-                enriched_reports=[]
                 for report in region_reports:
-                    report=self._prepare_single_feeder_rows(report,g_file,log_callback)
-                    report=self._augment_section_creation_plan(db,report,settings,log_callback)
-                    enriched_reports.append(report)
-                region_reports=enriched_reports
+                    report["drawing_type"] = "MAKKAH_RING_MULTI_FEEDER_POOL"
+                    report["ring_candidate_feeder_count"] = 0
+                    report["ring_candidate_feeder_ids"] = ""
+                    report["ring_candidate_feeder_names"] = ""
+            else:
+                report = self._validate_makkah_ring_feeder_pool(
+                    db, g_file, candidates, settings, log_callback
+                )
+                region_reports = [report]
 
-            # Keep classification provenance in every report row.  This is
-            # especially important when an operator explicitly confirms the
-            # current file/folder as SINGLE or MULTI instead of using AUTO.
-            for report in region_reports:
-                report["drawing_type"] = drawing_type
-                report["drawing_mode"] = profile.get("drawing_mode", "AUTO")
-                report["automatic_drawing_type"] = profile.get(
-                    "automatic_drawing_type", drawing_type
-                )
-                report["classification_reason"] = profile.get(
-                    "classification_reason", ""
-                )
-                report["automatic_classification_reason"] = profile.get(
-                    "automatic_classification_reason", ""
-                )
-                report["drawing_type_overridden"] = profile.get(
-                    "drawing_type_overridden", "NO"
-                )
             reports.extend(region_reports)
-
-            drawing_type = file_report.get(
-                "drawing_type",
-                region_reports[0].get("drawing_type", "SINGLE_FEEDER")
-                if region_reports else "SINGLE_FEEDER",
-            )
-            log_callback(
-                f"[{g_file.name}] 图纸类型={drawing_type}；"
-                f"识别馈线区域={len(region_reports)}"
-            )
             aggregate["feeder_files"] += 1
             for report in region_reports:
-                feeder_text = (
-                    f"区域{report.get('region_index', 1)} "
-                    f"馈线={report.get('feeder_name') or report.get('feeder_hint') or '-'}；"
-                    f"FeedLine={len(report.get('feedline_rows', []))}；"
-                    f"状态={report.get('status')}"
+                log_callback(
+                    f"[{g_file.name}] 已确认馈线={report.get('ring_candidate_feeder_names') or report.get('feeder_name') or '-'}；"
+                    f"FeedLine={len(report.get('feedline_rows', []))}；状态={report.get('status')}"
                 )
-                log_callback(f"[{g_file.name}] {feeder_text}")
-
+                summary = report.get("summary", {}) or {}
                 for key in aggregate:
-                    if key == "feeder_files":
-                        continue
-                    aggregate[key] += int(
-                        report.get("summary", {}).get(key, 0)
-                    )
-
+                    if key != "feeder_files":
+                        aggregate[key] += int(summary.get(key, 0) or 0)
             if progress_callback:
-                percent = 5 + int((idx / total) * 90)
-                progress_callback(
-                    min(percent, 95),
-                    f"{g_file.name}：馈线模型校验完成",
-                )
-
+                progress_callback(int(idx * 100 / total))
         return reports, aggregate, self._rules(settings)
 
     @staticmethod
@@ -1511,12 +2171,10 @@ class FeederModelModule(ModelModule):
                 f"FeedLine:{row.get('xml_id')}: "
                 "数据库 BV_ID 为空，禁止生成模型回写。"
             )
-
         return {
             "app": "6500000",
             "p_ReportType": "1",
             "state": "20",
-            # FeedLine voltype 使用 dms_section_device.BV_ID。
             "voltype": bv_id,
             "keyid": str(row["expected_keyid"]),
         }
@@ -1634,7 +2292,8 @@ class FeederModelModule(ModelModule):
                     if row.get("model_link_correct") == "YES":
                         log_callback(
                             f"无需关联：FeedLine XML={row.get('xml_id')} "
-                            f"已经属于馈线 {report.get('feeder_name')}。"
+                            f"已经属于本图已确认馈线 "
+                            f"{row.get('current_feeder_name') or report.get('feeder_name')}。"
                         )
                     continue
 
@@ -1652,12 +2311,22 @@ class FeederModelModule(ModelModule):
                     attrs = self._attributes_for_row(row)
                 if row.get("ls_normalization_needed") == "YES":
                     attrs["ls"] = str(row.get("ls_normalized") or "2")
+                target_feeder_id = (
+                    row.get("assigned_feeder_id")
+                    or row.get("current_feeder_id")
+                    or report.get("feeder_id", "")
+                )
+                target_feeder_name = (
+                    row.get("assigned_feeder_name")
+                    or row.get("current_feeder_name")
+                    or report.get("feeder_name", "")
+                )
                 change = {
                     "xml_id": row["xml_id"],
                     "tag": "FeedLine",
                     "attributes": attrs,
-                    "feeder_name": report.get("feeder_name", ""),
-                    "feeder_id": report.get("feeder_id", ""),
+                    "feeder_name": target_feeder_name,
+                    "feeder_id": target_feeder_id,
                     "region_index": report.get("region_index", ""),
                     "section_name": row.get("assigned_section_name", ""),
                     "device_id": row.get("assigned_device_id", ""),
@@ -1878,7 +2547,6 @@ class FeederModelModule(ModelModule):
             key = (
                 str(report.get("g_file", "") or ""),
                 str(report.get("region_index", "") or ""),
-                str(report.get("feeder_id", "") or ""),
             )
             report_lookup[key] = report
 
@@ -1889,11 +2557,16 @@ class FeederModelModule(ModelModule):
 
         for source_file, changes in changes_by_file.items():
             grouped = defaultdict(list)
+            source_selected_feedline_xml_ids = set()
             for change in changes or []:
                 grouped[(
                     str(change.get("region_index", "") or ""),
                     str(change.get("feeder_id", "") or ""),
                 )].append(dict(change))
+                if str(change.get("tag", "") or "").upper() == "FEEDLINE":
+                    source_selected_feedline_xml_ids.add(
+                        str(change.get("xml_id", "") or "")
+                    )
 
             for (region_index, feeder_id_text), selected_changes in grouped.items():
                 log_callback(
@@ -1908,7 +2581,7 @@ class FeederModelModule(ModelModule):
                     continue
 
                 report = report_lookup.get((
-                    str(source_file), region_index, feeder_id_text,
+                    str(source_file), region_index,
                 ))
                 if report is None:
                     for change in selected_changes:
@@ -2013,17 +2686,16 @@ class FeederModelModule(ModelModule):
                 )
                 section_rows = sorted(section_rows, key=natural_section_key)
 
-                selected_xml_ids = {
-                    str(change.get("xml_id", "") or "")
-                    for change in feedline_changes
-                }
-
-                # Reserve database records currently used by UNSELECTED G rows
-                # when their current KeyID still resolves to this feeder/table/
-                # domain. This gives duplicate selection intuitive semantics.
+                # Reserve database records currently used by rows that are
+                # UNSELECTED in the whole source file.  A FeedLine selected in
+                # another target-feeder group may be moving away from this
+                # feeder, so its old 13503 must not remain falsely protected.
                 protected_ids = set()
                 for row in report.get("feedline_rows", []) or []:
-                    if str(row.get("xml_id", "") or "") in selected_xml_ids:
+                    if (
+                        str(row.get("xml_id", "") or "")
+                        in source_selected_feedline_xml_ids
+                    ):
                         continue
                     did = int_or_none(row.get("current_device_id"))
                     owner = int_or_none(row.get("current_feeder_id"))
@@ -2049,12 +2721,10 @@ class FeederModelModule(ModelModule):
                 # exact planned SEC name, not merely by "pool size".  Example:
                 # G order #2 requires ..._SEC002.  If DB has SEC010 but not
                 # SEC002, SEC002 is still missing and must be created.
-                if bool(
-                    settings.get(
-                        "auto_create_missing_sections",
-                        True,
-                    )
-                ):
+                # Makkah fixed rule: missing 13503 rows are always created
+                # for selected FeedLines after one drawing-local feeder has
+                # been uniquely confirmed.
+                if True:
                     existing_names = {
                         str(section.get("name") or "").strip().upper()
                         for section in section_rows
@@ -2443,12 +3113,17 @@ class FeederModelModule(ModelModule):
             if key in operation_report_map:
                 return operation_report_map[key]
 
-            original = report_lookup.get(key, {}) or {}
+            original = report_lookup.get((
+                str(source_file),
+                str(change.get("region_index", "") or ""),
+            ), {}) or {}
             report = {
                 k: v
                 for k, v in original.items()
                 if k != "feedline_rows"
             }
+            report["feeder_id"] = change.get("feeder_id", report.get("feeder_id", ""))
+            report["feeder_name"] = change.get("feeder_name", report.get("feeder_name", ""))
             report["report_type"] = "FEEDER"
             report["g_file"] = str(source_file)
             report["file_name"] = Path(source_file).name
