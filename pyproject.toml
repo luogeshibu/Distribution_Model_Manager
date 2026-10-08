@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "distribution-model-manager"
-version = "4.1.40"
-description = "Distribution G-file model validation and safe association manager"
+version = "4.2.23"
+description = "Jeddah distribution model association and G-file graphics processing unified desktop application"
 requires-python = ">=3.11"
 dependencies = [
     "PySide6>=6.7",
@@ -13,6 +13,9 @@ dependencies = [
     "cryptography>=42.0",
     "paramiko>=3.4",
     "cffi>=1.16",
+    "openpyxl>=3.1,<4",
+    "platformdirs>=4,<5",
+    "pydantic>=2.10,<3",
 ]
 
 [project.optional-dependencies]

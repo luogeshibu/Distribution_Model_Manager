@@ -33,6 +33,7 @@ from dmm.domain.gfile.element_catalog import (
     resolve_element_record,
 )
 from dmm.infrastructure.remote import ReadOnlySshClient
+from dmm.i18n.translator import translate_runtime_text, retranslate_qt_tree
 
 
 def _record_with_defaults(record: dict) -> dict:
@@ -377,6 +378,7 @@ class ElementManagementWidget(QWidget):
     """Read-only server inspection plus local maintenance of element marks."""
 
     catalogChanged = Signal()
+    centralSyncRequested = Signal()
 
     HEADERS = (
         "图元定义文件",
@@ -412,6 +414,7 @@ class ElementManagementWidget(QWidget):
         self.download_worker: ElementDownloadWorker | None = None
         self._rendering = False
         self.dirty = False
+        self._admin_mode = False
         self._build_ui()
         self._load_saved_records()
 
@@ -425,8 +428,9 @@ class ElementManagementWidget(QWidget):
         layout.addWidget(title)
         subtitle = QLabel(
             "维护服务器图元文件与设备分类标记。进入页面只读取本地缓存，不会自动访问服务器；"
-            "只有点击“刷新图元列表”才会重新读取。可勾选图元下载到本地，模型识别按完整图元路径匹配，"
-            "原始服务器文件只读，不会被修改。图元分类标记保存在当前用户缓存中，替换或删除程序目录后仍会保留。"
+            "只有点击“刷新图元列表”才会重新读取。普通客户端可以修改并保存本机缓存；配置操作分为三个独立动作："
+            "保存到本地缓存、Admin 保存并同步到中央仓库、手动同步中央配置仓库并覆盖本地共享配置。"
+            "原始服务器文件只读，不会被修改。"
         )
         subtitle.setWordWrap(True)
         subtitle.setObjectName("pageSubtitle")
@@ -472,10 +476,17 @@ class ElementManagementWidget(QWidget):
 
         self.load_saved_button = QPushButton("载入本地标记")
         self.load_saved_button.clicked.connect(self._load_saved_records)
-        self.save_button = QPushButton("保存标记")
-        self.save_button.clicked.connect(self.save_catalog)
-        self.sync_button = QPushButton("保存并同步中央配置")
-        self.sync_button.clicked.connect(self.publish_catalog_to_central)
+        self.save_button = QPushButton("保存到本地缓存")
+        self.save_button.setToolTip("仅保存当前图元服务器设置和图元分类标记到本机缓存，不访问中央仓库。")
+        self.save_button.clicked.connect(lambda: self.save_local_cache())
+        self.publish_button = QPushButton("保存并同步到中央仓库")
+        self.publish_button.setToolTip("仅 Admin 可用：先保存到本地缓存，再把当前本机共享配置发布到中央仓库。")
+        self.publish_button.clicked.connect(self.publish_catalog_to_central)
+        # Backward-compatible attribute name used by older code/tests.
+        self.sync_button = self.publish_button
+        self.central_pull_button = QPushButton("同步中央配置仓库配置")
+        self.central_pull_button.setToolTip("手动读取中央共享配置并覆盖本机缓存；普通客户端也可使用。")
+        self.central_pull_button.clicked.connect(self.request_central_sync)
         self.import_button = QPushButton("导入共享配置")
         self.import_button.clicked.connect(self.import_shared_catalog)
         self.export_button = QPushButton("导出共享配置")
@@ -485,20 +496,33 @@ class ElementManagementWidget(QWidget):
         self.more_actions_button.setText("更多操作")
         self.more_actions_button.setPopupMode(QToolButton.InstantPopup)
         more_menu = QMenu(self.more_actions_button)
-        more_menu.addAction(self.test_server_button.text(), self.test_server_connection)
-        more_menu.addAction(self.save_server_button.text(), self.save_server_settings)
+        self.test_server_action = more_menu.addAction(
+            self.test_server_button.text(), self.test_server_connection
+        )
+        self.save_server_action = more_menu.addAction(
+            self.save_server_button.text(), self.save_server_settings
+        )
         more_menu.addSeparator()
-        more_menu.addAction(self.download_button.text(), self.download_selected_elements)
-        more_menu.addAction(self.load_saved_button.text(), self._load_saved_records)
+        self.download_action = more_menu.addAction(
+            self.download_button.text(), self.download_selected_elements
+        )
+        self.load_saved_action = more_menu.addAction(
+            self.load_saved_button.text(), self._load_saved_records
+        )
         more_menu.addSeparator()
-        more_menu.addAction(self.import_button.text(), self.import_shared_catalog)
-        more_menu.addAction(self.export_button.text(), self.export_shared_catalog)
+        self.import_action = more_menu.addAction(
+            self.import_button.text(), self.import_shared_catalog
+        )
+        self.export_action = more_menu.addAction(
+            self.export_button.text(), self.export_shared_catalog
+        )
         self.more_actions_button.setMenu(more_menu)
 
         actions = QHBoxLayout()
         actions.addWidget(self.load_button)
         actions.addWidget(self.save_button)
-        actions.addWidget(self.sync_button)
+        actions.addWidget(self.publish_button)
+        actions.addWidget(self.central_pull_button)
         actions.addWidget(self.more_actions_button)
         actions.addStretch()
         source_grid.addLayout(actions, 5, 1, 1, 6)
@@ -581,6 +605,74 @@ class ElementManagementWidget(QWidget):
         # once the table has its real viewport width instead of the initial
         # zero-width value.
         QTimer.singleShot(0, self._fit_table_columns)
+        self.set_admin_mode(False)
+
+    def set_admin_mode(self, is_admin: bool):
+        """Apply Admin ownership only to central publishing.
+
+        All clients may edit, test, refresh, import and save configuration to
+        their own local cache.  Admin ownership is required only when a
+        client uploads shared configuration to the central repository.
+        """
+        self._admin_mode = bool(is_admin)
+
+        # Local configuration remains fully editable for every client.
+        for edit in getattr(self, "server_edits", {}).values():
+            edit.setReadOnly(False)
+
+        if hasattr(self, "table"):
+            self.table.setEditTriggers(
+                QAbstractItemView.DoubleClicked
+                | QAbstractItemView.EditKeyPressed
+                | QAbstractItemView.SelectedClicked
+            )
+
+        for name in ("save_server_button", "load_button", "save_button", "import_button"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setEnabled(True)
+        for name in ("save_server_action", "import_action"):
+            action = getattr(self, name, None)
+            if action is not None:
+                action.setEnabled(True)
+
+        # The only Admin-only operation on this page is uploading the current
+        # shared configuration to the central repository.
+        if hasattr(self, "publish_button"):
+            self.publish_button.setEnabled(self._admin_mode)
+
+        if hasattr(self, "status_label") and not self._admin_mode:
+            self._set_status(
+                "普通客户端可修改、测试、刷新并保存本机配置，也可手动同步中央配置；"
+                "只有【保存并同步到中央仓库】需要先抢占 Admin。"
+            )
+
+        self._retranslate_dynamic_ui()
+
+    def _active_language(self) -> str:
+        window = self.window()
+        return str(getattr(window, "language", "zh_CN") or "zh_CN")
+
+    def _set_status(self, text) -> None:
+        """Set the dynamic status label in the active DMM language."""
+        if not hasattr(self, "status_label"):
+            return
+        self.status_label.setText(
+            translate_runtime_text(str(text or ""), self._active_language())
+        )
+
+    def _retranslate_dynamic_ui(self) -> None:
+        retranslate_qt_tree(self, self._active_language())
+
+    def _require_admin_mode(self, action_text: str) -> bool:
+        if self._admin_mode:
+            return True
+        QMessageBox.information(
+            self,
+            action_text,
+            "当前操作会把共享配置上传到中央仓库，只有 Admin 可以执行；请先到【设置】抢占 Admin。",
+        )
+        return False
 
     def _configure_table_readability(self):
         """Keep table content readable and responsive to app/DPI scaling."""
@@ -729,7 +821,7 @@ class ElementManagementWidget(QWidget):
     def test_server_connection(self):
         try:
             config = self._current_element_ssh_config()
-            self.status_label.setText("正在测试图元服务器 SSH/SFTP 只读连接……")
+            self._set_status("正在测试图元服务器 SSH/SFTP 只读连接……")
             with ReadOnlySshClient(
                 config["host"],
                 config["port"],
@@ -738,18 +830,18 @@ class ElementManagementWidget(QWidget):
             ) as client:
                 client.test_connection()
             self._save_element_ssh_config(config)
-            self.status_label.setText(
+            self._set_status(
                 "图元服务器 SSH/SFTP 连接正常；远程图元文件为只读。"
             )
         except Exception as exc:
-            self.status_label.setText(f"图元服务器连接失败：{exc}")
+            self._set_status(f"图元服务器连接失败：{exc}")
             QMessageBox.warning(self, "图元服务器连接失败", str(exc))
 
     def save_server_settings(self):
         try:
             config = self._current_element_ssh_config()
             self._save_element_ssh_config(config)
-            self.status_label.setText(
+            self._set_status(
                 "图元服务器 SSH 配置已保存；下次启动将自动恢复。"
             )
         except Exception as exc:
@@ -774,6 +866,11 @@ class ElementManagementWidget(QWidget):
         """Refresh the endpoint fields after SSH settings are changed."""
         if hasattr(self, "server_edits"):
             self._refresh_server_info()
+
+    def reload_local_cache(self):
+        """Reload server fields and element marks from the in-memory local cache."""
+        self._refresh_server_info()
+        self._load_saved_records()
 
     def _catalog(self) -> dict:
         catalog = self.config.get("element_catalog", {})
@@ -807,7 +904,7 @@ class ElementManagementWidget(QWidget):
         self.rows = _merge_duplicate_records(records)
         self.dirty = False
         self._render_rows()
-        self.status_label.setText(
+        self._set_status(
             f"已载入本地缓存：{len(self.rows)} 条（相同图元路径已合并）；不会自动访问服务器。"
         )
 
@@ -831,12 +928,12 @@ class ElementManagementWidget(QWidget):
             return
         directory = ssh_config["element_directory"]
         self.load_button.setEnabled(False)
-        self.status_label.setText("正在读取服务器图元文件列表，请稍候……")
+        self._set_status("正在读取服务器图元文件列表，请稍候……")
         worker = ElementDefinitionWorker(ssh_config, directory, self)
         self.worker = worker
         worker.loaded.connect(self._on_remote_loaded)
         worker.failed.connect(self._on_remote_failed)
-        worker.finished.connect(lambda: self.load_button.setEnabled(True))
+        worker.finished.connect(lambda: self.load_button.setEnabled(self._admin_mode))
         worker.finished.connect(self._clear_worker)
         worker.start()
 
@@ -878,7 +975,7 @@ class ElementManagementWidget(QWidget):
             return
 
         self.download_button.setEnabled(False)
-        self.status_label.setText(f"正在下载 {len(rows)} 个图元文件，请稍候……")
+        self._set_status(f"正在下载 {len(rows)} 个图元文件，请稍候……")
         worker = ElementDownloadWorker(
             config,
             config["element_directory"],
@@ -906,15 +1003,15 @@ class ElementManagementWidget(QWidget):
             message += f"\n\n失败详情：\n{details}"
         self.config["last_folder_path"] = str(destination)
         save_settings(self.config)
-        self.status_label.setText(message.replace("\n", "<br>"))
+        self._set_status(message.replace("\n", "<br>"))
         QMessageBox.information(self, "图元下载完成", message)
 
     def _on_element_download_failed(self, message: str):
-        self.status_label.setText(f"图元下载失败：{message}")
+        self._set_status(f"图元下载失败：{message}")
         QMessageBox.warning(self, "图元下载失败", message)
 
     def _on_remote_failed(self, message: str):
-        self.status_label.setText(f"读取失败：{message}")
+        self._set_status(f"读取失败：{message}")
         QMessageBox.warning(self, "读取图元定义失败", message)
 
     def _on_remote_loaded(self, rows: list):
@@ -991,7 +1088,7 @@ class ElementManagementWidget(QWidget):
             auto_saved = True
         except Exception as exc:
             auto_saved = False
-            self.status_label.setText(f"服务器读取完成，但本地自动保存失败：{exc}")
+            self._set_status(f"服务器读取完成，但本地自动保存失败：{exc}")
         if remote_count != len(rows):
             messages = [
                 f"已读取服务器图元文件：{remote_count} 条，按相对路径去重后 {len(rows)} 条。"
@@ -1011,7 +1108,7 @@ class ElementManagementWidget(QWidget):
             messages.append("本次服务器结果和标记已自动保存到本地缓存；下次打开不会自动访问服务器。")
         else:
             messages.append("请点击“保存图元标记”重试本地保存。")
-        self.status_label.setText("\n".join(messages))
+        self._set_status("\n".join(messages))
 
     def _item(self, value, editable=False):
         item = QTableWidgetItem(str(value or ""))
@@ -1103,6 +1200,7 @@ class ElementManagementWidget(QWidget):
                 self.table.setColumnWidth(column, scaled_minimum)
         self.table.resizeRowsToContents()
         self._fit_table_columns()
+        self._retranslate_dynamic_ui()
 
     def _apply_filter(self, text: str):
         needle = str(text or "").strip().casefold()
@@ -1157,7 +1255,7 @@ class ElementManagementWidget(QWidget):
             row["remark"] = self.table.item(row_index, 6).text().strip()
 
     def _on_table_changed(self, _item):
-        if self._rendering:
+        if self._rendering or not self._admin_mode:
             return
         self.dirty = True
         answer = QMessageBox.question(
@@ -1178,11 +1276,50 @@ class ElementManagementWidget(QWidget):
                     f"修改已保留在当前页面，但保存到本机失败：\n{exc}",
                 )
         else:
-            self.status_label.setText(
+            self._set_status(
                 "有未保存的图元标记修改；模型校验仍会使用上一次已保存的配置。"
             )
 
-    def save_catalog(self, sync_central=True):
+    def request_central_sync(self):
+        """Request an explicit central pull; this never runs automatically."""
+        if self.dirty:
+            answer = QMessageBox.question(
+                self,
+                "同步中央配置仓库配置",
+                "当前有未保存的图元标记修改。同步中央仓库会用中央共享配置覆盖本机缓存，"
+                "当前未保存修改也会丢失。是否继续？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        self._set_status("正在手动同步中央配置仓库，请稍候……")
+        self.centralSyncRequested.emit()
+
+    def save_local_cache(self, *, show_status=True):
+        """Save the visible element-server settings and marks locally only."""
+        try:
+            ssh_config = self._current_element_ssh_config()
+            self._sync_rows_from_table()
+            self.config["ssh"] = ssh_config
+            self.config["element_catalog"] = {
+                "remote_directory": self.directory_edit.text().strip(),
+                "records": [dict(row) for row in self.rows],
+            }
+            save_settings(self.config)
+            self.dirty = False
+            if show_status:
+                self._set_status(
+                    f"已保存图元服务器配置和 {len(self.rows)} 条图元标记到本机缓存；未访问中央仓库。"
+                )
+            self.catalogChanged.emit()
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self, "保存到本地缓存失败", str(exc))
+            return False
+
+    def save_catalog(self, sync_central=False):
+        """Save element classifications to this client's local cache."""
         self._sync_rows_from_table()
         self.config.setdefault("ssh", {})["element_directory"] = (
             self.directory_edit.text().strip()
@@ -1192,57 +1329,28 @@ class ElementManagementWidget(QWidget):
             "records": [dict(row) for row in self.rows],
         }
         save_settings(self.config)
-        central_state = dict(self.config.get("_central_sync", {}) or {})
-        machine_id = str(self.config.get("machine_id") or "")
-        admin_id = str(central_state.get("admin_machine_id") or "")
-        central_published = False
-        central_error = ""
-        if (
-            sync_central
-            and
-            central_state.get("status") == "ACTIVE"
-            and machine_id
-            and machine_id == admin_id
-        ):
-            try:
-                publish_central_settings(self.config)
-                save_settings(self.config)
-                central_published = True
-            except Exception as exc:
-                central_error = str(exc)
         self.dirty = False
-        suffix = "，并已同步到中央配置" if central_published else ""
-        if central_error:
-            suffix = "，但中央配置同步失败"
-        self.status_label.setText(
-            f"已保存 {len(self.rows)} 条图元标记{suffix}。后续模型识别会按图元文件标识匹配。"
+        self._set_status(
+            f"已保存 {len(self.rows)} 条图元标记到本机缓存。后续模型识别会按图元文件标识匹配。"
         )
-        if central_error:
-            QMessageBox.warning(
-                self,
-                "中央配置同步失败",
-                "图元标记已保存到本机，但没有发布到中央配置：\n" + central_error,
-            )
         self.catalogChanged.emit()
 
     def publish_catalog_to_central(self):
-        """Explicitly publish the current element marks from the Admin UI."""
+        """Admin-only: save locally, then explicitly publish to central."""
+        if not self._require_admin_mode("保存并同步到中央仓库"):
+            return
+        if not self.save_local_cache(show_status=False):
+            return
         try:
-            self.save_catalog(sync_central=False)
-            state = dict(self.config.get("_central_sync", {}) or {})
-            machine_id = str(self.config.get("machine_id") or "")
-            admin_id = str(state.get("admin_machine_id") or "")
-            if state.get("status") != "ACTIVE" or machine_id != admin_id:
-                raise ValueError(
-                    "当前机器不是 Admin，不能发布中央配置。请先在【设置】中完成 Admin 初始化或接管。"
-                )
+            # No prior central read is required. This explicit action contacts
+            # the server, which verifies Admin ownership/epoch before accepting data.
             version = publish_central_settings(self.config)
             save_settings(self.config)
-            self.status_label.setText(
-                f"已保存 {len(self.rows)} 条图元标记，并已同步到中央配置（版本 {version}）。"
+            self._set_status(
+                f"已保存到本机缓存，并已同步到中央仓库（版本 {version}，图元标记 {len(self.rows)} 条）。"
             )
         except Exception as exc:
-            QMessageBox.warning(self, "中央配置同步失败", str(exc))
+            QMessageBox.warning(self, "中央配置发布失败", str(exc))
 
     def export_shared_catalog(self):
         self._sync_rows_from_table()
@@ -1266,7 +1374,7 @@ class ElementManagementWidget(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "导出共享配置失败", str(exc))
             return
-        self.status_label.setText(
+        self._set_status(
             f"已导出 {len(self.rows)} 条图元标记共享配置；文件不包含 SSH 主机、用户名和密码。"
         )
 
@@ -1331,7 +1439,7 @@ class ElementManagementWidget(QWidget):
 
         self.dirty = True
         self._render_rows()
-        self.status_label.setText(
+        self._set_status(
             f"已导入 {imported} 条共享标记，等待确认保存到本机。"
         )
         answer = QMessageBox.question(

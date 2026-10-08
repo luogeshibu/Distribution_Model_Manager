@@ -48,6 +48,20 @@ class ABHDB:
             999: [{"id": 9001, "name": "OLD_SEC001", "feeder_id": 999, "bv_id": 91}],
         }
 
+
+    def find_substations_by_name(self, name, table_id=405):
+        if str(name).strip() == "ABH":
+            return [{"id": 40501, "name": "ABH"}]
+        return []
+
+    def find_feeders_by_station_and_name(self, station_id, feeder_name, table_id=13500):
+        if int(station_id) != 40501:
+            return []
+        return [
+            dict(row) for row in self.feeders.values()
+            if str(row.get("name") or "").strip() == str(feeder_name or "").strip()
+        ]
+
     def get_feeder_info(self, feeder_id, table_id=13500):
         row = self.feeders.get(int(feeder_id))
         if row:
@@ -99,19 +113,19 @@ def make_g(path: Path, facid=""):
     return path
 
 
-def test_filename_parser_supports_numeric_and_full_code_and_timestamp_suffix():
+def test_filename_parser_is_strict_jeddah_numeric_suffix_and_timestamp_safe():
     m = FeederModelModule()
     station, token, _ = m._filename_feeder_parts(
         Path("JED-NTH-ABH-03.sln.pic(20260831-143200).g")
     )
-    assert station == "JED-NTH-ABH"
+    assert station == "ABH"
     assert token == "03"
 
     station, token, _ = m._filename_feeder_parts(
         Path("JED-NTH-ABH-AH303.sln.pic.g")
     )
-    assert station == "JED-NTH-ABH"
-    assert token == "AH303"
+    assert station == ""
+    assert token == ""
 
 
 def test_filename_numeric_token_resolves_with_short_station_hint(tmp_path):
@@ -129,11 +143,11 @@ def test_filename_numeric_token_resolves_with_short_station_hint(tmp_path):
     )
     assert row["id"] == 303
     assert row["name"] == "AH303"
-    assert row["_resolution_source"] == "FILENAME"
-    assert "token=03" in row["_resolution_evidence"]
+    assert row["_resolution_source"] == "FILENAME_405_13500"
+    assert "filename_suffix=03" in row["_resolution_evidence"]
 
 
-def test_filename_full_code_is_used_directly(tmp_path):
+def test_filename_full_code_is_rejected_by_strict_jeddah_fallback(tmp_path):
     g = make_g(tmp_path / "JED-NTH-ABH-AH305.sln.pic.g")
     row = FeederModelModule()._resolve_file_feeder(
         ABHDB(),
@@ -145,14 +159,13 @@ def test_filename_full_code_is_used_directly(tmp_path):
         },
         lambda _m: None,
     )
-    assert row["id"] == 305
-    assert row["name"] == "AH305"
+    assert row is None
 
 
 def test_same_filename_resolver_handles_batch_files_independently(tmp_path):
     files = [
         make_g(tmp_path / "JED-NTH-ABH-03.sln.pic.g"),
-        make_g(tmp_path / "JED-NTH-ABH-AH304.sln.pic.g"),
+        make_g(tmp_path / "JED-NTH-ABH-04.sln.pic.g"),
     ]
     module = FeederModelModule()
     settings = {

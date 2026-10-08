@@ -59,6 +59,77 @@ class Box:
         )
 
 
+def box_min_edge_components(left: Box, right: Box):
+    """Return the non-overlapping x/y gaps between two rectangles.
+
+    A gap is zero on an axis when the rectangles overlap on that axis.  These
+    two components are the basis for the project's unified device-to-name
+    geometry; no rectangle-center distance participates.
+    """
+    dx = max(
+        float(left.left) - float(right.right),
+        float(right.left) - float(left.right),
+        0.0,
+    )
+    dy = max(
+        float(left.top) - float(right.bottom),
+        float(right.top) - float(left.bottom),
+        0.0,
+    )
+    return dx, dy
+
+
+def box_min_edge_distance(left: Box, right: Box) -> float:
+    """Shortest rectangle-edge distance in G-file coordinate units."""
+    dx, dy = box_min_edge_components(left, right)
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def box_relative_direction(target: Box, label: Box, tolerance: float = 0.0) -> str:
+    """Classify a label by rectangle placement without using center points.
+
+    Fully separated horizontal/vertical neighbors are classified by their
+    nearest facing edges.  Slight/partial rectangle overlap (common with large
+    Text boxes) is classified from edge overhang, still without center points.
+    True diagonal placements fall through to ``global``.
+    """
+    tol = float(tolerance or 0.0)
+    horizontal_gap = max(target.left - label.right, label.left - target.right, 0.0)
+    vertical_gap = max(target.top - label.bottom, label.top - target.bottom, 0.0)
+    horizontal_projected = horizontal_gap <= tol
+    vertical_projected = vertical_gap <= tol
+
+    if label.bottom <= target.top + tol and horizontal_projected:
+        return "top"
+    if label.left >= target.right - tol and vertical_projected:
+        return "right"
+    if label.top >= target.bottom - tol and horizontal_projected:
+        return "bottom"
+    if label.right <= target.left + tol and vertical_projected:
+        return "left"
+
+    # Bounding boxes can overlap even when the rendered Text is clearly on one
+    # side.  Use edge overhang only; do not fall back to center coordinates.
+    top_overhang = max(0.0, target.top - label.top) if horizontal_projected else 0.0
+    right_overhang = max(0.0, label.right - target.right) if vertical_projected else 0.0
+    bottom_overhang = max(0.0, label.bottom - target.bottom) if horizontal_projected else 0.0
+    left_overhang = max(0.0, target.left - label.left) if vertical_projected else 0.0
+    overhangs = [
+        (top_overhang, "top"),
+        (right_overhang, "right"),
+        (bottom_overhang, "bottom"),
+        (left_overhang, "left"),
+    ]
+    best_value, best_direction = max(overhangs, key=lambda item: item[0])
+    if best_value > 0.0:
+        return best_direction
+
+    dx, dy = box_min_edge_components(target, label)
+    if dx == 0.0 and dy == 0.0:
+        return "near"
+    return "global"
+
+
 @dataclass
 class GObject:
     tag: str
@@ -704,40 +775,22 @@ class GParser:
 
     @staticmethod
     def _auto_name_relation(rect: Box, text_box: Box, direction: str, projection_tolerance: float, max_distance: float):
-        """Return ``(score, gap, axis_offset)`` for one visual side.
-
-        The relation is intentionally based on the text box edge and projected
-        axis, not on rectangle center distance.  This avoids assigning a label
-        in the gap between two adjacent RMUs to the wrong row.
-        """
-        if direction == "top":
-            gap = rect.top - text_box.bottom
-            axis_offset = abs(text_box.cx - rect.cx)
-            valid = text_box.cy < rect.top and axis_offset <= projection_tolerance
-        elif direction == "bottom":
-            gap = text_box.top - rect.bottom
-            axis_offset = abs(text_box.cx - rect.cx)
-            valid = text_box.cy > rect.bottom and axis_offset <= projection_tolerance
-        elif direction == "left":
-            gap = rect.left - text_box.right
-            axis_offset = abs(text_box.cy - rect.cy)
-            valid = text_box.cx < rect.left and axis_offset <= projection_tolerance
-        elif direction == "right":
-            gap = text_box.left - rect.right
-            axis_offset = abs(text_box.cy - rect.cy)
-            valid = text_box.cx > rect.right and axis_offset <= projection_tolerance
+        """Return rectangle-edge distance for one RMU-name visual side."""
+        actual_direction = box_relative_direction(rect, text_box, projection_tolerance)
+        if actual_direction != direction:
+            return None
+        dx, dy = box_min_edge_components(rect, text_box)
+        distance = box_min_edge_distance(rect, text_box)
+        if distance > float(max_distance):
+            return None
+        if direction in {"top", "bottom"}:
+            side_gap = rect.top - text_box.bottom if direction == "top" else text_box.top - rect.bottom
+            projection_gap = dx
         else:
-            return None
-        if not valid:
-            return None
-        # Keep the edge distance bounded, but allow overlapping text boxes.  A
-        # large label can overlap the frame in XML while remaining visually on
-        # the correct side.
-        effective_gap = max(0.0, float(gap))
-        score = effective_gap + float(axis_offset) * 0.08
-        if score > max_distance + projection_tolerance * 0.08:
-            return None
-        return score, float(gap), float(axis_offset)
+            side_gap = rect.left - text_box.right if direction == "left" else text_box.left - rect.right
+            projection_gap = dy
+        return float(distance), float(side_gap), float(projection_gap)
+
 
     def _auto_rmu_candidates(
         self,
@@ -794,7 +847,7 @@ class GParser:
                             obj=text_obj,
                             is_green=_is_green_text(text_obj),
                             color=_text_primary_color(text_obj),
-                            gap=float(_abs_gap),
+                            gap=float(score),
                             axis_offset=float(axis_offset),
                             pattern=self._rmu_name_pattern(self._text_value(text_obj)),
                         )
@@ -974,82 +1027,47 @@ class GParser:
             str(position).strip().lower()
             for position in positions
             if str(position).strip().lower()
-            in {"top", "bottom", "left", "right"}
+            in {"top", "bottom", "left", "right", "global"}
         )
         if not normalized_positions:
             return {}
 
+        # Jeddah production rule is deliberately strict when TOP is the only
+        # requested direction: an RMU name Text must be COMPLETELY outside all
+        # recognized RMU rectangles and its whole Text box must sit above the
+        # target RMU frame.  Merely having the Text centre outside the frame is
+        # not enough.  This prevents internal/overlapping status text from ever
+        # becoming an RMU cabinet name.
+        strict_top_only = normalized_positions == ("top",)
+
+        # Historical/global mode is retained only for non-production callers.
+        priority_global_mode = "global" in normalized_positions
+
         # Cluster learning is opt-in only.  Normal validation always follows
         # the directions explicitly selected by the user.
-        if use_auto_cluster and set(normalized_positions) == {"top", "bottom", "left", "right"}:
+        if (
+            use_auto_cluster
+            and not priority_global_mode
+            and set(normalized_positions) == {"top", "bottom", "left", "right"}
+        ):
             return self._assign_rmu_names_auto_cluster(parsed, frames)
 
         tol = self.overlap_tolerance
 
         def relation(r: Box, b: Box, direction: str):
-            score = None
-            gap = None
-            axis_offset = None
-
-            if direction == "top":
-                gap = r.top - b.bottom
-                axis_offset = abs(b.cx - r.cx)
-                if (
-                    r.left - tol <= b.cx <= r.right + tol
-                    and b.cy < r.top
-                ):
-                    if gap >= -tol:
-                        score = max(0.0, gap) + axis_offset * 0.08
-                    else:
-                        # Large-font Text objects may report a bounding box
-                        # that overlaps the RMU even though the visible label
-                        # and its center are clearly above the frame (e.g.
-                        # BABJ 38995).  Preserve the legacy edge-gap score for
-                        # normal labels and use center-gap only for this overlap
-                        # fallback.
-                        gap = r.top - b.cy
-                        score = max(0.0, gap) + axis_offset * 0.08
-
-            elif direction == "bottom":
-                gap = b.top - r.bottom
-                axis_offset = abs(b.cx - r.cx)
-                if (
-                    r.left - tol <= b.cx <= r.right + tol
-                    and b.cy > r.bottom
-                ):
-                    if gap >= -tol:
-                        score = max(0.0, gap) + axis_offset * 0.08
-                    else:
-                        gap = b.cy - r.bottom
-                        score = max(0.0, gap) + axis_offset * 0.08
-
-            elif direction == "left":
-                gap = r.left - b.right
-                axis_offset = abs(b.cy - r.cy)
-                if (
-                    r.top - tol <= b.cy <= r.bottom + tol
-                    and b.cx < r.left
-                ):
-                    if gap >= -tol:
-                        score = max(0.0, gap) + axis_offset * 0.08
-                    else:
-                        gap = r.left - b.cx
-                        score = max(0.0, gap) + axis_offset * 0.08
-
-            elif direction == "right":
-                gap = b.left - r.right
-                axis_offset = abs(b.cy - r.cy)
-                if (
-                    r.top - tol <= b.cy <= r.bottom + tol
-                    and b.cx > r.right
-                ):
-                    if gap >= -tol:
-                        score = max(0.0, gap) + axis_offset * 0.08
-                    else:
-                        gap = b.cx - r.right
-                        score = max(0.0, gap) + axis_offset * 0.08
-
-            return score, gap, axis_offset
+            """Selected-direction RMU relation using rectangle minimum-edge distance."""
+            actual_direction = box_relative_direction(r, b, tol)
+            if actual_direction != direction:
+                return None, None, None
+            dx, dy = box_min_edge_components(r, b)
+            distance = box_min_edge_distance(r, b)
+            if direction in {"top", "bottom"}:
+                gap = r.top - b.bottom if direction == "top" else b.top - r.bottom
+                projection_gap = dx
+            else:
+                gap = r.left - b.right if direction == "left" else b.left - r.right
+                projection_gap = dy
+            return float(distance), float(gap), float(projection_gap)
 
         result: Dict[tuple[int, str], List[LabelCandidate]] = {
             (frame.frame.xml_index, frame.frame.xml_id): []
@@ -1073,9 +1091,78 @@ class GParser:
             is_green = _is_green_text(obj)
             color = _text_primary_color(obj)
 
+            def _boxes_overlap(left: Box, right: Box) -> bool:
+                return (
+                    min(left.right, right.right) > max(left.left, right.left)
+                    and min(left.bottom, right.bottom) > max(left.top, right.top)
+                )
+
+            if strict_top_only:
+                if any(_boxes_overlap(frame.frame.box, b) for frame in frames):
+                    # Production Jeddah rule: the whole Text bounding box must
+                    # be outside every recognized RMU frame.  Any geometric
+                    # overlap means the Text is not an RMU cabinet name.
+                    continue
+            elif any(
+                frame.frame.box.center_contains(b, tolerance=0.0)
+                for frame in frames
+            ):
+                continue
+
             # Keep one best selected direction PER RMU for this text.
             per_frame = []
             for frame in frames:
+                if strict_top_only:
+                    r = frame.frame.box
+                    # TOP means exactly TOP: the full Text box is outside and
+                    # ends at/before the frame top edge.  Horizontal projection
+                    # may use only the configured small edge tolerance.
+                    if b.bottom > r.top:
+                        continue
+                    horizontal_gap = max(r.left - b.right, b.left - r.right, 0.0)
+                    if horizontal_gap > float(tol):
+                        continue
+                    score = box_min_edge_distance(r, b)
+                    if float(score) > float(self.max_distance):
+                        continue
+                    vertical_gap = max(0.0, float(r.top) - float(b.bottom))
+                    rank = (float(score), vertical_gap, float(horizontal_gap))
+                    owner_rank = (float(score), frame.frame.xml_index, frame.frame.xml_id)
+                    per_frame.append((
+                        rank, frame, "top", float(score), vertical_gap, owner_rank,
+                    ))
+                    continue
+
+                if priority_global_mode:
+                    # The Text is already known to be outside every RMU frame.
+                    score = box_min_edge_distance(frame.frame.box, b)
+                    if float(score) > float(self.max_distance):
+                        continue
+                    actual_direction = box_relative_direction(
+                        frame.frame.box, b, tol
+                    )
+                    if actual_direction == "top" and "top" in normalized_positions:
+                        priority = normalized_positions.index("top")
+                        selected_direction = "top"
+                    elif actual_direction == "right" and "right" in normalized_positions:
+                        priority = normalized_positions.index("right")
+                        selected_direction = "right"
+                    else:
+                        priority = normalized_positions.index("global")
+                        selected_direction = actual_direction or "global"
+                    dx, dy = box_min_edge_components(frame.frame.box, b)
+                    axis_offset = dy if actual_direction in {"left", "right"} else dx
+                    rank = (int(priority), float(score), float(axis_offset))
+                    # Ownership remains physical-nearest-RMU first; the
+                    # direction tier is applied only after the Text belongs to
+                    # one RMU.
+                    owner_rank = (float(score), frame.frame.xml_index, frame.frame.xml_id)
+                    per_frame.append((
+                        rank, frame, selected_direction, float(score),
+                        float(score), owner_rank,
+                    ))
+                    continue
+
                 best = None
                 for direction_index, direction in enumerate(normalized_positions):
                     score, gap, axis_offset = relation(
@@ -1102,6 +1189,7 @@ class GParser:
                         direction,
                         float(score),
                         float(gap or 0.0),
+                        rank,
                     )
                     if best is None or rank < best[0]:
                         best = candidate
@@ -1111,16 +1199,12 @@ class GParser:
             if not per_frame:
                 continue
 
-            # Global one-owner rule: each text belongs to ONE nearest RMU.
+            # Global one-owner rule: each Text belongs to ONE nearest RMU.
             owner = min(
                 per_frame,
-                key=lambda item: (
-                    item[0],
-                    item[1].frame.xml_index,
-                    item[1].frame.xml_id,
-                ),
+                key=lambda item: item[5],
             )
-            _rank, owner_frame, direction, score, gap = owner
+            _rank, owner_frame, direction, score, gap, _owner_rank = owner
             owner_key = (
                 owner_frame.frame.xml_index,
                 owner_frame.frame.xml_id,
@@ -1133,23 +1217,40 @@ class GParser:
                     obj=obj,
                     is_green=is_green,
                     color=color,
-                    gap=gap,
-                    axis_offset=float(abs(gap) if gap is not None else 0.0),
+                    gap=score,
+                    axis_offset=float(_rank[2] if len(_rank) > 2 else 0.0),
                     pattern=self._rmu_name_pattern(text),
                 )
             )
 
         for key, candidates in result.items():
-            candidates.sort(
-                key=lambda c: (
-                    c.score,
-                    c.obj.xml_index,
-                    c.text,
-                    c.direction,
+            if priority_global_mode:
+                def _priority(candidate):
+                    if candidate.direction == "top":
+                        return normalized_positions.index("top") if "top" in normalized_positions else normalized_positions.index("global")
+                    if candidate.direction == "right":
+                        return normalized_positions.index("right") if "right" in normalized_positions else normalized_positions.index("global")
+                    return normalized_positions.index("global")
+
+                candidates.sort(
+                    key=lambda c: (
+                        _priority(c),
+                        c.score,
+                        c.obj.xml_index,
+                        c.text,
+                    )
                 )
-            )
-            # RMU cabinet names are singular: after the selected-direction
-            # filter, retain only the nearest Text for each frame.
+            else:
+                candidates.sort(
+                    key=lambda c: (
+                        c.score,
+                        c.obj.xml_index,
+                        c.text,
+                        c.direction,
+                    )
+                )
+            # RMU cabinet names are singular: after the direction-priority
+            # filter, retain only the final Text for each frame.
             if candidates:
                 result[key] = candidates[:1]
         return result
@@ -1213,13 +1314,11 @@ class GParser:
         """
         Resolve the visible label nearest to each CBreakerDis.
 
-        The RMU drawings supplied for this project place the visible switch label
-        inside the RMU frame and close to its CBreakerDis symbol.  We intentionally
-        fail closed: no label, reused label or near-tie ambiguity is reported rather
+        Distance is the minimum edge-to-edge distance between the device rectangle
+        and the Text rectangle.  Rectangle-center distance is not used.  We fail
+        closed: no label, reused label or near-tie ambiguity is reported rather
         than guessed.
         """
-        import math
-
         texts = []
         for obj in self._text_objects_in_frame(parsed, frame):
             text = self._text_value(obj).strip()
@@ -1235,10 +1334,9 @@ class GParser:
         pair_candidates = []
         per_breaker = {}
         for br in breakers:
-            bx, by = br.box.cx, br.box.cy
             candidates = []
             for txt_obj, text in texts:
-                dist = math.hypot(bx - txt_obj.box.cx, by - txt_obj.box.cy)
+                dist = box_min_edge_distance(br.box, txt_obj.box)
                 if dist <= max_distance:
                     candidates.append((dist, txt_obj, text))
                     pair_candidates.append((dist, br, txt_obj, text))

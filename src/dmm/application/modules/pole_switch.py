@@ -1,34 +1,52 @@
 from __future__ import annotations
 
-import math
 import re
 from collections import defaultdict, deque
 from pathlib import Path
 
 from dmm.application.modules.base import ModelModule
+from dmm.application.modules.feeder_context import (
+    add_feeder_fields,
+    enforce_device_feeder_membership,
+    resolve_drawing_feeder,
+)
 from dmm.config.constants import RMU_LABEL_EDGE_TOLERANCE, RMU_LABEL_PATTERN
 from dmm.domain.gfile.element_catalog import (
     classification_is,
-    color_preference_penalty,
-    name_format_penalty,
     resolve_element_record,
 )
-from dmm.domain.gfile.parser import GParser, GObject, ParsedG
+from dmm.domain.gfile.parser import (
+    GParser,
+    GObject,
+    ParsedG,
+    box_min_edge_distance,
+    box_relative_direction,
+)
 from dmm.domain.rmu.validator import int_or_none, norm
 from dmm.infrastructure.gfile.writeback import GWriteBackService
 
 
 POLE_SWITCH_TABLE_ID = 13502
 POLE_SWITCH_DOMAIN = 40
-POLE_SWITCH_TAG = "CBreakerDis"
 # A graphical Text farther than this from a target device is not a valid
 # device name candidate for either pole switches or pole transformers.
 DEFAULT_DEVICE_TEXT_MAX_DISTANCE = 200.0
-POLE_SWITCH_TEXT_MAX_DISTANCE = 300.0
+POLE_SWITCH_TEXT_MAX_DISTANCE = 200.0
+JEDDAH_NAME_PRIORITY = ("top", "right", "global")
 
-# The recognition authority is the CBreakerDis tag plus a keyword contained
-# in its devref attribute. Never search these keywords in key_name, graphical
-# text, p_NameString, or any other attribute.
+# Jeddah pole-switch names must carry an explicit Text color, but the exact
+# shade is not authoritative.  Field drawings use many different red/dark-red
+# shades and may also contain other colored device-name Text.  Only white (and
+# missing/default color, which renders as white) is forbidden.
+_POLE_SWITCH_WHITE_COLORS = frozenset({
+    "WHITE", "255,255,255", "255,255,255,255", "#FFFFFF", "#FFFFFFFF",
+})
+
+# The recognition authority is ONLY the user-maintained element classification.
+# Any G XML element whose devref resolves to an element catalog row classified
+# as LBS / SEC / AR is a pole-switch target. The concrete XML tag is deliberately
+# irrelevant; never infer pole-switch identity from key_name, p_NameString, the
+# tag name itself, or devref text substrings.
 POLE_SWITCH_DEVREF_KEYWORDS = ("LBS", "SEC", "AR")
 
 # The fixed-mode resolver scans the G file's Text objects for all marked
@@ -49,6 +67,44 @@ GLOBAL_NAMEABLE_DEVICE_TAGS = frozenset({
 POLE_SWITCH_NAME_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.\-/]{0,127}$"
 )
+
+
+_COMPOUND_POLE_SWITCH_NAME_RE = re.compile(
+    r"^(?P<prefix>ARC|AR|LBS|SEC)(?P<left>\d+)-(?P<right>\d+)$",
+    re.IGNORECASE,
+)
+
+
+def normalize_pole_switch_db_lookup_name(value: str, device_family: str = "") -> str:
+    """Build the 13501 lookup name without changing the graphical Text.
+
+    The long-standing Jeddah rule is preserved for ordinary AR/LBS/SEC names:
+    dots, hyphens and whitespace are removed only for the database lookup
+    (``SEC-2385`` -> ``SEC2385``).
+
+    A second, explicit business-name form also exists in drawings and in the
+    database: ``<family><digits>-<digits>``, for example
+    ``LBS96527-21240`` or ``LBS33513-97376``.  When the element is classified
+    as the matching AR/LBS/SEC family and the graphical name matches that exact
+    compound form, the hyphen is part of the business name and must be kept for
+    the 13501 lookup.
+
+    The optional ``device_family`` keeps this exception classification-driven.
+    Callers that do not provide a family retain the historical normalization
+    behavior unchanged.
+    """
+    raw = str(value or "").strip()
+    family = str(device_family or "").strip().upper()
+    match = _COMPOUND_POLE_SWITCH_NAME_RE.fullmatch(raw)
+    if family in {"AR", "LBS", "SEC"} and match:
+        prefix = match.group("prefix").upper()
+        prefix_matches_family = (
+            (family == "AR" and prefix in {"AR", "ARC"})
+            or prefix == family
+        )
+        if prefix_matches_family:
+            return raw
+    return re.sub(r"[.\-\s]+", "", raw)
 
 # Device names may contain spaces and may be split into visual lines in
 # Text.ts, for example ``AUTO RECLOSER\n101601``.  Keep the complete label
@@ -111,30 +167,30 @@ def _devref_model_label(value: str, keyword: str) -> str:
     return tail or keyword
 
 
-def _point_to_box_distance(x: float, y: float, obj: GObject) -> float:
-    box = obj.box
-    dx = max(float(box.left) - x, 0.0, x - float(box.right))
-    dy = max(float(box.top) - y, 0.0, y - float(box.bottom))
-    return math.hypot(dx, dy)
+
+def _pole_switch_text_color(obj: GObject) -> str:
+    """Return the explicitly configured visible Text color.
+
+    D5000 drawings use ``lc`` first and ``lcc`` as fallback.  An empty return
+    value means the Text has no explicit color and therefore renders as the
+    default white; such Text cannot be a pole-switch name.
+    """
+    raw = str(obj.attrs.get("lc") or obj.attrs.get("lcc") or "").strip()
+    return re.sub(r"\s+", "", raw).upper()
 
 
-def _text_has_background(obj: GObject) -> bool:
-    """Read an explicit Text background flag when one is exported."""
-    for key in (
-        "background",
-        "bg",
-        "bk",
-        "bkcolor",
-        "bk_color",
-        "p_BackColor",
-        "backColor",
-    ):
-        if key not in obj.attrs:
-            continue
-        value = str(obj.attrs.get(key) or "").strip().casefold()
-        if value and value not in {"0", "false", "none", "null", "transparent"}:
-            return True
-    return False
+def _pole_switch_text_color_rank(obj: GObject):
+    """Accept any explicitly colored non-white Text as a device name.
+
+    The exact shade is deliberately ignored.  The only color rule is:
+    the Text must explicitly carry a color and that color must not be white.
+    Direction (TOP -> RIGHT -> GLOBAL), distance and one-to-one ownership decide
+    between otherwise valid candidates.
+    """
+    color = _pole_switch_text_color(obj)
+    if not color or color in _POLE_SWITCH_WHITE_COLORS:
+        return None
+    return 0
 
 
 class PoleSwitchParser:
@@ -284,18 +340,16 @@ class PoleSwitchParser:
         Text claimed by one family from being reused by the other family.
         """
         devref = str(obj.attrs.get("devref") or "")
-        if obj.tag == "CBreakerDis":
-            # RMU/LBS symbols belong to the ring-cabinet model.  They may be
-            # classified as LBS in the element catalog, but they must not
-            # consume a Text that is needed by a Transformer_OH or a genuine
-            # pole-switch device in the shared name pool.
-            devref_tail = devref.rsplit(":", 1)[-1].strip().casefold()
-            if devref_tail.startswith(("rmu_", "rmu-")):
-                return False
-            return bool(_marked_pole_switch_family(devref, element_catalog))
-        if obj.tag == "TransformerDis":
-            record = resolve_element_record(devref, element_catalog)
-            return classification_is(record, "TRANSFORMER_OH")
+        # Pole-switch identity comes only from the Element Management
+        # classification.  Do not constrain the XML tag here either.
+        if _marked_pole_switch_family(devref, element_catalog):
+            return True
+        record = resolve_element_record(devref, element_catalog)
+        if classification_is(record, "TRANSFORMER_OH"):
+            # Transformer identity is classification-driven as well.  Do not
+            # constrain the concrete G XML element tag: any object whose devref
+            # resolves to TRANSFORMER_OH participates as a pole transformer.
+            return True
         return False
 
     @staticmethod
@@ -320,64 +374,6 @@ class PoleSwitchParser:
                 for index in range(0, len(numbers), 2)
             ]
         return []
-
-    @classmethod
-    def _device_anchor_points(cls, device: GObject, parsed: ParsedG):
-        """Use ConnectLine endpoints as visual/electrical anchors.
-
-        A GIcon's bounding box is often much larger than the rendered symbol.
-        GFileStudio therefore measures name distance from the endpoint that
-        actually touches the device.  Lines remain topology evidence only and
-        are never treated as nameable objects.
-        """
-        by_id = {
-            str(obj.xml_id): obj
-            for obj in parsed.objects
-            if str(obj.xml_id or "").strip()
-        }
-        attached = defaultdict(list)
-        line_by_id = {}
-        for line in parsed.objects:
-            if line.tag != "ConnectLine":
-                continue
-            if line.xml_id:
-                line_by_id[str(line.xml_id)] = line
-            for ref in cls._refs(line):
-                attached[ref].append(line)
-
-        lines = []
-        seen = set()
-        for ref in cls._refs(device):
-            line = line_by_id.get(ref)
-            if line is not None and id(line) not in seen:
-                lines.append(line)
-                seen.add(id(line))
-        for line in attached.get(str(device.xml_id), []):
-            if id(line) not in seen:
-                lines.append(line)
-                seen.add(id(line))
-
-        anchors = []
-        for line in lines:
-            points = cls._line_points(line)
-            if not points:
-                continue
-            endpoints = (points[0], points[-1])
-            anchor = min(
-                endpoints,
-                key=lambda point: _point_to_box_distance(point[0], point[1], device),
-            )
-            anchors.append(anchor)
-        if not anchors:
-            return [(device.box.cx, device.box.cy)]
-        unique = []
-        seen_points = set()
-        for point in anchors:
-            key = (round(point[0], 6), round(point[1], 6))
-            if key not in seen_points:
-                unique.append(point)
-                seen_points.add(key)
-        return unique
 
     @staticmethod
     def _global_text_is_nameable(obj: GObject) -> bool:
@@ -407,12 +403,18 @@ class PoleSwitchParser:
         include_shared_devices=True,
         lock_text_ownership=True,
         max_text_distance=DEFAULT_DEVICE_TEXT_MAX_DISTANCE,
+        allowed_directions=None,
+        text_filter=None,
+        direction_priority=None,
+        text_color_ranker=None,
+        color_priority_first=False,
     ):
         """Find eligible Text objects for the requested device family.
 
-        This is shared by pole switches and TransformerDis. The scan is
+        This is shared by pole switches and pole transformers. The scan is
         global across the G file so a device can find a label outside its
-        local XML block.  By default Text ownership is exclusive and marked
+        local XML block. Device-to-Text distance is always the shortest
+        rectangle-edge distance; center-point distance is not used.  By default Text ownership is exclusive and marked
         cross-module devices share the same pool.  A module that explicitly
         opts out can receive only its requested device family and reuse a
         nearest Text without creating a global name lock.
@@ -432,57 +434,48 @@ class PoleSwitchParser:
             )
             if not requested and not shared_name_lock:
                 continue
-            if not self._is_nameable_device(obj):
+            # An explicitly requested device_filter is authoritative for this
+            # scan.  Pole-switch recognition is classification-driven, so the
+            # XML element tag must never disqualify a classified LBS/SEC/AR
+            # object.  Shared/legacy devices still use the generic structural
+            # guard to avoid treating drawing primitives as devices.
+            if not requested and not self._is_nameable_device(obj):
                 continue
-            # TransformerDis is not a generic nameable device.  Only the
-            # element explicitly marked Transformer_OH may participate in
-            # the transformer name assignment; otherwise an unmarked
-            # transformer symbol could steal a nearby Text.
-            if obj.tag == "TransformerDis":
-                record = resolve_element_record(
-                    str(obj.attrs.get("devref") or ""),
-                    element_catalog,
-                )
-                if not classification_is(record, "TRANSFORMER_OH"):
-                    continue
-            devices.append(obj)
-        name_settings = dict(name_settings or {})
-        configured_format = str(name_settings.get("name_format") or "").strip()
-        if configured_format:
-            name_format = configured_format
-        else:
-            name_format = (
-                "NUMERIC"
-                if bool(name_settings.get("name_numeric", False))
-                else "AUTO"
+            if requested and not str(obj.xml_id or "").strip():
+                continue
+            # A TRANSFORMER_OH classification is authoritative regardless of
+            # the concrete XML tag.  Keep one legacy guard only for an
+            # unclassified TransformerDis symbol so it cannot steal Text from
+            # a classified device when a generic/shared scan is requested.
+            record = resolve_element_record(
+                str(obj.attrs.get("devref") or ""),
+                element_catalog,
             )
-        color_preferences = name_settings.get("name_colors", ["WHITE"])
-        if not isinstance(color_preferences, (list, tuple, set)):
-            color_preferences = [color_preferences]
-        background_preference = bool(
-            name_settings.get("name_has_background", False)
-        )
-
-        # These three settings are hard eligibility filters. A Text that does
-        # not satisfy the configured format, color, or background rule cannot
-        # be selected by any device.
+            is_marked_transformer = classification_is(record, "TRANSFORMER_OH")
+            if obj.tag == "TransformerDis" and not is_marked_transformer:
+                continue
+            devices.append(obj)
+        # Operator-configurable name-format/background filters are not used by
+        # the shared geometric scanner. Callers can still impose fixed model
+        # rules through allowed_directions/text_filter (for example pole
+        # transformers use any direction but white Text only). Basic Text
+        # sanity exclusions for units/structural annotations remain active.
+        del name_settings
         texts = []
+        text_color_ranks = {}
         for obj in parsed.objects:
             if obj.xml_index in reserved_text_ids:
                 continue
             if not self._global_text_is_nameable(obj):
                 continue
-            if name_format_penalty(self._text_value(obj), name_format) != 0:
+            if text_filter is not None and not text_filter(obj):
                 continue
-            text_color = str(
-                obj.attrs.get("lc")
-                or obj.attrs.get("lcc")
-                or ""
-            )
-            if color_preference_penalty(text_color, color_preferences) != 0:
-                continue
-            if _text_has_background(obj) != background_preference:
-                continue
+            color_rank = 0
+            if text_color_ranker is not None:
+                color_rank = text_color_ranker(obj)
+                if color_rank is None:
+                    continue
+            text_color_ranks[obj.xml_index] = int(color_rank)
             texts.append(obj)
 
         if not devices or not texts:
@@ -490,24 +483,50 @@ class PoleSwitchParser:
 
         ranked = {}
         for device in devices:
-            anchors = [(device.box.cx, device.box.cy)]
             items = []
             for text_obj in texts:
-                distance = min(
-                    _point_to_box_distance(px, py, text_obj)
-                    for px, py in anchors
-                )
+                # ``allowed_directions`` is a hard filter retained for legacy
+                # callers. ``direction_priority`` keeps every direction eligible
+                # but ranks preferred directions before GLOBAL fallback.  Both
+                # direction and distance are rectangle based.
+                direction = self._direction(device, text_obj)
+                if (
+                    allowed_directions is not None
+                    and direction not in allowed_directions
+                ):
+                    continue
+                distance = box_min_edge_distance(device.box, text_obj.box)
                 if distance > float(max_text_distance):
                     continue
+                priority = 0
+                if direction_priority:
+                    normalized_priority = [
+                        str(value or "").strip().casefold()
+                        for value in direction_priority
+                        if str(value or "").strip()
+                        and str(value or "").strip().casefold() != "global"
+                    ]
+                    try:
+                        priority = normalized_priority.index(direction)
+                    except ValueError:
+                        priority = len(normalized_priority)
                 items.append((
-                    0,
-                    0,
+                    int(priority),
+                    int(text_color_ranks.get(text_obj.xml_index, 0)),
                     float(distance),
                     text_obj.xml_index,
                     self._text_value(text_obj),
                     text_obj,
                 ))
-            if nearest_only:
+            if direction_priority:
+                if color_priority_first:
+                    # Pole-switch Text has already been hard-filtered to
+                    # explicitly colored, non-white candidates. Keep the
+                    # Jeddah TOP -> RIGHT -> GLOBAL direction order.
+                    items.sort(key=lambda item: (item[1], item[0], item[2], item[3]))
+                else:
+                    items.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+            elif nearest_only:
                 # After hard filtering, physical proximity is the only
                 # meaningful preference.  A farther matching Text must not
                 # beat a nearer matching Text.
@@ -529,11 +548,53 @@ class PoleSwitchParser:
         # to one device must not be reused by another nearby device. The same
         # displayed value is allowed when it comes from different Text objects
         # at different positions in the drawing.
-        # Resolve the global competition by physical distance first, then by
-        # stable XML order so the result does not depend on parser iteration
-        # details. Every device contributes all of its eligible Text
-        # candidates. If its nearest Text is already owned, the next nearest
-        # available Text is considered instead of leaving the device unnamed.
+        if direction_priority:
+            # Each device proposes candidates in its configured ranking order
+            # (for Jeddah pole switches: explicitly colored non-white Text,
+            # then TOP -> RIGHT -> GLOBAL). If two
+            # devices compete for the same Text, keep the historical ownership
+            # rule: the physically closer device wins and the other device
+            # continues with its next candidate.
+            next_candidate_index = {device.xml_index: 0 for device in devices}
+            queue = deque(device.xml_index for device in devices)
+            assigned_by_device = {}
+            owner_by_text = {}
+            while queue:
+                device_xml_index = queue.popleft()
+                if device_xml_index in assigned_by_device:
+                    continue
+                items = ranked.get(device_xml_index, [])
+                while next_candidate_index[device_xml_index] < len(items):
+                    candidate = items[next_candidate_index[device_xml_index]]
+                    next_candidate_index[device_xml_index] += 1
+                    text_obj = candidate[-1]
+                    text_id = text_obj.xml_index
+                    incumbent = owner_by_text.get(text_id)
+                    if incumbent is None:
+                        owner_by_text[text_id] = (device_xml_index, candidate)
+                        assigned_by_device[device_xml_index] = candidate
+                        break
+
+                    incumbent_device, incumbent_candidate = incumbent
+                    challenger_key = (float(candidate[2]), device_xml_index)
+                    incumbent_key = (float(incumbent_candidate[2]), incumbent_device)
+                    if challenger_key < incumbent_key:
+                        assigned_by_device.pop(incumbent_device, None)
+                        owner_by_text[text_id] = (device_xml_index, candidate)
+                        assigned_by_device[device_xml_index] = candidate
+                        queue.append(incumbent_device)
+                        break
+                    # The Text remains owned by the closer device; continue
+                    # through this device's RIGHT/GLOBAL fallback candidates.
+
+            owners = defaultdict(list)
+            for device_xml_index, candidate in assigned_by_device.items():
+                owners[device_xml_index].append(candidate)
+            return owners
+
+        # Legacy global-nearest ownership used by callers without a direction
+        # priority: resolve competition by physical distance first, then stable
+        # XML order.
         candidate_pairs = []
         for device in devices:
             items = ranked.get(device.xml_index, [])
@@ -614,15 +675,9 @@ class PoleSwitchParser:
 
     @staticmethod
     def _direction(target: GObject, label: GObject) -> str:
-        if label.box.cy < target.box.top:
-            return "top"
-        if label.box.cy > target.box.bottom:
-            return "bottom"
-        if label.box.cx < target.box.left:
-            return "left"
-        if label.box.cx > target.box.right:
-            return "right"
-        return "near"
+        # Direction is derived from rectangle placement only.  Diagonal labels
+        # remain GLOBAL fallback candidates; no center-point vector is used.
+        return box_relative_direction(target.box, label.box)
 
     def discover(self, parsed: ParsedG, element_catalog=None, name_settings=None):
         global_name_owners = self.build_global_name_owners(
@@ -630,26 +685,25 @@ class PoleSwitchParser:
             element_catalog,
             name_settings,
             nearest_only=True,
-            device_filter=lambda obj: (
-                obj.tag == "CBreakerDis"
-                and bool(
-                    _marked_pole_switch_family(
-                        str(obj.attrs.get("devref") or ""),
-                        element_catalog,
-                    )
+            device_filter=lambda obj: bool(
+                _marked_pole_switch_family(
+                    str(obj.attrs.get("devref") or ""),
+                    element_catalog,
                 )
             ),
-            # Pole-switch recognition is independent.  Only marked
-            # CBreakerDis objects participate; other modules neither reserve
-            # a Text nor compete for one.
+            # Pole-switch recognition is independent and classification-only.
+            # Any XML element whose devref resolves to an LBS/SEC/AR catalog
+            # mark participates; the concrete XML tag is intentionally ignored.
             include_shared_devices=False,
             lock_text_ownership=True,
             max_text_distance=POLE_SWITCH_TEXT_MAX_DISTANCE,
+            allowed_directions=None,
+            direction_priority=JEDDAH_NAME_PRIORITY,
+            text_color_ranker=_pole_switch_text_color_rank,
+            color_priority_first=True,
         )
         rows = []
         for obj in parsed.objects:
-            if obj.tag != POLE_SWITCH_TAG:
-                continue
             raw_devref = str(obj.attrs.get("devref") or "").strip()
             devref_keyword = _marked_pole_switch_family(
                 raw_devref,
@@ -662,7 +716,7 @@ class PoleSwitchParser:
             label, _label_candidates = self.find_nearest_name(
                 parsed,
                 obj,
-                model,
+                devref_keyword,
                 (),
                 global_name_owners,
             )
@@ -675,7 +729,9 @@ class PoleSwitchParser:
                 "h": obj.box.h,
                 "devref": raw_devref,
                 "device_model": model,
-                "device_family": self._model_family(model),
+                # Classification is authoritative even when the devref/root
+                # name itself contains none of the words LBS/SEC/AR.
+                "device_family": devref_keyword,
                 "key_name": str(obj.attrs.get("key_name") or "").strip(),
                 "current_keyid": obj.keyid,
                 "inside_rmu": "NOT_ANALYZED",
@@ -688,7 +744,13 @@ class PoleSwitchParser:
                 "graphical_name": label.get("text", "") if label else "",
                 "name_source": "NEAREST_GRAPHICAL_TEXT" if label else "",
                 "name_distance": label.get("distance", "") if label else "",
+                "name_distance_basis": "RECTANGLE_MIN_EDGE_DISTANCE" if label else "",
                 "name_direction": label.get("direction", "") if label else "",
+                "name_priority": (
+                    "TOP" if label and label.get("direction") == "top"
+                    else "RIGHT" if label and label.get("direction") == "right"
+                    else "GLOBAL" if label else ""
+                ),
                 "name_xml_id": label.get("xml_id", "") if label else "",
                 "status": "",
                 "severity": "",
@@ -702,9 +764,10 @@ class PoleSwitchModelModule(ModelModule):
     module_id = "POLE_SWITCH"
     display_name = "柱上开关模型"
     description = (
-        "识别图元管理中标记为 LBS / AR / SEC 的柱上开关，"
-        "在目标柱上开关之间全局分配 300 距离内的 Text，按距离优先且同一 Text 不重复使用，"
-        "只查询自身的 13501 / 13502 记录并安全回写 KeyID。"
+        "识别图元管理中标记为 LBS / AR / SEC 的柱上开关；图上名称仍按原有几何规则查找，"
+        "名称 Text 必须显式设置颜色且不能是白色，颜色深浅/具体色值不再限制；按上方 → 右方 → 全局兜底，"
+        "设备矩形框与 Text 矩形框按最小边缘距离计算且不超过 200，不再使用中心点距离，同一 Text 不重复使用；只有进入数据库查询前，才删除名称中的点号、横杠和空格"
+        "（如 SEC-2385 → SEC2385），但“设备族+数字-数字”的复合业务名（如 LBS96527-21240）保留横杠直接查询；图上原始名称绝不改写。"
     )
     SUPPORTED_OPERATIONS = (
         "VALIDATE",
@@ -715,11 +778,11 @@ class PoleSwitchModelModule(ModelModule):
     @staticmethod
     def _rules():
         return {
-            "CBreakerDis": {
+            "LBS_SEC_AR_CLASSIFICATION": {
                 "table_id": POLE_SWITCH_TABLE_ID,
                 "domain": POLE_SWITCH_DOMAIN,
-                "match_mode": "CBREAKERDIS_ELEMENT_MARK_NEAREST_TEXT",
-                "description": "柱上开关：CBreakerDis 且图元管理分类标记为 LBS/SEC/AR；仅使用距离不超过 300 的 Text，所有目标设备全局按距离优先分配不重复的 Text 图元（不同位置可有相同名称）；只查询自身 13501/13502",
+                "match_mode": "ELEMENT_CLASSIFICATION_LBS_SEC_AR_NEAREST_TEXT",
+                "description": "柱上开关只认图元管理中的 LBS/SEC/AR 分类标记，不限制 G XML 元素类型；找到被分类的对应图元后，名称 Text 必须有明确颜色且不能是白色；TOP→RIGHT→GLOBAL，设备矩形框与 Text 矩形框按最小边缘距离计算且不超过 200，不再使用中心点距离，同级按距离最近并保持 Text 一对一；查询 13501 前普通名称删除点号、横杠和空格（SEC-2385/SEC 2385/SEC.2385 → SEC2385）；若分类与名称前缀一致且名称严格为“AR/LBS/SEC(+AR可含ARC)+数字-数字”，则保留中间横杠直接查询（如 LBS96527-21240）；数据库仍按既有 13501→13502 链路校验。",
             }
         }
 
@@ -812,13 +875,18 @@ class PoleSwitchModelModule(ModelModule):
 
     def _resolve_row(self, row, db):
         name = str(row.get("graphical_name") or "").strip()
+        family = str(row.get("device_family") or "").strip().upper()
+        query_name = normalize_pole_switch_db_lookup_name(name, family)
         row.update({
+            # Keep every graphical/business field exactly as drawn.  The compact
+            # value is used only for the database lookup below.
             "logical_code": name,
             "selected_device_name": name,
+            "database_query_name": query_name,
             "table_id": POLE_SWITCH_TABLE_ID,
             "table_name": "dms_cb_device",
             "configured_domain": POLE_SWITCH_DOMAIN,
-            "match_mode": "CBREAKERDIS_ELEMENT_MARK_NEAREST_TEXT",
+            "match_mode": "ELEMENT_CLASSIFICATION_LBS_SEC_AR_NEAREST_TEXT",
             "combined_db_match_count": 0,
             "cb_parent_match_count": 0,
             "cb_db_match_count": 0,
@@ -843,19 +911,24 @@ class PoleSwitchModelModule(ModelModule):
             row.update({
                 "status": "FAIL",
                 "severity": "ERROR",
-                "reason": "POLE_SWITCH_NAME_NOT_FOUND: 未找到柱上开关邻近图上名称。",
+                "reason": (
+                    "POLE_SWITCH_NAME_NOT_FOUND: 在该柱上开关 200 距离范围内，"
+                    "没有找到有明确颜色且非白色的可用名称 Text（优先上方，其次右方，最后全局），因此未查询数据库。"
+                ),
             })
             return row
 
-        combined_records = db.get_combined_device_records(name)
+        combined_records = db.get_combined_device_records(query_name)
         row["combined_db_match_count"] = len(combined_records)
+        row["combined_name"] = query_name
         if len(combined_records) != 1:
             row.update({
                 "status": "FAIL",
                 "severity": "ERROR",
                 "reason": (
                     "POLE_SWITCH_COMBINED_NAME_NOT_UNIQUE: "
-                    f"13501 NAME/CODE={name}；匹配数={len(combined_records)}。"
+                    f"图上名称={name or '-'}；数据库查询名称={query_name or '-'}；"
+                    f"在 13501 的 NAME/CODE 中匹配到 {len(combined_records)} 条，必须唯一，因此本条不处理。"
                 ),
             })
             return row
@@ -870,7 +943,7 @@ class PoleSwitchModelModule(ModelModule):
             })
             return row
         row["db_combined_id"] = combined_id
-        row["combined_name"] = name
+        row["combined_name"] = query_name
         row["combined_db_code"] = str(combined.get("code") or "").strip()
         row["combined_db_name"] = str(combined.get("name") or "").strip()
         combined_feeder_id = combined.get("feeder_id")
@@ -884,11 +957,10 @@ class PoleSwitchModelModule(ModelModule):
         )
         row["cb_parent_match_count"] = len(cb_parent_records)
 
-        # A standalone parent normally has one child CBreakerDis. If a
-        # parent has multiple children, use the devref-derived device family
+        # A standalone 13501 parent normally has one 13502 child. If a
+        # parent has multiple children, use the classification-derived device family
         # (SEC / AR / LBS) to select exactly one child; never choose by row
         # order because RMU parents contain several Y/Q switches.
-        family = str(row.get("device_family") or "").strip().upper()
         family_records = [
             device
             for device in cb_parent_records
@@ -1029,49 +1101,69 @@ class PoleSwitchModelModule(ModelModule):
         return row
 
     def _analyze_file(self, db, g_file, settings=None, log_callback=None, progress_callback=None):
+        settings = settings or {}
         parsed = GParser().parse(g_file)
+        feeder_resolution = resolve_drawing_feeder(
+            db, parsed, settings, log_callback=log_callback
+        )
         discovered = PoleSwitchParser().discover(
             parsed,
-            (settings or {}).get("element_catalog", {}),
-            settings or {},
+            settings.get("element_catalog", {}),
+            settings,
         )
         rows = []
         total = max(len(discovered), 1)
         for index, row in enumerate(discovered, start=1):
-            # Resolve only the marked CBreakerDis itself. No RMU, Bus,
-            # main-network device, drawing-scope or cross-module feeder lock.
             resolved = self._resolve_row(dict(row), db)
             resolved["file_name"] = Path(g_file).name
+            target_feeder_id = (
+                resolved.get("db_feeder_id")
+                or resolved.get("combined_db_feeder_id")
+            )
+            enforce_device_feeder_membership(
+                resolved,
+                feeder_resolution,
+                device_feeder_id=target_feeder_id,
+                reason_prefix="POLE_SWITCH",
+            )
             rows.append(resolved)
+            if log_callback:
+                log_callback(
+                    f"[发现柱上开关] 文件={Path(g_file).name}；"
+                    f"XML_ID={resolved.get('xml_id') or '-'}；"
+                    f"名称={resolved.get('graphical_name') or '-'}；"
+                    f"方向={resolved.get('name_direction') or '-'}；"
+                    f"距离={resolved.get('name_distance') if resolved.get('name_distance') not in (None, '') else '-'}；"
+                    f"DB_ID={resolved.get('db_device_id') or '-'}；"
+                    f"FEEDER_ID={target_feeder_id or '-'}；"
+                    f"状态={resolved.get('status') or '-'}。"
+                )
             if progress_callback:
                 progress_callback(index, total, f"正在处理柱上开关 {index}/{len(discovered)}")
         if log_callback:
             log_callback(
                 f"[{Path(g_file).name}] 柱上开关识别完成："
-                f"devref目标={len(discovered)}；数据库可关联="
-                f"{sum(1 for row in rows if row.get('association_ready') == 'YES')}"
+                f"devref目标={len(discovered)}；"
+                f"图级馈线={feeder_resolution.get('feeder_id') or '-'}；"
+                f"数据库可关联={sum(1 for row in rows if row.get('association_ready') == 'YES')}"
             )
 
-        feeder_ids = sorted({
-            int_or_none(row.get("db_feeder_id") or row.get("combined_db_feeder_id"))
-            for row in rows
-            if int_or_none(row.get("db_feeder_id") or row.get("combined_db_feeder_id")) is not None
-        })
-        feeder = {}
-        if len(feeder_ids) == 1 and hasattr(db, "get_feeder_info"):
-            try:
-                feeder = db.get_feeder_info(feeder_ids[0]) or {}
-            except Exception:
-                feeder = {}
-        feeder_id = feeder_ids[0] if len(feeder_ids) == 1 else ""
+        feeder = feeder_resolution.get("feeder") or {}
+        feeder_id = feeder_resolution.get("feeder_id", "")
         feeder_name = str(feeder.get("display_name") or feeder.get("name") or "").strip()
+        candidate_ids = sorted({
+            int_or_none(item.get("feeder_id"))
+            for item in feeder_resolution.get("candidates", []) or []
+            if int_or_none(item.get("feeder_id")) is not None
+        })
         return {
             "g_file": str(Path(g_file)),
             "file_name": Path(g_file).name,
             "report_type": "POLE_SWITCH",
             "pole_switch_rows": rows,
-            "feeder_resolution_source": "POLE_SWITCH_DEVICE",
-            "feeder_resolution_evidence": "仅依据柱上开关自身的 13501/13502 记录。",
+            "feeder_resolution_source": feeder_resolution.get("feeder_source", "UNRESOLVED"),
+            "feeder_resolution_evidence": feeder_resolution.get("feeder_evidence", ""),
+            "feeder_anchor": feeder_resolution.get("feeder_anchor", ""),
             "feeder_id": feeder_id,
             "station_id": feeder.get("st_id", ""),
             "station_name": str(feeder.get("station_name") or "").strip(),
@@ -1086,14 +1178,15 @@ class PoleSwitchModelModule(ModelModule):
                     str(feeder.get("name") or "").strip(),
                 ) if value
             ),
-            "feeder_context_ready": "YES" if len(feeder_ids) == 1 else "NO",
+            "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
             "feeder_context_message": (
-                "馈线取自柱上开关自身的 13501/13502 记录。"
-                if len(feeder_ids) == 1
-                else "未对其他设备或图级对象做馈线锁定。"
+                "图级馈线已由 G 文件名 → 405/substation → 13500/dms_feeder_device 唯一确认；"
+                "每个柱上开关还必须证明自身数据库 FEEDER_ID 与图级馈线一致。"
+                if feeder_resolution.get("ready")
+                else feeder_resolution.get("reason", "图级馈线无法唯一确认。")
             ),
-            "graph_feeder_ids": feeder_ids,
-            "graph_feeder_count": len(feeder_ids),
+            "graph_feeder_ids": candidate_ids,
+            "graph_feeder_count": len(candidate_ids),
             "summary": {
                 "pole_switch_count": len(rows),
                 "pole_switch_pass": sum(1 for row in rows if row.get("status") == "PASS"),
@@ -1101,7 +1194,7 @@ class PoleSwitchModelModule(ModelModule):
                 "pole_switch_unlinked": sum(1 for row in rows if row.get("status") == "UNLINKED"),
                 "pole_switch_relink": sum(1 for row in rows if row.get("status") == "RELINK"),
                 "association_ready_count": sum(1 for row in rows if row.get("association_ready") == "YES"),
-                "feeder_context_ready": "YES" if len(feeder_ids) == 1 else "NO",
+                "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
             },
         }
 
@@ -1142,7 +1235,9 @@ class PoleSwitchModelModule(ModelModule):
                     continue
                 change = {
                     "xml_id": row["xml_id"],
-                    "tag": POLE_SWITCH_TAG,
+                    # Preserve the actual G XML tag. Pole-switch identity comes
+                    # from LBS/SEC/AR classification, not from a fixed tag.
+                    "tag": str(row.get("object_type") or "").strip(),
                     "_source_file": report["g_file"],
                     "attributes": self._attributes_for_row(row),
                     "device_name": row.get("selected_device_name", ""),
@@ -1212,13 +1307,25 @@ class PoleSwitchModelModule(ModelModule):
                 )
 
         for source_file, changes in changes_by_file.items():
+            refreshed_report = self._analyze_file(
+                db, Path(source_file), settings, log_callback
+            )
+            refreshed_by_xml = {
+                str(row.get("xml_id") or ""): row
+                for row in refreshed_report.get("pole_switch_rows", [])
+            }
             for change in changes:
-                base = dict(change.get("validated_row", {}) or {})
-                current = self._resolve_row(dict(base), db)
+                current = dict(
+                    refreshed_by_xml.get(str(change.get("xml_id") or ""), {})
+                )
                 if (
-                    current.get("association_ready") != "YES"
+                    not current
+                    or current.get("association_ready") != "YES"
                     or current.get("writeback_needed") != "YES"
                 ):
+                    if not current:
+                        current = dict(change.get("validated_row", {}) or {})
+                        current["reason"] = "POLE_SWITCH_EXECUTION_TARGET_NOT_FOUND"
                     current["_execution_result"] = "SKIPPED"
                     execution_rows.append((change, current))
                     continue

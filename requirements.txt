@@ -6,3 +6,6 @@ cffi>=1.16
 PyInstaller>=6.0
 pyinstaller-hooks-contrib>=2024.0
 pytest>=8.0
+pydantic>=2.10,<3
+platformdirs>=4,<5
+openpyxl>=3.1,<4

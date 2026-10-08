@@ -340,6 +340,7 @@ class CentralConfigClient:
                 "admin_machine_name": machine_name,
                 "admin_ip": machine_ip,
                 "admin_claimed_at": claimed_at,
+                "admin_epoch": max(1, int(previous.get("admin_epoch", 0) or 0)),
                 "config_version": version,
                 "updated_at": utc_now_text(),
                 "files": dict(CENTRAL_CONFIG_FILES),
@@ -389,38 +390,106 @@ class CentralConfigClient:
         finally:
             self._unlock(lock)
 
+    def read_admin_state(self) -> dict | None:
+        """Read only the tiny Admin ownership document.
+
+        This intentionally does not read database.json, file_server.json or
+        element_marks.json.  It is safe to use for the lightweight running
+        Admin ownership check without turning it into an automatic central
+        configuration sync.
+        """
+        return self.read_json(CENTRAL_CONFIG_FILES["instance"])
+
+    def claim_admin(
+        self, machine_id: str, machine_name: str, machine_ip: str
+    ) -> dict:
+        """Atomically take over Admin ownership without publishing config."""
+        self.ensure_root()
+        lock = self._lock()
+        try:
+            current = self.read_json(CENTRAL_CONFIG_FILES["instance"]) or {}
+            now = utc_now_text()
+            previous_owner = {
+                "machine_id": current.get("admin_machine_id"),
+                "machine_name": current.get("admin_machine_name"),
+                "ip": current.get("admin_ip"),
+                "claimed_at": current.get("admin_claimed_at"),
+                "released_at": now,
+            }
+            epoch = int(current.get("admin_epoch", 0) or 0) + 1
+            payload = dict(current)
+            payload.update(
+                {
+                    "schema_version": 1,
+                    "initialized": bool(current.get("initialized", False)),
+                    "admin_status": "active",
+                    "admin_machine_id": machine_id,
+                    "admin_machine_name": machine_name,
+                    "admin_ip": machine_ip,
+                    "admin_claimed_at": now,
+                    "admin_epoch": epoch,
+                    "config_version": int(current.get("config_version", 0) or 0),
+                    "updated_at": now,
+                    "files": dict(CENTRAL_CONFIG_FILES),
+                }
+            )
+            if previous_owner["machine_id"]:
+                payload["last_admin"] = previous_owner
+            self._write_json(CENTRAL_CONFIG_FILES["instance"], payload)
+            return payload
+        finally:
+            self._unlock(lock)
+
     def publish(
-        self, settings: dict, machine_id: str, machine_name: str, machine_ip: str
+        self, settings: dict, machine_id: str, machine_name: str, machine_ip: str,
+        expected_admin_epoch: int | None = None,
     ) -> int:
         lock = self._lock()
         try:
             current = self.read_json(CENTRAL_CONFIG_FILES["instance"])
-            if not current or not bool(current.get("initialized")):
-                raise CentralConfigError("中央配置尚未初始化，请先完成 Admin 初始化。")
+            if not current:
+                raise CentralConfigError("中央配置尚未建立，请先抢占 Admin。")
             current_admin_id = str(current.get("admin_machine_id") or "")
             current_admin_name = str(current.get("admin_machine_name") or "")
+            current_epoch = int(current.get("admin_epoch", 0) or 0)
             if current_admin_id != str(machine_id) or (
                 current_admin_name and current_admin_name != str(machine_name)
             ):
                 raise CentralConfigError("当前机器不是 Admin，不能发布中央配置。")
+            if expected_admin_epoch is not None and current_epoch != int(expected_admin_epoch):
+                raise CentralConfigError(
+                    "Admin 权限已被重新抢占，本次发布已阻止。请重新抢占 Admin 后再操作。"
+                )
             return self._write_bundle(
                 settings, machine_id, machine_name, machine_ip, current
             )
         finally:
             self._unlock(lock)
 
-    def release_admin(self, machine_id: str, machine_name: str) -> int:
+    def release_admin(
+        self, machine_id: str, machine_name: str, expected_admin_epoch: int | None = None
+    ) -> int:
         lock = self._lock()
         try:
             current = self.read_json(CENTRAL_CONFIG_FILES["instance"], required=True)
             current_admin_id = str(current.get("admin_machine_id") or "")
             current_admin_name = str(current.get("admin_machine_name") or "")
+            current_epoch = int(current.get("admin_epoch", 0) or 0)
             if current_admin_id != str(machine_id) or (
                 current_admin_name and current_admin_name != str(machine_name)
             ):
                 raise CentralConfigError("当前机器不是 Admin，不能释放 Admin 权限。")
-            version = int(current.get("config_version", 0) or 0) + 1
+            if expected_admin_epoch is not None and current_epoch != int(expected_admin_epoch):
+                raise CentralConfigError("Admin 权限已变化，当前客户端不能释放新的 Admin。")
+            version = int(current.get("config_version", 0) or 0)
             released_at = utc_now_text()
+            previous_owner = {
+                "machine_id": current.get("admin_machine_id"),
+                "machine_name": current.get("admin_machine_name"),
+                "ip": current.get("admin_ip"),
+                "claimed_at": current.get("admin_claimed_at"),
+                "released_at": released_at,
+            }
             current.update(
                 {
                     "admin_status": "unassigned",
@@ -428,13 +497,8 @@ class CentralConfigClient:
                     "admin_machine_name": None,
                     "admin_ip": None,
                     "admin_released_at": released_at,
-                    "last_admin": {
-                        "machine_id": current.get("admin_machine_id"),
-                        "machine_name": current.get("admin_machine_name"),
-                        "ip": current.get("admin_ip"),
-                        "claimed_at": current.get("admin_claimed_at"),
-                        "released_at": released_at,
-                    },
+                    "admin_epoch": current_epoch + 1,
+                    "last_admin": previous_owner,
                     "config_version": version,
                     "updated_at": released_at,
                 }

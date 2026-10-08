@@ -60,10 +60,13 @@ def _reports():
 
 def test_rmu_csv_bundle_merges_profile_into_summary(tmp_path):
     paths = export_csv_bundle(_reports(), tmp_path / "report.csv")
-    assert len(paths) == 2
+    assert len(paths) == 3
+
+    assert paths[2].name.endswith("_关联失败_CN.csv")
+    assert paths[2].exists()
 
     summary = paths[0]
-    assert summary.name.endswith("_环网柜汇总.csv")
+    assert summary.name.endswith("_环网柜汇总_CN.csv")
     text = summary.read_text(encoding="utf-8-sig")
 
     assert "环网柜名称" in text

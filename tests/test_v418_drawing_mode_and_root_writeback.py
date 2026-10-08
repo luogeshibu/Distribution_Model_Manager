@@ -18,7 +18,7 @@ def _write_g(path: Path, *, with_feedline=False):
     path.write_text(f'<G id="root" facID=""><Layer>{body}</Layer></G>', encoding='utf-8')
 
 
-def test_drawing_mode_single_overrides_automatic_multi(monkeypatch, tmp_path):
+def test_jeddah_single_mode_is_fixed_even_when_automatic_classifier_says_multi(monkeypatch, tmp_path):
     g = tmp_path / 'x.g'
     _write_g(g)
 
@@ -39,10 +39,10 @@ def test_drawing_mode_single_overrides_automatic_multi(monkeypatch, tmp_path):
     assert profile['automatic_drawing_type'] == 'MULTI_FEEDER_COMPOSITE'
     assert profile['drawing_type'] == 'SINGLE_FEEDER'
     assert profile['drawing_type_overridden'] == 'YES'
-    assert profile['classification_reason'] == 'USER_CONFIRMED_SINGLE_FEEDER'
+    assert profile['classification_reason'] == 'JEDDAH_SINGLE_FEEDER_FIXED'
 
 
-def test_drawing_mode_multi_overrides_automatic_single(monkeypatch, tmp_path):
+def test_retired_multi_setting_cannot_override_jeddah_single_mode(monkeypatch, tmp_path):
     g = tmp_path / 'x.g'
     _write_g(g)
 
@@ -61,8 +61,9 @@ def test_drawing_mode_multi_overrides_automatic_single(monkeypatch, tmp_path):
     monkeypatch.setattr(FeederDrawingTopologyClassifier, 'classify', fake_classify)
     profile = FeederModelModule._drawing_profile(g, {'feeder_drawing_mode': 'MULTI'})
     assert profile['automatic_drawing_type'] == 'SINGLE_FEEDER'
-    assert profile['drawing_type'] == 'MULTI_FEEDER_COMPOSITE'
-    assert profile['classification_reason'] == 'USER_CONFIRMED_MULTI_FEEDER_COMPOSITE'
+    assert profile['drawing_type'] == 'SINGLE_FEEDER'
+    assert profile['drawing_mode'] == 'SINGLE'
+    assert profile['classification_reason'] == 'JEDDAH_SINGLE_FEEDER_FIXED'
 
 
 def test_preview_keeps_root_candidate_even_when_section_region_is_blocked(monkeypatch, tmp_path):
@@ -171,9 +172,10 @@ def test_apply_root_candidate_ignores_blocked_feedline_region(tmp_path):
     assert result['database_created_count'] == 0
 
 
-def test_feeder_settings_ui_exposes_explicit_drawing_type_choice():
+def test_feeder_settings_ui_hides_retired_drawing_type_choice():
     src = Path('src/dmm/ui/widgets/feeder_settings.py').read_text(encoding='utf-8')
-    assert '图纸类型确认' in src
-    assert '强制单馈线图（本次文件/目录）' in src
-    assert '强制组合图（本次文件/目录）' in src
-    assert 'feeder_drawing_mode' in src
+    assert '图纸类型确认' not in src
+    assert '强制单馈线图（本次文件/目录）' not in src
+    assert '强制组合图（本次文件/目录）' not in src
+    assert 'self.feeder_drawing_mode = NoWheelComboBox()' not in src
+    assert '"feeder_drawing_mode": "SINGLE"' in src

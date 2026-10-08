@@ -4,6 +4,7 @@ import sys
 import re
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QGridLayout, QLabel, QCheckBox,
     QPushButton, QGroupBox, QSpinBox, QAbstractSpinBox,
@@ -15,6 +16,7 @@ from dmm.config.defaults import (
     DEFAULT_NAME_POSITIONS,
     DEFAULT_RMU_NAME_DETECTION_MODE,
     DEFAULT_RMU_NAME_EXCLUSIONS,
+    DEFAULT_RMU_PROTECTION_SCOPE,
 )
 from dmm.config.constants import (
     RMU_RELAY_SIGNAL_CODE,
@@ -94,13 +96,12 @@ class RmuSettingsWidget(QWidget):
 
         info = QLabel(
             "RMU 环网柜只有在矩形框内同时包含 CBreakerDis、BusDis、ZhaiWaiJieDiDaoZha 时才识别。"
-            "开关设备名称固定使用环网柜内图上文字；吉达现场默认读取图框上方名称。"
-            "允许多选名称方向，多选时只保留所选方向中距离最近的一个 Text。"
+            "环网柜名称始终以 RMU 矩形框为基准，只允许识别完整位于矩形框外、且在矩形框上方的 Text；右侧、左侧、下方和全局兜底全部禁用。上方找不到名称即判定环网柜名称识别失败。"
             "设备命名规则固定使用图上文字，不再读取三类设备 XML 的 p_NameString："
             "CBreakerDis 使用图上名称，接地刀闸使用开关名+D，BusDis 固定使用 BUS。"
-            "RMU 内 NariPd_Normal.pwbh.icn.g 为固定 EFI 信号：默认按环网柜 ID 查询 13533 dms_relay_sig，"
-            "仅 CODE=EFI INDICATOR 才参与关联，默认回写 value 域 keyid1（域号 40）；表号和域号可在右侧调整。"
-            "环网柜模块不判断馈线或 facID，支持单线图、合成图和环网图；同一 G 图内环网柜名称重复时全部阻断关联。"
+            "RMU 内保护/EFI 图元只认图元管理中的 RMU_PWBH_EFI 分类标记：可同时标记多个图元文件，默认按环网柜 ID 查询 13533 dms_relay_sig，"
+            "仅 CODE=EFI INDICATOR 才参与关联，默认回写 value 域 keyid1（域号 40）；设备表号和域号属于固定工程规则，不允许用户修改。"
+            "单线图中的环网柜关联会先按 G 文件名唯一确定图级馈线，并只在该 FEEDER_ID 下选择同名环网柜；其它馈线上的同名记录不会阻断。合成图和环网图保持原 RMU 逻辑；同一 G 图内环网柜名称重复时仍按原规则阻断。"
         )
         info.setWordWrap(True)
         info.setObjectName("moduleDescription")
@@ -136,14 +137,12 @@ class RmuSettingsWidget(QWidget):
         self.name_detection_mode.setCurrentIndex(mode_index if mode_index >= 0 else 0)
         rg.addWidget(self.name_detection_mode, 0, 1)
 
-        labels = {"top": "上方", "right": "右侧", "left": "左侧", "bottom": "下方"}
+        labels = {"top": "上方（固定）", "right": "右侧（禁用）", "left": "左侧（禁用）", "bottom": "下方（禁用）"}
         self.pos_checks = {}
-        saved_pos = config.get("rmu_name_positions", DEFAULT_NAME_POSITIONS)
-        if not any(bool(saved_pos.get(pos, False)) for pos in labels):
-            saved_pos = DEFAULT_NAME_POSITIONS
         for idx, pos in enumerate(("top", "right", "left", "bottom")):
             cb = QCheckBox(labels[pos])
-            cb.setChecked(bool(saved_pos.get(pos, DEFAULT_NAME_POSITIONS.get(pos, False))))
+            cb.setChecked(pos == "top")
+            cb.setEnabled(False)
             rg.addWidget(cb, 1 + idx // 2, idx % 2)
             self.pos_checks[pos] = cb
 
@@ -158,109 +157,114 @@ class RmuSettingsWidget(QWidget):
         self.name_exclusions_edit.setPlaceholderText("例如：N.O.P, NOP, SFI, DAS/OK")
         rg.addWidget(self.name_exclusions_edit, 4, 0, 1, 2)
 
-        rg.addWidget(QLabel("环网柜名称来源"), 5, 0)
-        fixed_source = QLabel("环网柜内图上文字（固定）")
+        rg.addWidget(QLabel("保护 / EFI 关联范围"), 5, 0)
+        self.protection_scope = NoWheelComboBox()
+        self.protection_scope.addItem("所有环网柜都关联保护 / EFI", "ALL")
+        self.protection_scope.addItem("仅 SMART 智能环网柜关联保护 / EFI", "SMART_ONLY")
+        saved_scope = str(
+            config.get("rmu_protection_scope", DEFAULT_RMU_PROTECTION_SCOPE)
+            or DEFAULT_RMU_PROTECTION_SCOPE
+        ).strip().upper()
+        scope_index = self.protection_scope.findData(saved_scope)
+        self.protection_scope.setCurrentIndex(scope_index if scope_index >= 0 else 0)
+        rg.addWidget(self.protection_scope, 5, 1)
+
+        rg.addWidget(QLabel("环网柜名称来源"), 6, 0)
+        fixed_source = QLabel("框外图上文字：仅上方（固定）")
         fixed_source.setStyleSheet(
             "font-weight:700;color:#006B52;"
             "background:#EAF8F2;border:1px solid #B9DACD;"
             "border-radius:6px;padding:7px 9px;"
         )
-        rg.addWidget(fixed_source, 5, 1)
+        rg.addWidget(fixed_source, 6, 1)
 
         note = QLabel(
-            "默认勾选上方；允许同时勾选多个方向。多选时程序只保留所选方向中距离最近的一个 Text，"
+            "吉达现场环网柜名称始终以 RMU 矩形框为几何基准，只允许使用完整位于矩形框外、且在矩形框上方的 Text。右侧、左侧、下方和全局兜底全部禁用；上方找不到有效 Text 就直接判定环网柜名称识别失败。框内 Text 永远不能作为环网柜名称。"
             "开关名称不再读取 XML p_NameString。CBreakerDis 仅使用环网柜内"
             "图上文字；接地刀闸逻辑名称=配对开关名+D；BusDis 固定为 BUS。"
-            "NariPd_Normal.pwbh.icn.g 仍按固定 CODE=EFI INDICATOR 关联，但其表号和域号也可在右侧直接调整。"
+            "保护/EFI 不绑定具体图元文件名；凡图元管理分类标记为 RMU_PWBH_EFI 的 pwbh 图元都按固定 CODE=EFI INDICATOR 关联；数据库表号和域号为固定工程规则。"
+            "当选择“仅 SMART”时，NORMAL 环网柜不会新增保护/EFI关联；如果已有 EFI KeyID，执行关联时会自动清除关联值，"
+            "保留原属性键，回到现场未关联 EFI 的属性状态。"
             "图上名称无法唯一识别，或与数据库 CODE 校验失败时，会明确告警对应环网柜。"
-            "本模块不判断馈线或 facID；同一 G 图内环网柜名称重复时，重复名称对应的环网柜全部禁止关联。"
+            "单线图必须先由 G 文件名唯一确定图级馈线，并校验目标环网柜属于该 FEEDER_ID；数据库其它馈线上的同名环网柜会被忽略。当前馈线下没有同名环网柜，或当前馈线下仍有多条同名记录时禁止关联；facID 不作为环网柜名称匹配条件。"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#60756d;")
-        rg.addWidget(note, 6, 0, 1, 2)
-        rg.setRowStretch(7, 1)
+        rg.addWidget(note, 7, 0, 1, 2)
+        rg.setRowStretch(8, 1)
 
-        rules_box = QGroupBox("RMU 设备数据库表与域配置（可编辑）")
-        rules_box.setMinimumWidth(590)
-        rules_box.setMinimumHeight(355)
-        rules = QGridLayout(rules_box)
-        rules.setContentsMargins(14, 18, 14, 14)
-        rules.setHorizontalSpacing(12)
-        rules.setVerticalSpacing(9)
-        rules.setColumnStretch(0, 2)
-        rules.setColumnStretch(1, 3)
-        rules.setColumnStretch(2, 3)
-        rules.addWidget(QLabel("G 图元类型"), 0, 0)
-        rules.addWidget(QLabel("表号（Table ID）"), 0, 1)
-        rules.addWidget(QLabel("域号（Domain）"), 0, 2)
+        logic_box = QGroupBox("RMU 自动关联完整逻辑（只读说明）")
+        logic_box.setMinimumWidth(590)
+        # 右侧逻辑说明按内容自然高度显示，不再被左侧识别区/工作区高度拉伸。
+        # 即使外层布局还有剩余高度，也只留在卡片列表底部，步骤之间保持紧凑。
+        logic_box.setMinimumHeight(0)
+        logic_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        logic = QVBoxLayout(logic_box)
+        logic.setContentsMargins(7, 10, 7, 7)
+        logic.setSpacing(3)
+        logic.setAlignment(Qt.AlignTop)
 
-        self.table_spins = {}
-        self.domain_spins = {}
-        saved_rules = config.get("device_rules", {})
-        for row, (tag, default) in enumerate(DEFAULT_DEVICE_RULES.items(), start=1):
-            vals = dict(default)
-            vals.update(saved_rules.get(tag, {}))
-            rules.addWidget(QLabel(tag), row, 0)
+        def add_logic(title, text, accent=False):
+            label = QLabel(f"<b>{title}：</b> {text}")
+            label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+            # Keep the explanatory step card at a compact visual height; do not
+            # let spare workspace height turn the label background into a large box.
+            label.setMinimumHeight(0)
+            label.setMaximumHeight(64)
+            # All five logic steps have the same information level. Keep their
+            # background, text and border styling identical.
+            label.setStyleSheet(
+                "background:#F7FAF9;color:#355148;border:1px solid #D6E4DF;"
+                "border-radius:6px;padding:4px 7px;line-height:1.22;"
+            )
+            logic.addWidget(label)
 
-            table = NoWheelSpinBox()
-            table.setRange(0, 999999)
-            table.setValue(int(vals["table_id"]))
-            table.setMinimumHeight(36)
-
-            domain = NoWheelSpinBox()
-            domain.setRange(0, 999999)
-            domain.setValue(int(vals["domain"]))
-            domain.setMinimumHeight(36)
-
-            rules.addWidget(table, row, 1)
-            rules.addWidget(domain, row, 2)
-            self.table_spins[tag] = table
-            self.domain_spins[tag] = domain
-
-        fixed_row = len(DEFAULT_DEVICE_RULES) + 1
-        rules.addWidget(QLabel("pwbh（NariPd_Normal / EFI）"), fixed_row, 0)
-        relay_saved = saved_rules.get("pwbh", {})
-
-        self.relay_table_spin = NoWheelSpinBox()
-        self.relay_table_spin.setRange(0, 999999)
-        self.relay_table_spin.setValue(
-            int(relay_saved.get("table_id", RMU_RELAY_SIGNAL_TABLE_ID))
+        add_logic(
+            "1. 环网柜如何识别",
+            "只有矩形框内同时包含 CBreakerDis、BusDis、ZhaiWaiJieDiDaoZha 才识别为 RMU。"
+            "RMU 名称只从完整位于矩形框外、且在矩形框上方的 Text 获取；不允许右侧、左侧、下方或全局兜底。上方没有有效名称时直接 FAIL；框内 Text 永不作为柜名。"
+            "同一 G 图内 RMU 名称重复时，重复名称对应的环网柜全部阻断自动关联。",
+            True,
         )
-        self.relay_table_spin.setMinimumHeight(36)
-
-        self.relay_domain_spin = NoWheelSpinBox()
-        self.relay_domain_spin.setRange(0, 999999)
-        self.relay_domain_spin.setValue(
-            int(relay_saved.get("domain", RMU_RELAY_SIGNAL_DOMAIN))
+        add_logic(
+            "2. 柜内设备如何命名",
+            "CBreakerDis 只使用柜内图上文字，不读取 XML p_NameString；"
+            "ZhaiWaiJieDiDaoZha 的逻辑名称=配对开关名称+D；BusDis 的逻辑名称固定为 BUS。"
+            "保护/EFI 只认【图元管理】分类标记 RMU_PWBH_EFI，并按固定 CODE=EFI INDICATOR 处理。"
+            "保护范围仍由左侧“保护 / EFI 关联范围”选项控制。",
         )
-        self.relay_domain_spin.setMinimumHeight(36)
-
-        rules.addWidget(self.relay_table_spin, fixed_row, 1)
-        rules.addWidget(self.relay_domain_spin, fixed_row, 2)
-
-        relay_note = QLabel(
-            f"固定匹配：NariPd_Normal.pwbh.icn.g / CODE={RMU_RELAY_SIGNAL_CODE}；"
-            "只允许修改表号和域号，回写仍使用 value 域 keyid1。"
+        add_logic(
+            "3. 数据库怎样校验",
+            "先用 RMU 名称定位 13501 环网柜；单线图先按图级 FEEDER_ID 过滤同名记录，只有当前馈线内唯一记录才继续。柜内 CBreakerDis 对应固定 13502 / Domain 40，"
+            "接地刀闸对应 13514 / Domain 40，BusDis 对应 13506 / Domain 1；"
+            "这些设备按数据库 CODE 与图上逻辑名称校验，并要求目标设备属于当前 RMU。"
+            "RMU_PWBH_EFI 使用 13533 / dms_relay_sig，固定 CODE=EFI INDICATOR、Domain 40。"
+            "数据库 0 条、多条、CODE 不一致、设备归属不一致、BV_ID/Expected KeyID 无效时均禁止自动关联。",
         )
-        relay_note.setWordWrap(True)
-        relay_note.setStyleSheet("color:#60756d;")
-        rules.addWidget(relay_note, fixed_row + 1, 0, 1, 3)
+        add_logic(
+            "4. 当前 KeyID 如何判断",
+            "当前 KeyID 只用于判断 PASS / UNLINKED / RELINK / RMU_RELINK。"
+            "当前关联已正确则保持不动；旧设备 ID、旧 KeyID、旧表号/域号已经过期，但数据库当前目标唯一且属于本 RMU 时，"
+            "允许安全重关联。单线图还必须满足目标 RMU 的 FEEDER_ID 与图级馈线一致；facID 不作为 RMU 名称匹配条件。",
+        )
+        add_logic(
+            "5. 真正执行时回写哪些字段",
+            "CBreakerDis / ZhaiWaiJieDiDaoZha：app=6500000、voltype=数据库 BV_ID、p_ReportType=1、state=41、keyid=Expected KeyID。"
+            "BusDis：app=6500000、voltype=数据库 BV_ID、p_ReportType=1、state=15、keyid=Expected KeyID。"
+            "RMU_PWBH_EFI：app/app1=6500000、voltype1=0、p_ReportType1=1、state1=41、keyid1=Expected KeyID。"
+            "选择“仅 SMART”时，NORMAL RMU 已有关联的 EFI 按既有策略清回未关联属性状态。"
+            "所有修改只写 Workspace 安全副本，原始 G 文件不修改。",
+        )
 
-        reset = QPushButton("恢复 RMU 默认配置")
-        reset.setMinimumHeight(36)
-        reset.clicked.connect(self.restore_defaults)
-        rules.addWidget(reset, fixed_row + 2, 0, 1, 3)
+        # 把任何多余的纵向空间压到列表底部，绝不平均摊到五个说明卡片之间。
+        logic.addStretch(1)
 
         top_row.addWidget(recog, 4)
-        top_row.addWidget(rules_box, 7)
+        top_row.addWidget(logic_box, 7, alignment=Qt.AlignTop)
         root.addLayout(top_row)
 
     def restore_defaults(self):
-        for tag, rule in DEFAULT_DEVICE_RULES.items():
-            self.table_spins[tag].setValue(int(rule["table_id"]))
-            self.domain_spins[tag].setValue(int(rule["domain"]))
-        self.relay_table_spin.setValue(RMU_RELAY_SIGNAL_TABLE_ID)
-        self.relay_domain_spin.setValue(RMU_RELAY_SIGNAL_DOMAIN)
         for pos, value in DEFAULT_NAME_POSITIONS.items():
             self.pos_checks[pos].setChecked(bool(value))
         default_index = self.name_detection_mode.findData(
@@ -268,29 +272,27 @@ class RmuSettingsWidget(QWidget):
         )
         self.name_detection_mode.setCurrentIndex(max(default_index, 0))
         self.name_exclusions_edit.setText(", ".join(DEFAULT_RMU_NAME_EXCLUSIONS))
+        scope_index = self.protection_scope.findData(DEFAULT_RMU_PROTECTION_SCOPE)
+        self.protection_scope.setCurrentIndex(max(scope_index, 0))
 
     def collect_settings(self):
         positions = {
-            key: checkbox.isChecked()
-            for key, checkbox in self.pos_checks.items()
+            "top": True,
+            "right": True,
+            "left": False,
+            "bottom": False,
         }
         detection_mode = "FIXED"
-        if not any(positions.values()):
-            raise ValueError(tr("请至少选择一个环网柜名称位置。", self.config.get("language", "zh_CN")))
-        if sum(1 for enabled in positions.values() if enabled) > 1:
-            QMessageBox.information(
-                self,
-                "RMU 名称方向提示",
-                "已选择多个名称方向。每个环网柜最终只保留一个名称，"
-                "程序将在这些方向的候选 Text 中选择距离最近的一个。",
-            )
 
         saved_rules = {}
         runtime_rules = {}
 
+        # RMU database mappings are fixed engineering rules.  Ignore any stale
+        # user/workspace values from older versions and always persist/use the
+        # bundled definitions so UI settings cannot alter association behavior.
         for tag, default in DEFAULT_DEVICE_RULES.items():
-            table_id = self.table_spins[tag].value()
-            domain = self.domain_spins[tag].value()
+            table_id = int(default["table_id"])
+            domain = int(default["domain"])
 
             saved_rules[tag] = {
                 "table_id": table_id,
@@ -304,8 +306,8 @@ class RmuSettingsWidget(QWidget):
                 "description": default["description"],
             }
 
-        relay_table_id = self.relay_table_spin.value()
-        relay_domain = self.relay_domain_spin.value()
+        relay_table_id = int(RMU_RELAY_SIGNAL_TABLE_ID)
+        relay_domain = int(RMU_RELAY_SIGNAL_DOMAIN)
         saved_rules["pwbh"] = {
             "table_id": relay_table_id,
             "domain": relay_domain,
@@ -313,9 +315,9 @@ class RmuSettingsWidget(QWidget):
         runtime_rules["pwbh"] = {
             "table_id": relay_table_id,
             "domain": relay_domain,
-            "match_mode": "FIXED_GFILE_EFI_INDICATOR",
+            "match_mode": "ELEMENT_CLASSIFICATION_EFI_INDICATOR",
             "description": (
-                "NariPd_Normal.pwbh.icn.g -> "
+                "element classification RMU_PWBH_EFI -> "
                 "dms_relay_sig.CODE=EFI INDICATOR"
             ),
             "fixed_code": RMU_RELAY_SIGNAL_CODE,
@@ -333,6 +335,7 @@ class RmuSettingsWidget(QWidget):
             "rmu_name_positions": positions,
             "rmu_name_detection_mode": detection_mode,
             "rmu_name_exclusions": exclusion_values,
+            "rmu_protection_scope": str(self.protection_scope.currentData() or DEFAULT_RMU_PROTECTION_SCOPE),
             "breaker_name_source": "GRAPHICAL_TEXT",
             "device_rules": saved_rules,
             "_runtime_rules": runtime_rules,

@@ -1,0 +1,13 @@
+{
+  "default_template_id": "default_sld_frame",
+  "templates": [
+    {
+      "id": "default_sld_frame",
+      "name": "Default SLD Drawing Frame",
+      "version": "1.1.0",
+      "file": "SLD-Drawing-Frame-Template.sln.pic.g",
+      "editable_content": true,
+      "description": "G File Studio 内置标准 SLD 图框模板。"
+    }
+  ]
+}

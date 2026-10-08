@@ -23,13 +23,18 @@ from PySide6.QtWidgets import (
     QPushButton, QComboBox, QPlainTextEdit, QFrame, QStackedWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QListWidget, QListWidgetItem, QGroupBox, QTabWidget, QScrollArea, QSizePolicy,
-    QProgressBar, QSplitter, QDialog, QTextBrowser, QDialogButtonBox
+    QProgressBar, QSplitter, QDialog, QTextBrowser, QDialogButtonBox, QCheckBox
 )
 
 from dmm.application.job_worker import JobWorker
+from dmm.application.batch_orchestrator import (
+    BATCH_MODULE_ORDER, BATCH_MODULE_LABELS, BatchAssociationOrchestrator,
+    filter_validation_bundle_candidates,
+)
 from dmm.application.registry import get_model_modules
 from dmm.ui.registry import create_settings_widget
 from dmm.ui.widgets.element_management_page import ElementManagementWidget
+from dmm.ui.graphics_workspace import GraphicsWorkspaceWidget
 from dmm.config.constants import (
     APP_NAME, APP_NAME_EN, APP_VERSION, APP_EDITION,
     APP_SITE_LABEL, APP_SITE_LABEL_EN, APP_BUILD_DATE,
@@ -39,9 +44,11 @@ from dmm.config.settings import (
     initialize_central_settings,
     load_settings,
     publish_central_settings,
+    read_central_admin_state,
     release_central_admin,
     save_settings,
     sync_central_settings,
+    takeover_central_admin,
 )
 from dmm.i18n import normalize_language, tr, translate_runtime_text, retranslate_qt_tree
 from dmm.infrastructure.database.oracle import OracleClient
@@ -224,6 +231,260 @@ class AssociationExecutionWorker(QThread):
                 db.close()
 
 
+class _BatchWorkerLogRelay:
+    """Reduce Qt signal pressure for batch-only jobs.
+
+    Independent/single-module workers still emit every log line exactly as
+    before.  Batch mode groups a few adjacent log lines into one queued signal
+    so thousands of objects cannot flood the GUI event queue near completion.
+    """
+
+    def __init__(self, signal, batch_size: int = 12):
+        self.signal = signal
+        self.batch_size = max(1, int(batch_size))
+        self.pending = []
+
+    def write(self, text):
+        self.pending.append(str(text))
+        if len(self.pending) >= self.batch_size:
+            self.flush()
+
+    def flush(self):
+        if not self.pending:
+            return
+        self.signal.emit("\n".join(self.pending))
+        self.pending.clear()
+
+
+class BatchValidationWorker(QThread):
+    """Batch-only preparation + validation worker.
+
+    The six independent association modules are not modified.  For SSH input,
+    even the stable remote snapshot is prepared here instead of in the GUI
+    thread, so selecting many drawings/stations cannot freeze the application.
+    """
+
+    log = Signal(str)
+    progress = Signal(int, str)
+    completed = Signal(object)
+    failed = Signal(object)
+
+    def __init__(
+        self,
+        db_config: dict,
+        modules: dict,
+        files,
+        settings_by_module: dict,
+        selected_module_ids,
+        report_root: Path,
+        language: str,
+        *,
+        source_info=None,
+        ssh_snapshot_request=None,
+        run_dir=None,
+    ):
+        super().__init__()
+        self.db_config = dict(db_config)
+        self.modules = modules
+        self.files = list(files or [])
+        self.settings_by_module = settings_by_module
+        self.selected_module_ids = list(selected_module_ids)
+        self.report_root = Path(report_root)
+        self.language = language
+        self.source_info = dict(source_info or {})
+        self.ssh_snapshot_request = dict(ssh_snapshot_request or {})
+        self.run_dir = Path(run_dir) if run_dir else self.report_root.parent
+
+    def run(self):
+        db = None
+        relay = _BatchWorkerLogRelay(self.log)
+        try:
+            files = list(self.files)
+            source_info = dict(self.source_info or {})
+
+            if self.ssh_snapshot_request:
+                request = self.ssh_snapshot_request
+                selected_remote_files = list(request.get("selected_files") or [])
+                if not selected_remote_files:
+                    raise RuntimeError("没有选择任何远程 G 文件。")
+
+                self.progress.emit(1, "正在获取 SSH 稳定快照……")
+                relay.write("批量模式：SSH 稳定快照在后台线程准备，主界面保持可响应。")
+                service = RemoteSnapshotService(
+                    host=request["host"],
+                    port=request["port"],
+                    username=request["username"],
+                    password=request["password"],
+                    remote_directory=request["remote_directory"],
+                    max_attempts=3,
+                )
+
+                def snapshot_log(message):
+                    text = str(message)
+                    relay.write(text)
+                    # RemoteSnapshotService logs downloads as [n/total].
+                    # Convert that existing information into batch-only UI
+                    # progress without changing the snapshot service itself.
+                    match = re.match(r"\[(\d+)/(\d+)\]", text.strip())
+                    if match:
+                        current = int(match.group(1))
+                        total = max(1, int(match.group(2)))
+                        percent = 2 + int(current * 16 / total)
+                        self.progress.emit(
+                            min(18, percent),
+                            f"正在获取 SSH 稳定快照 {current}/{total}",
+                        )
+
+                files, source_info = service.download_latest(
+                    selected_remote_files,
+                    self.run_dir,
+                    log=snapshot_log,
+                )
+                relay.write(
+                    "本次批量校验已锁定同一 remote_input 快照；"
+                    "后续所有勾选模块和批量关联均使用这一快照。"
+                )
+
+            if not files:
+                raise RuntimeError("没有可用于本次批量模型校验的 G 文件。")
+
+            self.progress.emit(20, "正在连接 Oracle 数据库……")
+            relay.write("Oracle 预检查：正在验证数据库连接……")
+            db = OracleClient(self.db_config)
+            relay.write(db.test_connection())
+            relay.write("Oracle 预检查：通过")
+
+            orchestrator = BatchAssociationOrchestrator(self.modules)
+
+            def validation_progress(percent, message=""):
+                # Reserve 0-20 for SSH/local preparation and Oracle precheck.
+                mapped = 22 + int(max(0, min(100, int(percent))) * 78 / 100)
+                self.progress.emit(min(100, mapped), str(message))
+
+            result = orchestrator.validate(
+                db,
+                files,
+                self.settings_by_module,
+                self.selected_module_ids,
+                self.report_root,
+                relay.write,
+                validation_progress,
+                language=self.language,
+            )
+            # Keep batch preparation metadata in the batch bundle only.  The
+            # normal independent-module snapshot fields remain untouched.
+            result["_batch_prepared_files"] = [str(Path(p)) for p in files]
+            result["_batch_source_info"] = dict(source_info or {})
+            relay.flush()
+            self.completed.emit(result)
+        except Exception as exc:
+            relay.flush()
+            self.failed.emit(exc)
+        finally:
+            if db:
+                db.close()
+
+
+class BatchAssociationExecutionWorker(QThread):
+    """Execute selected modules cumulatively while preserving module rules.
+
+    Candidate filtering/deep-copy work is intentionally performed inside this
+    batch worker instead of the GUI thread.  Each module still receives its own
+    existing preview/apply_association implementation unchanged.
+    """
+
+    log = Signal(str)
+    progress = Signal(int, str)
+    completed = Signal(object)
+    failed = Signal(object)
+
+    def __init__(
+        self,
+        db_config: dict,
+        modules: dict,
+        files,
+        settings_by_module: dict,
+        validation_bundle: dict,
+        selected_candidate_ids,
+        output_root: Path,
+        report_root: Path,
+        language: str,
+    ):
+        super().__init__()
+        self.db_config = dict(db_config)
+        self.modules = modules
+        self.files = list(files)
+        self.settings_by_module = settings_by_module
+        self.validation_bundle = validation_bundle
+        self.selected_candidate_ids = list(selected_candidate_ids or [])
+        self.output_root = Path(output_root)
+        self.report_root = Path(report_root)
+        self.language = language
+
+    def run(self):
+        db = None
+        relay = _BatchWorkerLogRelay(self.log)
+        try:
+            self.progress.emit(1, "正在准备已确认的批量关联对象……")
+            # This used to deepcopy the entire validation bundle on the GUI
+            # thread.  Keeping it here prevents large runs from appearing hung
+            # immediately after the operator clicks Execute.
+            execution_bundle = filter_validation_bundle_candidates(
+                self.validation_bundle,
+                self.selected_candidate_ids,
+            )
+            if execution_bundle.get("conflicts"):
+                raise RuntimeError(
+                    "当前选中的对象仍存在跨模块写回冲突，禁止执行。"
+                )
+
+            self.progress.emit(3, "正在连接 Oracle 数据库……")
+            relay.write("\n开始执行批量模型关联：重新验证 Oracle 数据库连接。")
+            db = OracleClient(self.db_config)
+            relay.write(db.test_connection())
+            orchestrator = BatchAssociationOrchestrator(self.modules)
+            result = orchestrator.apply(
+                db,
+                self.files,
+                self.settings_by_module,
+                execution_bundle,
+                self.output_root,
+                self.report_root,
+                relay.write,
+                lambda percent, message="": self.progress.emit(int(percent), str(message)),
+                language=self.language,
+            )
+            relay.flush()
+            self.completed.emit(result)
+        except Exception as exc:
+            relay.flush()
+            self.failed.emit(exc)
+        finally:
+            if db:
+                db.close()
+
+
+class CentralAdminOwnershipWorker(QThread):
+    """One-shot lightweight Admin ownership probe.
+
+    It reads only central ``instance.json``.  It never downloads the shared
+    database/SSH/element configuration, so this is not a central sync.
+    """
+
+    checked = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, settings_snapshot: dict, parent=None):
+        super().__init__(parent)
+        self.settings_snapshot = settings_snapshot
+
+    def run(self):
+        try:
+            self.checked.emit(read_central_admin_state(self.settings_snapshot))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -231,10 +492,11 @@ class MainWindow(QMainWindow):
         ensure_workspace()
         cleanup_workspace(WORKSPACE_RETENTION_DAYS)
 
-        # Load local cache first, then replace shared values with the latest
-        # central bundle when it is available.  The central server is the
-        # source of truth for element marks, database and file-server config.
-        self.cfg = load_settings(sync_central=True)
+        # v4.1.45: startup is strictly local-first and offline-safe.  Loading
+        # the application never contacts the central repository, Oracle or SSH
+        # servers.  Central configuration is read only after the operator
+        # explicitly clicks the sync action.
+        self.cfg = load_settings(sync_central=False)
         self.language = normalize_language(self.cfg.get("language", "zh_CN"))
         self.cfg["language"] = self.language
         self.modules = get_model_modules()
@@ -242,6 +504,11 @@ class MainWindow(QMainWindow):
 
         self.current_rules = {}
         self.current_preview = None
+        self.current_batch_validation = None
+        self.current_batch_settings = {}
+        self.current_batch_files = []
+        self.current_batch_source_info = {}
+        self.batch_worker = None
         self.current_artifacts = {}
         self.current_report_dir = self.cfg.get("last_run_dir", "")
         self.current_task_type = ""
@@ -257,6 +524,15 @@ class MainWindow(QMainWindow):
         self._remote_filter_timer.setSingleShot(True)
         self._remote_filter_timer.setInterval(120)
         self._remote_filter_timer.timeout.connect(self._run_remote_file_filter)
+        self._batch_remote_table_populating = False
+        self._batch_remote_row_by_name = {}
+        self._batch_remote_visible_count = 0
+        self._batch_candidate_table_populating = False
+        self._batch_candidate_rows = []
+        self._batch_remote_filter_timer = QTimer(self)
+        self._batch_remote_filter_timer.setSingleShot(True)
+        self._batch_remote_filter_timer.setInterval(120)
+        self._batch_remote_filter_timer.timeout.connect(self._run_batch_remote_file_filter)
         self.remote_list_signature = None
         self.remote_list_worker = None
         self._remote_refresh_started_at = None
@@ -264,6 +540,18 @@ class MainWindow(QMainWindow):
         self._remote_refresh_timer.setInterval(1000)
         self._remote_refresh_timer.timeout.connect(
             self._update_remote_refresh_wait_status
+        )
+
+        # Runtime Admin ownership is intentionally session-scoped.  The app
+        # starts with no trusted Admin role and performs zero central I/O.
+        # Only after an explicit sync/takeover proves ownership do we start
+        # the lightweight 10-second instance.json ownership check.
+        self._admin_session_epoch = None
+        self._central_admin_check_worker = None
+        self._central_admin_timer = QTimer(self)
+        self._central_admin_timer.setInterval(10000)
+        self._central_admin_timer.timeout.connect(
+            self._schedule_central_admin_ownership_check
         )
 
         self.setWindowTitle(
@@ -280,12 +568,11 @@ class MainWindow(QMainWindow):
         self._restore_ui_state()
         self._apply_language(save=False)
         self._check_saved_input_path_on_startup()
+        self._central_admin_timer.start()
 
         self.log(f"{APP_NAME} v{APP_VERSION} 已启动。")
         self.log("工作流：模型校验 → 勾选可关联对象 → 执行模型关联。")
         self.log("安全模式：原始 G 文件永不修改；执行关联时只处理 Workspace 中的安全副本。")
-        if (self.cfg.get("_central_sync", {}) or {}).get("status") == "UNINITIALIZED":
-            QTimer.singleShot(450, self._offer_central_initialization)
 
     def _offer_central_initialization(self):
         answer = QMessageBox.question(
@@ -296,7 +583,7 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes,
         )
         if answer == QMessageBox.Yes:
-            self.nav.setCurrentRow(5)
+            self.nav.setCurrentRow(6)
 
     # ------------------------------------------------------------
     # Theme
@@ -535,6 +822,70 @@ class MainWindow(QMainWindow):
             border: none;
         }
 
+        /* 批量关联页：核心操作按钮使用独立视觉层级，避免和普通工具按钮混在一起。 */
+        QFrame#batchActionPanel {
+            background: #F7FBF9;
+            border: 1px solid #D6E7E0;
+            border-radius: 12px;
+        }
+
+        QPushButton#batchValidateAction {
+            background: #FFFFFF;
+            color: #00785B;
+            border: 1px solid #50AE91;
+            border-radius: 10px;
+            padding: 9px 22px;
+            min-height: 28px;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
+        QPushButton#batchValidateAction:hover {
+            background: #EAF7F2;
+            border-color: #00966E;
+            color: #006B52;
+        }
+
+        QPushButton#batchValidateAction:pressed {
+            background: #D8F0E6;
+            border-color: #00785B;
+            color: #005B45;
+        }
+
+        QPushButton#batchApplyAction {
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:0,
+                stop:0 #00966E, stop:1 #00785B
+            );
+            color: #FFFFFF;
+            border: 1px solid #006B52;
+            border-radius: 10px;
+            padding: 9px 24px;
+            min-height: 28px;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
+        QPushButton#batchApplyAction:hover {
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:0,
+                stop:0 #00A97D, stop:1 #008766
+            );
+            border-color: #005E48;
+        }
+
+        QPushButton#batchApplyAction:pressed {
+            background: #006B52;
+            border-color: #00513E;
+        }
+
+        QPushButton#batchValidateAction:disabled,
+        QPushButton#batchApplyAction:disabled {
+            background: #E8EFEC;
+            color: #94A49E;
+            border: 1px solid #D4DFDB;
+        }
+
         QPushButton:disabled {
             background: #CDD9D4;
             color: #778880;
@@ -699,7 +1050,7 @@ class MainWindow(QMainWindow):
         self.header_title_label = title
 
         subtitle = QLabel(
-            f"{APP_NAME_EN} · 模型校验 · 校验候选 · 安全回写"
+            f"{APP_NAME_EN} · 模型关联 · 图形处理 · 安全回写"
         )
         subtitle.setObjectName("headerSub")
         self.header_subtitle_label = subtitle
@@ -744,7 +1095,7 @@ class MainWindow(QMainWindow):
         self.nav = QListWidget()
         self.nav.setObjectName("navList")
 
-        for label in ("模型工作区", "图元管理", "数据库", "运行历史", "帮助", "设置"):
+        for label in ("模型工作区", "图形工作区", "图元管理", "数据库", "运行历史", "帮助", "设置"):
             self.nav.addItem(QListWidgetItem(label))
 
         self.nav.setCurrentRow(0)
@@ -756,6 +1107,9 @@ class MainWindow(QMainWindow):
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
 
         self.pages.addWidget(self._build_workspace_page())
+        self.graphics_workspace_page = GraphicsWorkspaceWidget(self.cfg, self)
+        self.graphics_workspace_page.requestMainPage.connect(self.nav.setCurrentRow)
+        self.pages.addWidget(self.graphics_workspace_page)
         self.element_management_page = self._build_element_management_page()
         self.pages.addWidget(self.element_management_page)
         self.pages.addWidget(self._build_database_page())
@@ -774,7 +1128,952 @@ class MainWindow(QMainWindow):
         page.catalogChanged.connect(
             lambda: self._invalidate_validation_snapshot("图元标记配置已修改")
         )
+        page.catalogChanged.connect(self._refresh_graphics_workspace_configuration)
+        page.centralSyncRequested.connect(self.sync_central_configuration)
         return page
+
+    # ------------------------------------------------------------
+    # Batch association page
+    # ------------------------------------------------------------
+    def _build_batch_page(self):
+        """独立的批量关联页面；文件来源可在本页直接完整配置。"""
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
+        outer_scroll = QScrollArea()
+        outer_scroll.setObjectName("batchOuterScroll")
+        outer_scroll.setWidgetResizable(True)
+        outer_scroll.setFrameShape(QFrame.NoFrame)
+        outer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        content = QWidget()
+        content.setObjectName("batchContent")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(28, 22, 28, 22)
+        layout.setSpacing(12)
+
+        layout.addWidget(
+            self._page_header(
+                "批量关联",
+                "一次选择一个或多个模块统一校验并安全关联；文件来源可直接在本页配置，独立模块仍保留在【模型工作区】。",
+            )
+        )
+
+        # --------------------------------------------------------
+        # 批量输入来源：与模型工作区采用同一套配置和选择状态
+        # --------------------------------------------------------
+        source_box = QGroupBox("批量输入来源")
+        source_grid = QGridLayout(source_box)
+        source_grid.setContentsMargins(14, 18, 14, 12)
+        source_grid.setHorizontalSpacing(10)
+        source_grid.setVerticalSpacing(9)
+        source_grid.setColumnStretch(1, 1)
+
+        source_grid.addWidget(QLabel("文件来源（批量关联）"), 0, 0)
+        self.batch_input_source_combo = NoWheelComboBox()
+        self.batch_input_source_combo.addItem("本地文件 / 目录", "LOCAL")
+        self.batch_input_source_combo.addItem("SSH 文件服务器（只读）", "SSH")
+        saved_source = str(self.cfg.get("input_source", "LOCAL")).upper()
+        batch_source_index = self.batch_input_source_combo.findData(saved_source)
+        self.batch_input_source_combo.setCurrentIndex(
+            batch_source_index if batch_source_index >= 0 else 0
+        )
+        self.batch_input_source_combo.currentIndexChanged.connect(
+            self._on_batch_input_source_changed
+        )
+        source_grid.addWidget(self.batch_input_source_combo, 0, 1, 1, 3)
+
+        self.batch_input_source_stack = QStackedWidget()
+        self.batch_input_source_stack.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Fixed,
+        )
+
+        # Batch local source page.
+        batch_local_page = QWidget()
+        batch_local_layout = QGridLayout(batch_local_page)
+        batch_local_layout.setContentsMargins(0, 0, 0, 0)
+        batch_local_layout.addWidget(QLabel("G 文件 / 目录"), 0, 0)
+        self.batch_input_edit = QLineEdit(self.cfg.get("input_path", ""))
+        self.batch_input_edit.setPlaceholderText(
+            "请选择一个 G 文件，或包含 G 文件的目录"
+        )
+        self.batch_input_edit.editingFinished.connect(
+            self._save_batch_input_path_from_edit
+        )
+        batch_local_layout.addWidget(self.batch_input_edit, 0, 1)
+        batch_file_btn = QPushButton("选择文件")
+        batch_folder_btn = QPushButton("选择目录")
+        batch_file_btn.setMinimumWidth(100)
+        batch_folder_btn.setMinimumWidth(100)
+        batch_file_btn.clicked.connect(self.browse_batch_file)
+        batch_folder_btn.clicked.connect(self.browse_batch_folder)
+        batch_local_layout.addWidget(batch_file_btn, 0, 2)
+        batch_local_layout.addWidget(batch_folder_btn, 0, 3)
+        batch_local_page.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Fixed,
+        )
+        self.batch_input_source_stack.addWidget(batch_local_page)
+
+        # Batch SSH read-only source page.
+        batch_remote_page = QWidget()
+        batch_remote_layout = QVBoxLayout(batch_remote_page)
+        batch_remote_layout.setContentsMargins(0, 0, 0, 0)
+        batch_remote_layout.setSpacing(8)
+
+        ssh_cfg = dict(self.cfg.get("ssh", {}) or {})
+        batch_ssh_grid = QGridLayout()
+        self.batch_ssh_edits = {}
+
+        batch_ssh_fields = [
+            ("host", "IP / 主机", ssh_cfg.get("host", "172.16.21.27")),
+            ("port", "端口", ssh_cfg.get("port", 22)),
+            ("username", "用户名", ssh_cfg.get("username", "up8000")),
+            ("password", "密码", ssh_cfg.get("password", "up8000")),
+            (
+                "remote_directory",
+                "远程目录",
+                ssh_cfg.get(
+                    "remote_directory",
+                    "/home/up8000/data/graph/display/sln",
+                ),
+            ),
+        ]
+        for row_index, (key, label, value) in enumerate(batch_ssh_fields):
+            batch_ssh_grid.addWidget(QLabel(label), row_index, 0)
+            edit = QLineEdit(str(value))
+            if key == "password":
+                edit.setEchoMode(QLineEdit.Password)
+            self.batch_ssh_edits[key] = edit
+            batch_ssh_grid.addWidget(edit, row_index, 1, 1, 3)
+
+        batch_ssh_buttons = QHBoxLayout()
+        batch_test_ssh_btn = QPushButton("测试 SSH 连接")
+        self.batch_ssh_save_button = QPushButton("保存 SSH 配置")
+        self.batch_refresh_ssh_btn = QPushButton("刷新 G 文件列表")
+        batch_download_ssh_btn = QPushButton("下载所选 G 文件")
+        batch_test_ssh_btn.clicked.connect(self.test_batch_ssh_connection)
+        self.batch_ssh_save_button.clicked.connect(self.save_batch_ssh_settings)
+        self.batch_refresh_ssh_btn.clicked.connect(self.refresh_batch_remote_g_files)
+        batch_download_ssh_btn.clicked.connect(self.download_batch_selected_remote_g_files)
+        batch_ssh_buttons.addWidget(batch_test_ssh_btn)
+        batch_ssh_buttons.addWidget(self.batch_ssh_save_button)
+        batch_ssh_buttons.addWidget(self.batch_refresh_ssh_btn)
+        batch_ssh_buttons.addWidget(batch_download_ssh_btn)
+        batch_ssh_buttons.addStretch()
+        batch_ssh_grid.addLayout(
+            batch_ssh_buttons,
+            len(batch_ssh_fields),
+            1,
+            1,
+            3,
+        )
+
+        self.batch_ssh_connection_status = QLabel(
+            "尚未测试 SSH/SFTP 连接。"
+        )
+        self.batch_ssh_connection_status.setWordWrap(True)
+        self.batch_ssh_connection_status.setStyleSheet(
+            "background:#F5F7F8; color:#53636C; "
+            "border:1px solid #D7E0E4; border-radius:6px; "
+            "padding:7px 10px;"
+        )
+        batch_ssh_grid.addWidget(
+            self.batch_ssh_connection_status,
+            len(batch_ssh_fields) + 1,
+            1,
+            1,
+            3,
+        )
+        batch_remote_layout.addLayout(batch_ssh_grid)
+
+        batch_readonly_notice = QLabel(
+            "SSH 服务器只读：本工具仅允许列目录、读取属性和下载 G 文件；"
+            "禁止上传、覆盖、重命名、删除或修改服务器上的任何文件。"
+        )
+        batch_readonly_notice.setWordWrap(True)
+        batch_readonly_notice.setStyleSheet(
+            "background:#E8F7F1; color:#006B52; "
+            "border:1px solid #A9DCC8; border-radius:7px; "
+            "padding:8px 10px; font-weight:600;"
+        )
+        batch_remote_layout.addWidget(batch_readonly_notice)
+
+        batch_search_row = QHBoxLayout()
+        batch_search_row.addWidget(QLabel("搜索 G 文件"))
+        self.batch_remote_search_edit = QLineEdit()
+        self.batch_remote_search_edit.setPlaceholderText(
+            "例如：ABH-06、SAMR、JED-NTH"
+        )
+        self.batch_remote_search_edit.textChanged.connect(
+            self._schedule_batch_remote_file_filter
+        )
+        batch_search_row.addWidget(self.batch_remote_search_edit, 1)
+        self.batch_remote_count_label = QLabel("尚未加载远程文件")
+        batch_search_row.addWidget(self.batch_remote_count_label)
+        batch_remote_layout.addLayout(batch_search_row)
+
+        batch_remote_actions = QHBoxLayout()
+        batch_select_visible_btn = QPushButton("全选当前结果")
+        batch_clear_remote_btn = QPushButton("清空选择和搜索")
+        batch_select_visible_btn.clicked.connect(
+            lambda: self._set_visible_batch_remote_selection(True)
+        )
+        batch_clear_remote_btn.clicked.connect(
+            self._clear_batch_remote_selection
+        )
+        batch_remote_actions.addWidget(batch_select_visible_btn)
+        batch_remote_actions.addWidget(batch_clear_remote_btn)
+        batch_remote_actions.addStretch()
+        batch_remote_layout.addLayout(batch_remote_actions)
+
+        self.batch_remote_file_table = QTableWidget()
+        self.batch_remote_file_table.setColumnCount(4)
+        self.batch_remote_file_table.setHorizontalHeaderLabels(
+            ["选择", "文件名", "大小", "服务器修改时间"]
+        )
+        self.batch_remote_file_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers
+        )
+        self.batch_remote_file_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows
+        )
+        self.batch_remote_file_table.verticalHeader().setDefaultSectionSize(30)
+        self.batch_remote_file_table.horizontalHeader().setSectionResizeMode(
+            0,
+            QHeaderView.ResizeToContents,
+        )
+        self.batch_remote_file_table.horizontalHeader().setSectionResizeMode(
+            1,
+            QHeaderView.Stretch,
+        )
+        self.batch_remote_file_table.horizontalHeader().setSectionResizeMode(
+            2,
+            QHeaderView.ResizeToContents,
+        )
+        self.batch_remote_file_table.horizontalHeader().setSectionResizeMode(
+            3,
+            QHeaderView.ResizeToContents,
+        )
+        self.batch_remote_file_table.itemChanged.connect(
+            self._on_batch_remote_file_item_changed
+        )
+        self.batch_remote_file_table.setMinimumHeight(210)
+        batch_remote_layout.addWidget(self.batch_remote_file_table)
+        batch_remote_page.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred,
+        )
+        self.batch_input_source_stack.addWidget(batch_remote_page)
+
+        source_grid.addWidget(self.batch_input_source_stack, 1, 0, 1, 4)
+        self.batch_input_source_stack.setCurrentIndex(
+            1 if saved_source == "SSH" else 0
+        )
+
+        self.batch_source_status = QLabel(
+            "批量校验与模型工作区共用同一文件来源配置和同一远程文件选择。"
+        )
+        apply_status_style(self.batch_source_status, True)
+        source_grid.addWidget(self.batch_source_status, 2, 0, 1, 4)
+
+        batch_safe_notice = QLabel(
+            "安全说明：批量模式与独立模块共用本地/SSH文件来源；"
+            "本地原始 G 文件和 SSH 服务器文件均不修改。"
+            "SSH 模式每次【批量校验】都会重新下载服务器当前最新稳定版本到 remote_input；"
+            "同一次校验后的【执行批量关联】只使用该次快照，并仅修改 Workspace 中的安全副本。"
+        )
+        batch_safe_notice.setWordWrap(True)
+        batch_safe_notice.setStyleSheet(
+            "background:#E8F7F1; color:#006B52; border:1px solid #A9DCC8; "
+            "border-radius:7px; padding:8px 10px; font-weight:600;"
+        )
+        source_grid.addWidget(batch_safe_notice, 3, 0, 1, 4)
+
+        batch_ws_row = QHBoxLayout()
+        batch_ws_row.addWidget(QLabel("Workspace"))
+        batch_ws_path = QLineEdit(str(WORKSPACE_ROOT))
+        batch_ws_path.setReadOnly(True)
+        batch_ws_row.addWidget(batch_ws_path, 1)
+        batch_ws_btn = QPushButton("打开 Workspace")
+        batch_ws_btn.clicked.connect(self.open_workspace)
+        batch_ws_row.addWidget(batch_ws_btn)
+        batch_ws_holder = QWidget()
+        batch_ws_holder.setLayout(batch_ws_row)
+        source_grid.addWidget(batch_ws_holder, 4, 0, 1, 4)
+
+        layout.addWidget(source_box)
+
+        # --------------------------------------------------------
+        # 批量模块与任务
+        # --------------------------------------------------------
+        self.batch_box = QGroupBox("批量模型关联")
+        batch_layout = QVBoxLayout(self.batch_box)
+        batch_layout.setContentsMargins(12, 16, 12, 12)
+        batch_layout.setSpacing(10)
+
+        batch_tip = QLabel(
+            "勾选一个或多个模块后统一执行。批量模式不会复制或改写各模块的识别规则，"
+            "而是按固定依赖顺序调用现有独立模块；未勾选的模块即使作为依赖参与计算，也不会被写回。"
+            "批量校验完成后会列出待关联设备，可在真正写回前逐项取消；独立模块仍保留用于专项处理。"
+        )
+        batch_tip.setWordWrap(True)
+        batch_tip.setStyleSheet(
+            "color:#315B4F; background:#F3F8F6; "
+            "border:1px solid #D0E2DA; border-radius:6px; padding:8px 10px;"
+        )
+        batch_layout.addWidget(batch_tip)
+
+        self.batch_module_checks = {}
+        batch_modules_grid = QGridLayout()
+        batch_modules_grid.setHorizontalSpacing(22)
+        batch_modules_grid.setVerticalSpacing(8)
+        saved_batch_modules = set(
+            str(x).upper() for x in (self.cfg.get("batch_modules", []) or [])
+        )
+        for idx, module_id in enumerate(BATCH_MODULE_ORDER):
+            if module_id not in self.modules:
+                continue
+            label = BATCH_MODULE_LABELS.get(
+                module_id, self.modules[module_id].display_name
+            )
+            check = QCheckBox(label)
+            check.setChecked(module_id in saved_batch_modules)
+            check.toggled.connect(self._on_batch_module_selection_changed)
+            self.batch_module_checks[module_id] = check
+            batch_modules_grid.addWidget(check, idx // 3, idx % 3)
+        batch_layout.addLayout(batch_modules_grid)
+
+        self.batch_single_line_notice = QLabel()
+        self.batch_single_line_notice.setWordWrap(True)
+        self.batch_single_line_notice.setStyleSheet(
+            "background:#FFF8DE; color:#7A5A00; "
+            "border:1px solid #E7D59A; border-radius:7px; "
+            "padding:8px 10px; font-weight:600;"
+        )
+        batch_layout.addWidget(self.batch_single_line_notice)
+        self._update_batch_single_line_notice()
+
+        batch_actions = QHBoxLayout()
+        self.batch_status_label = QLabel("尚未执行批量校验")
+        self.batch_status_label.setWordWrap(True)
+        self.batch_status_label.setStyleSheet("color:#60756d;")
+        batch_actions.addWidget(self.batch_status_label, 1)
+
+        batch_action_panel = QFrame()
+        batch_action_panel.setObjectName("batchActionPanel")
+        batch_action_panel_layout = QHBoxLayout(batch_action_panel)
+        batch_action_panel_layout.setContentsMargins(10, 8, 10, 8)
+        batch_action_panel_layout.setSpacing(10)
+
+        self.batch_validate_btn = QPushButton("批量校验")
+        self.batch_validate_btn.setObjectName("batchValidateAction")
+        self.batch_validate_btn.setMinimumWidth(154)
+        self.batch_validate_btn.setMinimumHeight(46)
+        self.batch_validate_btn.setCursor(Qt.PointingHandCursor)
+        self.batch_validate_btn.setToolTip("先检查所选模块，生成本次批量关联计划")
+        self.batch_validate_btn.clicked.connect(self.start_batch_validation)
+        batch_action_panel_layout.addWidget(self.batch_validate_btn)
+
+        self.batch_apply_btn = QPushButton("执行批量关联")
+        self.batch_apply_btn.setObjectName("batchApplyAction")
+        self.batch_apply_btn.setMinimumWidth(184)
+        self.batch_apply_btn.setMinimumHeight(46)
+        self.batch_apply_btn.setCursor(Qt.PointingHandCursor)
+        self.batch_apply_btn.setToolTip("执行已经通过批量校验的安全关联计划")
+        self.batch_apply_btn.setEnabled(False)
+        self.batch_apply_btn.clicked.connect(self.apply_batch_association)
+        batch_action_panel_layout.addWidget(self.batch_apply_btn)
+
+        batch_actions.addWidget(batch_action_panel)
+        batch_layout.addLayout(batch_actions)
+        layout.addWidget(self.batch_box)
+
+        # --------------------------------------------------------
+        # 批量校验后的人工确认层
+        # --------------------------------------------------------
+        self.batch_candidate_box = QGroupBox("待关联设备（批量校验后确认）")
+        candidate_layout = QVBoxLayout(self.batch_candidate_box)
+        candidate_layout.setContentsMargins(12, 16, 12, 12)
+        candidate_layout.setSpacing(8)
+
+        candidate_head = QHBoxLayout()
+        self.batch_candidate_summary = QLabel(
+            "完成批量校验后，这里会列出所有可安全关联对象。"
+        )
+        self.batch_candidate_summary.setWordWrap(True)
+        self.batch_candidate_summary.setStyleSheet("color:#315B4F;")
+        candidate_head.addWidget(self.batch_candidate_summary, 1)
+
+        self.batch_candidate_select_all_btn = QPushButton("全选可关联")
+        self.batch_candidate_clear_btn = QPushButton("取消全选")
+        self.batch_candidate_select_all_btn.clicked.connect(
+            lambda: self._set_all_batch_candidates_checked(True)
+        )
+        self.batch_candidate_clear_btn.clicked.connect(
+            lambda: self._set_all_batch_candidates_checked(False)
+        )
+        candidate_head.addWidget(self.batch_candidate_select_all_btn)
+        candidate_head.addWidget(self.batch_candidate_clear_btn)
+        candidate_layout.addLayout(candidate_head)
+
+        self.batch_candidate_table = QTableWidget()
+        self.batch_candidate_table.setColumnCount(8)
+        self.batch_candidate_table.setHorizontalHeaderLabels([
+            "选择", "模块", "G文件", "XML ID", "图上名称",
+            "数据库目标", "状态", "说明",
+        ])
+        self.batch_candidate_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers
+        )
+        self.batch_candidate_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows
+        )
+        self.batch_candidate_table.verticalHeader().setDefaultSectionSize(30)
+        header = self.batch_candidate_table.horizontalHeader()
+        for col in (0, 1, 3, 6):
+            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        header.setSectionResizeMode(7, QHeaderView.Stretch)
+        self.batch_candidate_table.setMinimumHeight(220)
+        self.batch_candidate_table.itemChanged.connect(
+            self._on_batch_candidate_item_changed
+        )
+        candidate_layout.addWidget(self.batch_candidate_table)
+
+        candidate_note = QLabel(
+            "所有通过独立模块现有校验的对象默认勾选；跨模块写回冲突对象会显示但禁止选择。"
+            "取消勾选只影响本次批量执行，不会改变任何独立模块的识别、数据库校验或写回逻辑。"
+        )
+        candidate_note.setWordWrap(True)
+        candidate_note.setStyleSheet(
+            "background:#F3F8F6; color:#315B4F; border:1px solid #D0E2DA; "
+            "border-radius:6px; padding:7px 9px;"
+        )
+        candidate_layout.addWidget(candidate_note)
+        self.batch_candidate_box.setVisible(False)
+        layout.addWidget(self.batch_candidate_box)
+
+        progress_box = QGroupBox("批量任务进度")
+        progress_layout = QVBoxLayout(progress_box)
+        progress_layout.setContentsMargins(10, 12, 10, 10)
+        self.batch_progress_bar = QProgressBar()
+        self.batch_progress_bar.setRange(0, 100)
+        self.batch_progress_bar.setValue(0)
+        self.batch_progress_bar.setFormat("%p%")
+        self.batch_progress_message = QLabel("等待执行批量任务")
+        self.batch_progress_message.setWordWrap(True)
+        self.batch_progress_message.setStyleSheet("color:#60756d;")
+        progress_layout.addWidget(self.batch_progress_bar)
+        progress_layout.addWidget(self.batch_progress_message)
+        layout.addWidget(progress_box)
+
+        log_box = QGroupBox("批量任务 Console 日志")
+        log_layout = QVBoxLayout(log_box)
+        log_actions = QHBoxLayout()
+        copy_btn = QPushButton("复制日志")
+        clear_btn = QPushButton("清空日志")
+        copy_btn.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(self.batch_log_edit.toPlainText())
+        )
+        clear_btn.clicked.connect(lambda: self.batch_log_edit.clear())
+        log_actions.addWidget(copy_btn)
+        log_actions.addWidget(clear_btn)
+        log_actions.addStretch()
+
+        self.batch_open_html_btn = QPushButton("打开批量汇总 HTML")
+        self.batch_open_csv_btn = QPushButton("打开批量汇总 CSV")
+        self.batch_open_run_dir_btn = QPushButton("打开本次运行目录")
+        self.batch_open_html_btn.clicked.connect(lambda: self.open_artifact("html"))
+        self.batch_open_csv_btn.clicked.connect(lambda: self.open_artifact("rmu_csv"))
+        self.batch_open_run_dir_btn.clicked.connect(self.open_current_run_dir)
+        for button in (
+            self.batch_open_html_btn,
+            self.batch_open_csv_btn,
+            self.batch_open_run_dir_btn,
+        ):
+            button.setEnabled(False)
+            button.setVisible(False)
+            log_actions.addWidget(button)
+        log_layout.addLayout(log_actions)
+
+        self.batch_log_edit = QPlainTextEdit()
+        self.batch_log_edit.setReadOnly(True)
+        self.batch_log_edit.setMinimumHeight(280)
+        log_layout.addWidget(self.batch_log_edit, 1)
+        layout.addWidget(log_box)
+
+        layout.addStretch()
+
+        outer_scroll.setWidget(content)
+        page_layout.addWidget(outer_scroll)
+
+        QTimer.singleShot(0, self._update_batch_input_source_stack_height)
+        self._prepare_batch_page()
+        return page
+
+    def _prepare_batch_page(self):
+        """Refresh the mirrored source controls whenever the batch page opens."""
+        if not hasattr(self, "batch_input_source_combo"):
+            return
+        self._sync_batch_source_controls_from_workspace()
+        if hasattr(self, "batch_remote_file_table"):
+            if self.batch_remote_file_table.rowCount() != len(self.remote_file_rows):
+                self._rebuild_batch_remote_file_table()
+            else:
+                self._sync_remote_selection_checks()
+            self._apply_batch_remote_file_filter(
+                self.batch_remote_search_edit.text()
+                if hasattr(self, "batch_remote_search_edit")
+                else ""
+            )
+        self._update_batch_input_source_stack_height()
+        if hasattr(self, "batch_source_status"):
+            if self._current_input_source() == "SSH":
+                self._set_batch_source_status(
+                    "SSH只读模式：批量校验会重新下载服务器当前最新稳定版本 G 文件，并锁定本次快照。"
+                )
+                apply_status_style(self.batch_source_status, False)
+            else:
+                value = self.input_edit.text().strip() if hasattr(self, "input_edit") else ""
+                self._set_batch_source_status(
+                    "本地模式：" + (value or "请选择 G 文件或目录后执行批量校验。")
+                )
+                apply_status_style(self.batch_source_status, bool(value))
+
+    def _sync_batch_source_controls_from_workspace(self):
+        """Mirror workspace source configuration into the batch page without side effects."""
+        if not hasattr(self, "batch_input_source_combo"):
+            return
+
+        source = self._current_input_source()
+        combo_index = self.batch_input_source_combo.findData(source)
+        self.batch_input_source_combo.blockSignals(True)
+        try:
+            self.batch_input_source_combo.setCurrentIndex(
+                combo_index if combo_index >= 0 else 0
+            )
+        finally:
+            self.batch_input_source_combo.blockSignals(False)
+
+        if hasattr(self, "batch_input_edit") and hasattr(self, "input_edit"):
+            self.batch_input_edit.setText(self.input_edit.text())
+
+        if hasattr(self, "batch_ssh_edits") and hasattr(self, "ssh_edits"):
+            for key, batch_edit in self.batch_ssh_edits.items():
+                source_edit = self.ssh_edits.get(key)
+                if source_edit is not None:
+                    batch_edit.setText(source_edit.text())
+
+        if hasattr(self, "batch_input_source_stack"):
+            self.batch_input_source_stack.setCurrentIndex(
+                1 if source == "SSH" else 0
+            )
+
+    def _sync_workspace_source_controls_from_batch(self):
+        """Apply source values edited on the batch page to the shared workspace controls."""
+        if not hasattr(self, "batch_input_source_combo"):
+            return
+
+        source = str(
+            self.batch_input_source_combo.currentData() or "LOCAL"
+        ).upper()
+
+        if hasattr(self, "input_source_combo"):
+            source_index = self.input_source_combo.findData(source)
+            self.input_source_combo.blockSignals(True)
+            try:
+                self.input_source_combo.setCurrentIndex(
+                    source_index if source_index >= 0 else 0
+                )
+            finally:
+                self.input_source_combo.blockSignals(False)
+            if hasattr(self, "input_source_stack"):
+                self.input_source_stack.setCurrentIndex(
+                    1 if source == "SSH" else 0
+                )
+
+        if hasattr(self, "batch_input_edit") and hasattr(self, "input_edit"):
+            self.input_edit.setText(self.batch_input_edit.text())
+
+        if hasattr(self, "batch_ssh_edits") and hasattr(self, "ssh_edits"):
+            for key, batch_edit in self.batch_ssh_edits.items():
+                target_edit = self.ssh_edits.get(key)
+                if target_edit is not None:
+                    target_edit.setText(batch_edit.text())
+
+        self.cfg["input_source"] = source
+        self.cfg["input_path"] = (
+            self.batch_input_edit.text().strip()
+            if hasattr(self, "batch_input_edit")
+            else self.cfg.get("input_path", "")
+        )
+
+    def _on_batch_input_source_changed(self, *_args):
+        source = str(
+            self.batch_input_source_combo.currentData() or "LOCAL"
+        ).upper()
+        self.batch_input_source_stack.setCurrentIndex(
+            1 if source == "SSH" else 0
+        )
+        self._sync_workspace_source_controls_from_batch()
+        try:
+            self._save_input_source_settings()
+        except Exception as exc:
+            QMessageBox.critical(self, "文件来源", str(exc))
+            return
+
+        self._invalidate_validation_snapshot("文件来源已切换")
+        if source == "SSH":
+            self._set_ssh_connection_status(
+                "SSH只读模式：请先测试连接或刷新 G 文件列表。",
+                "neutral",
+            )
+            self._set_batch_source_status(
+                "SSH模式：请选择远程 G 文件后执行批量校验。"
+            )
+        else:
+            self._set_batch_source_status(
+                "本地模式：请选择 G 文件或目录后执行批量校验。"
+            )
+        apply_status_style(self.batch_source_status, False)
+        self._update_batch_input_source_stack_height()
+
+    def _update_batch_input_source_stack_height(self):
+        if not hasattr(self, "batch_input_source_stack"):
+            return
+
+        widget = self.batch_input_source_stack.currentWidget()
+        if widget is None:
+            return
+        if widget.layout() is not None:
+            widget.layout().invalidate()
+            widget.layout().activate()
+        widget.updateGeometry()
+
+        height = max(46, int(widget.sizeHint().height()))
+        source = str(
+            self.batch_input_source_combo.currentData() or "LOCAL"
+        ).upper()
+        if source == "LOCAL":
+            height = min(height, 58)
+
+        self.batch_input_source_stack.setMinimumHeight(height)
+        self.batch_input_source_stack.setMaximumHeight(height)
+        self.batch_input_source_stack.updateGeometry()
+
+    def _current_batch_ssh_config(self) -> dict:
+        if not hasattr(self, "batch_ssh_edits"):
+            return self._current_ssh_config()
+        cfg = {
+            key: edit.text().strip()
+            for key, edit in self.batch_ssh_edits.items()
+        }
+        try:
+            cfg["port"] = int(cfg.get("port") or 22)
+        except Exception as exc:
+            raise ValueError("SSH 端口必须是整数。") from exc
+
+        if not 1 <= cfg["port"] <= 65535:
+            raise ValueError("SSH 端口必须在 1~65535 之间。")
+        if not cfg.get("host"):
+            raise ValueError("SSH IP / 主机不能为空。")
+        if not cfg.get("username"):
+            raise ValueError("SSH 用户名不能为空。")
+        if not cfg.get("remote_directory"):
+            raise ValueError("SSH 远程目录不能为空。")
+        return cfg
+
+    def test_batch_ssh_connection(self):
+        self._sync_workspace_source_controls_from_batch()
+        self.test_ssh_connection()
+
+    def save_batch_ssh_settings(self):
+        try:
+            cfg = self._current_batch_ssh_config()
+            self._sync_workspace_source_controls_from_batch()
+            self.cfg["ssh"] = cfg
+            self.cfg["input_source"] = "SSH"
+            save_settings(self.cfg)
+            self._refresh_graphics_workspace_configuration()
+            self._set_ssh_connection_status(
+                "SSH 配置已保存到本机；模型工作区与批量关联页面已同步。",
+                "success",
+            )
+            self.statusBar().showMessage(self._rt("SSH 配置已保存。"), 3000)
+        except Exception as exc:
+            QMessageBox.critical(self, "SSH 配置", str(exc))
+
+    def refresh_batch_remote_g_files(self):
+        self._sync_workspace_source_controls_from_batch()
+        self.refresh_remote_g_files()
+
+    def download_batch_selected_remote_g_files(self):
+        self._sync_workspace_source_controls_from_batch()
+        self.download_selected_remote_g_files()
+
+    def browse_batch_file(self):
+        start_dir = self._existing_start_path(
+            self.cfg.get("last_file_path", ""),
+            self.cfg.get("last_folder_path", ""),
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 G 文件",
+            start_dir,
+            "G 文件 (*.g);;所有文件 (*.*)",
+        )
+        if not path:
+            return
+
+        self.batch_input_edit.setText(path)
+        if hasattr(self, "input_edit"):
+            self.input_edit.setText(path)
+        self.cfg["input_path"] = path
+        self.cfg["last_file_path"] = path
+        self.cfg["last_folder_path"] = str(Path(path).parent)
+        save_settings(self.cfg)
+        self._refresh_feeder_facid_ui_from_local_path(path)
+        self._invalidate_validation_snapshot("本地 G 文件已变化")
+
+    def browse_batch_folder(self):
+        start_dir = self._existing_start_path(
+            self.cfg.get("last_folder_path", ""),
+            self.cfg.get("last_file_path", ""),
+        )
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "选择包含 G 文件的目录",
+            start_dir,
+        )
+        if not path:
+            return
+
+        self.batch_input_edit.setText(path)
+        if hasattr(self, "input_edit"):
+            self.input_edit.setText(path)
+        self.cfg["input_path"] = path
+        self.cfg["last_folder_path"] = path
+        save_settings(self.cfg)
+        feeder_widget = self.module_widgets.get("FEEDER")
+        if feeder_widget is not None and hasattr(
+            feeder_widget, "set_facid_lock"
+        ):
+            feeder_widget.set_facid_lock(None)
+        self._invalidate_validation_snapshot("本地 G 文件目录已变化")
+
+    def _save_batch_input_path_from_edit(self):
+        value = self.batch_input_edit.text().strip()
+        if hasattr(self, "input_edit"):
+            self.input_edit.setText(value)
+        if not value:
+            return
+
+        self.cfg["input_path"] = value
+        path = Path(value)
+        if path.exists():
+            if path.is_file():
+                self.cfg["last_file_path"] = str(path)
+                self.cfg["last_folder_path"] = str(path.parent)
+            elif path.is_dir():
+                self.cfg["last_folder_path"] = str(path)
+        save_settings(self.cfg)
+        self._invalidate_validation_snapshot("本地 G 文件路径已变化")
+
+    def _schedule_batch_remote_file_filter(self, _text=""):
+        self._batch_remote_filter_timer.start()
+
+    def _run_batch_remote_file_filter(self):
+        if hasattr(self, "batch_remote_search_edit"):
+            self._apply_batch_remote_file_filter(
+                self.batch_remote_search_edit.text()
+            )
+
+    def _rebuild_batch_remote_file_table(self):
+        if not hasattr(self, "batch_remote_file_table"):
+            return
+        table = self.batch_remote_file_table
+        header = table.horizontalHeader()
+        self._batch_remote_table_populating = True
+        table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+        try:
+            for column in range(table.columnCount()):
+                header.setSectionResizeMode(
+                    column,
+                    QHeaderView.Interactive,
+                )
+
+            table.clearContents()
+            table.setRowCount(len(self.remote_file_rows))
+            self._batch_remote_row_by_name = {}
+            for row_index, remote_file in enumerate(self.remote_file_rows):
+                self._batch_remote_row_by_name[remote_file.name] = row_index
+
+                check = QTableWidgetItem()
+                check.setFlags(
+                    Qt.ItemIsEnabled
+                    | Qt.ItemIsSelectable
+                    | Qt.ItemIsUserCheckable
+                )
+                check.setCheckState(
+                    Qt.Checked
+                    if remote_file.name in self.remote_selected_names
+                    else Qt.Unchecked
+                )
+                check.setData(Qt.UserRole, remote_file.name)
+                table.setItem(row_index, 0, check)
+
+                values = [
+                    remote_file.name,
+                    self._format_file_size(remote_file.size),
+                    remote_file.mtime_text,
+                ]
+                for column, value in enumerate(values, start=1):
+                    item = QTableWidgetItem(str(value))
+                    item.setToolTip(str(value))
+                    table.setItem(row_index, column, item)
+
+            table.resizeColumnsToContents()
+            header.setSectionResizeMode(1, QHeaderView.Stretch)
+        finally:
+            table.setUpdatesEnabled(True)
+            table.blockSignals(False)
+            self._batch_remote_table_populating = False
+
+        self._batch_remote_visible_count = len(self.remote_file_rows)
+        self._update_remote_count_label()
+
+    def _apply_batch_remote_file_filter(self, text=""):
+        if not hasattr(self, "batch_remote_file_table"):
+            return
+        query = str(text or "").strip().lower()
+        table = self.batch_remote_file_table
+        visible_count = 0
+
+        table.setUpdatesEnabled(False)
+        try:
+            for row_index, remote_file in enumerate(self.remote_file_rows):
+                matched = not query or query in remote_file.name.lower()
+                table.setRowHidden(row_index, not matched)
+                if matched:
+                    visible_count += 1
+        finally:
+            table.setUpdatesEnabled(True)
+
+        self._batch_remote_visible_count = visible_count
+        table.viewport().update()
+        self._update_remote_count_label()
+
+    def _on_batch_remote_file_item_changed(self, item):
+        if self._batch_remote_table_populating or item.column() != 0:
+            return
+        name = str(item.data(Qt.UserRole) or "")
+        if not name:
+            return
+
+        checked = item.checkState() == Qt.Checked
+        if checked:
+            self.remote_selected_names.add(name)
+        else:
+            self.remote_selected_names.discard(name)
+
+        self._sync_remote_check_state(
+            name,
+            checked,
+            skip_batch=True,
+        )
+        self._update_remote_count_label()
+        self._invalidate_validation_snapshot(
+            "远程 G 文件选择发生变化"
+        )
+
+    def _set_visible_batch_remote_selection(self, selected: bool):
+        if not hasattr(self, "batch_remote_file_table"):
+            return
+        table = self.batch_remote_file_table
+        self._batch_remote_table_populating = True
+        table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+        try:
+            for row in range(table.rowCount()):
+                if table.isRowHidden(row):
+                    continue
+                item = table.item(row, 0)
+                if item is None:
+                    continue
+                name = str(item.data(Qt.UserRole) or "")
+                if selected:
+                    self.remote_selected_names.add(name)
+                    if item.checkState() != Qt.Checked:
+                        item.setCheckState(Qt.Checked)
+                else:
+                    self.remote_selected_names.discard(name)
+                    if item.checkState() != Qt.Unchecked:
+                        item.setCheckState(Qt.Unchecked)
+        finally:
+            table.setUpdatesEnabled(True)
+            table.blockSignals(False)
+            self._batch_remote_table_populating = False
+
+        self._sync_remote_selection_checks()
+        table.viewport().update()
+        self._update_remote_count_label()
+        self._invalidate_validation_snapshot(
+            "远程 G 文件选择发生变化"
+        )
+
+    def _clear_batch_remote_selection(self):
+        self.remote_selected_names.clear()
+        self._batch_remote_filter_timer.stop()
+
+        if hasattr(self, "batch_remote_search_edit"):
+            self.batch_remote_search_edit.blockSignals(True)
+            try:
+                self.batch_remote_search_edit.clear()
+            finally:
+                self.batch_remote_search_edit.blockSignals(False)
+
+        self._sync_remote_selection_checks()
+        if hasattr(self, "batch_remote_file_table"):
+            for row in range(self.batch_remote_file_table.rowCount()):
+                self.batch_remote_file_table.setRowHidden(row, False)
+        self._batch_remote_visible_count = len(self.remote_file_rows)
+        self._update_remote_count_label()
+        self._invalidate_validation_snapshot(
+            "远程 G 文件选择和搜索条件已清空"
+        )
+
+    def _update_batch_artifact_buttons(self, task_type=""):
+        if not hasattr(self, "batch_open_html_btn"):
+            return
+        is_batch = str(self.current_artifacts.get("report_kind", "")).upper() == "BATCH"
+        if task_type == "validation":
+            html_label = "打开批量校验汇总 HTML"
+            csv_label = "打开批量校验汇总 CSV"
+        elif task_type == "association":
+            html_label = "打开批量关联汇总 HTML"
+            csv_label = "打开批量关联汇总 CSV"
+        else:
+            html_label = "打开批量汇总 HTML"
+            csv_label = "打开批量汇总 CSV"
+        self.batch_open_html_btn.setText(self._t(html_label))
+        self.batch_open_csv_btn.setText(self._t(csv_label))
+        for key, button in (
+            ("html", self.batch_open_html_btn),
+            ("rmu_csv", self.batch_open_csv_btn),
+            ("run_dir", self.batch_open_run_dir_btn),
+        ):
+            value = self.current_artifacts.get(key, "")
+            exists = bool(is_batch and value and Path(value).exists())
+            button.setEnabled(exists)
+            button.setVisible(exists)
 
     # ------------------------------------------------------------
     # Database page
@@ -831,11 +2130,11 @@ class MainWindow(QMainWindow):
         test_btn = QPushButton("测试数据库连接")
         test_btn.clicked.connect(self.test_connection)
 
-        save_btn = QPushButton("保存数据库配置")
-        save_btn.clicked.connect(self.save_database_settings)
+        self.db_save_button = QPushButton("保存数据库配置")
+        self.db_save_button.clicked.connect(self.save_database_settings)
 
         actions.addWidget(test_btn)
-        actions.addWidget(save_btn)
+        actions.addWidget(self.db_save_button)
         actions.addStretch()
         layout.addLayout(actions)
 
@@ -927,6 +2226,10 @@ class MainWindow(QMainWindow):
         self.module_combo = NoWheelComboBox()
         for module_id, module in self.modules.items():
             self.module_combo.addItem(module.display_name, module_id)
+        # v4.2.1: batch association is an orchestration-only pseudo model,
+        # matching the Jazan integrated workflow.  The independent Jeddah
+        # model modules above remain the only owners of business rules.
+        self.module_combo.addItem("一键多模型关联", "BULK")
         self.module_combo.currentIndexChanged.connect(self.on_module_changed)
         grid.addWidget(self.module_combo, 0, 1, 1, 2)
 
@@ -1019,7 +2322,8 @@ class MainWindow(QMainWindow):
 
         ssh_buttons = QHBoxLayout()
         test_ssh_btn = QPushButton("测试 SSH 连接")
-        save_ssh_btn = QPushButton("保存 SSH 配置")
+        self.ssh_save_button = QPushButton("保存 SSH 配置")
+        save_ssh_btn = self.ssh_save_button
         self.refresh_ssh_btn = QPushButton("刷新 G 文件列表")
         download_ssh_btn = QPushButton("下载所选 G 文件")
         test_ssh_btn.clicked.connect(self.test_ssh_connection)
@@ -1027,7 +2331,7 @@ class MainWindow(QMainWindow):
         self.refresh_ssh_btn.clicked.connect(self.refresh_remote_g_files)
         download_ssh_btn.clicked.connect(self.download_selected_remote_g_files)
         ssh_buttons.addWidget(test_ssh_btn)
-        ssh_buttons.addWidget(save_ssh_btn)
+        ssh_buttons.addWidget(self.ssh_save_button)
         ssh_buttons.addWidget(self.refresh_ssh_btn)
         ssh_buttons.addWidget(download_ssh_btn)
         ssh_buttons.addStretch()
@@ -1191,6 +2495,27 @@ class MainWindow(QMainWindow):
             self.module_widgets[module_id] = widget
             self.module_stack.addWidget(widget)
 
+        # Integrated multi-model association lives in the same Model Workspace
+        # as the independent modules.  This widget only selects modules; all
+        # validation/association logic still calls the original module code.
+        bulk_widget = create_settings_widget(
+            "BULK",
+            self.module_stack,
+            self.cfg,
+        )
+        bulk_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bulk_widget.setMinimumWidth(0)
+        bulk_widget.setMaximumWidth(16777215)
+        self.module_widgets["BULK"] = bulk_widget
+        self.bulk_settings_widget = bulk_widget
+        self.batch_module_checks = bulk_widget.checks
+        self.batch_single_line_notice = bulk_widget.single_line_notice
+        self.batch_status_label = bulk_widget.status_label
+        self.module_stack.addWidget(bulk_widget)
+        for check in self.batch_module_checks.values():
+            check.toggled.connect(self._on_batch_module_selection_changed)
+        self._update_batch_single_line_notice()
+
         # 根据当前页面的 sizeHint 自动给 stack 足够高度，避免内部控件被裁剪。
         self.module_stack.currentChanged.connect(self._update_module_stack_height)
         layout.addWidget(self.module_stack)
@@ -1328,6 +2653,69 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.association_selection_box)
 
         # --------------------------------------------------------
+        # 一键多模型校验后的人工确认层
+        # --------------------------------------------------------
+        self.batch_candidate_box = QGroupBox("待关联设备（一键多模型校验后确认）")
+        candidate_layout = QVBoxLayout(self.batch_candidate_box)
+        candidate_layout.setContentsMargins(12, 16, 12, 12)
+        candidate_layout.setSpacing(8)
+
+        candidate_head = QHBoxLayout()
+        self.batch_candidate_summary = QLabel(
+            "完成一键多模型校验后，这里会列出所有可安全关联对象。"
+        )
+        self.batch_candidate_summary.setWordWrap(True)
+        self.batch_candidate_summary.setStyleSheet("color:#315B4F;")
+        candidate_head.addWidget(self.batch_candidate_summary, 1)
+
+        self.batch_candidate_select_all_btn = QPushButton("全选可关联")
+        self.batch_candidate_clear_btn = QPushButton("取消全选")
+        self.batch_candidate_select_all_btn.clicked.connect(
+            lambda: self._set_all_batch_candidates_checked(True)
+        )
+        self.batch_candidate_clear_btn.clicked.connect(
+            lambda: self._set_all_batch_candidates_checked(False)
+        )
+        candidate_head.addWidget(self.batch_candidate_select_all_btn)
+        candidate_head.addWidget(self.batch_candidate_clear_btn)
+        candidate_layout.addLayout(candidate_head)
+
+        self.batch_candidate_table = QTableWidget()
+        self.batch_candidate_table.setColumnCount(8)
+        self.batch_candidate_table.setHorizontalHeaderLabels([
+            "选择", "模块", "G文件", "XML ID", "图上名称",
+            "数据库目标", "状态", "说明",
+        ])
+        self.batch_candidate_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.batch_candidate_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.batch_candidate_table.verticalHeader().setDefaultSectionSize(30)
+        batch_header = self.batch_candidate_table.horizontalHeader()
+        for col in (0, 1, 3, 6):
+            batch_header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        batch_header.setSectionResizeMode(2, QHeaderView.Stretch)
+        batch_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        batch_header.setSectionResizeMode(5, QHeaderView.Stretch)
+        batch_header.setSectionResizeMode(7, QHeaderView.Stretch)
+        self.batch_candidate_table.setMinimumHeight(220)
+        self.batch_candidate_table.itemChanged.connect(
+            self._on_batch_candidate_item_changed
+        )
+        candidate_layout.addWidget(self.batch_candidate_table)
+
+        candidate_note = QLabel(
+            "所有通过独立模块现有校验的对象默认勾选；跨模块写回冲突对象会显示但禁止选择。"
+            "取消勾选只影响本次一键执行，不会改变任何独立模型的识别、数据库校验或写回规则。"
+        )
+        candidate_note.setWordWrap(True)
+        candidate_note.setStyleSheet(
+            "background:#F3F8F6; color:#315B4F; border:1px solid #D0E2DA; "
+            "border-radius:6px; padding:7px 9px;"
+        )
+        candidate_layout.addWidget(candidate_note)
+        self.batch_candidate_box.setVisible(False)
+        layout.addWidget(self.batch_candidate_box)
+
+        # --------------------------------------------------------
         # Console 日志 + 自动报告入口
         # --------------------------------------------------------
         log_box = QGroupBox("本次运行 Console 日志")
@@ -1393,18 +2781,22 @@ class MainWindow(QMainWindow):
 
         self.validate_btn = QPushButton("模型校验")
         self.validate_btn.setObjectName("primary")
-        self.validate_btn.clicked.connect(
-            lambda: self.start_job("VALIDATE")
-        )
+        self.validate_btn.clicked.connect(self._handle_validate_action)
 
         self.apply_btn = QPushButton("执行模型关联")
         self.apply_btn.setObjectName("danger")
         self.apply_btn.setEnabled(False)
-        self.apply_btn.clicked.connect(self.apply_association)
+        self.apply_btn.clicked.connect(self._handle_apply_action)
+
+        # Compatibility aliases for the existing, well-tested Jeddah batch
+        # orchestrator.  The buttons are now the common Model Workspace actions
+        # instead of a separate sidebar page.
+        self.batch_validate_btn = self.validate_btn
+        self.batch_apply_btn = self.apply_btn
 
         database_btn = QPushButton("数据库设置")
         database_btn.setObjectName("secondary")
-        database_btn.clicked.connect(lambda: self.nav.setCurrentRow(2))
+        database_btn.clicked.connect(lambda: self.nav.setCurrentRow(3))
 
         for button in (
             self.validate_btn,
@@ -1502,18 +2894,29 @@ class MainWindow(QMainWindow):
         module_id = str(self.module_combo.currentData() or "RMU").upper()
 
         if self.language == "en_US":
+            if module_id == "BULK":
+                return """
+                <h2>Multi-Model Association Help</h2>
+                <p>This is an orchestration-only mode inside the Model Workspace. It does not replace or duplicate any independent Jeddah model rule.</p>
+                <ol>
+                  <li>Select one or more independent model modules.</li>
+                  <li>Click <b>Model Validation</b>. Every selected module runs its existing validation against the same frozen G-file snapshot.</li>
+                  <li>Review the combined candidate table. Cross-module write conflicts are displayed and cannot be selected.</li>
+                  <li>Click <b>Execute Association</b>. Only checked candidates are applied, in the fixed safe order: RMU → Pole Switch → Pole Transformer → Fuse → Master-station Devices → Feeder.</li>
+                  <li>Original local/SSH G files are never modified; cumulative results are written only to the Workspace safe copy.</li>
+                </ol>
+                """
             if module_id == "FEEDER":
                 return """
                 <h2>Feeder Model Help</h2>
-                <h3>1. Feeder Resolution</h3>
+                <h3>1. Automatic Feeder Resolution</h3>
                 <ol>
-                  <li><b>G root facID</b>: when FACID is selected, query 13500 / dms_feeder_device exactly by the current root ID.</li>
-                  <li><b>File name</b>: supports both one file and batch folders. Each file independently resolves substation + feeder token; for example JED-NTH-ABH-03 resolves 03 within ABH (such as AH303), while JED-NTH-ABH-AH303 uses AH303 directly.</li>
-                  <li><b>Manual input</b>: the entered feeder name must uniquely match 13500 / dms_feeder_device.</li>
-                  <li><b>The three sources are independent:</b> an existing root facID is current-state evidence only and does not override File Name or Manual mode.</li>
-                  <li>If the selected target differs from the existing facID / FeedLine feeder ownership, explicit override must be enabled before any safe-copy overwrite/relink candidate is generated.</li>
-                  <li>RMU data and reverse FEEDER_ID inference are not used to determine the feeder.</li>
-                  <li>If the feeder cannot be uniquely resolved, processing is blocked; no feeder section is created and no FeedLine association is performed.</li>
+                  <li><b>The G filename is the only authoritative feeder source.</b> It must match either JED-&lt;3-letter AREA&gt;-&lt;STATION&gt;-&lt;NN&gt;.sln.pic.g or JED-&lt;3-letter AREA&gt;-&lt;STATION&gt;-AG&lt;NN&gt;.sln.pic.g.</li>
+                  <li>The STATION token is exact-matched against 405 / substation.NAME and must return exactly one station ID.</li>
+                  <li>For an NN token the program builds AH3NN (03 → AH303). For an AGNN token it inserts 4 after AG (AG06 → AG406). It then exact-matches 13500 / dms_feeder_device by ST_ID + NAME.</li>
+                  <li>The unique 13500.ID is the drawing FEEDER_ID. RMU, Pole Switch, Pole Transformer, G-root facID, source CBreaker text, and manual input never select or override it.</li>
+                  <li>If the filename is invalid, processing stops and the file must be renamed. If no matching 13500 feeder exists, processing is blocked and the operator must verify that the drawing feeder has been created.</li>
+                  <li>Every later target device must prove that its database FEEDER_ID equals this filename-resolved FEEDER_ID.</li>
                 </ol>
                 <h3>2. Database Query / Create Boundary</h3>
                 <ul>
@@ -1541,12 +2944,26 @@ class MainWindow(QMainWindow):
                 </pre>
                 <p><b>Only these five FeedLine attributes are changed.</b> key_name, ls, coordinates, colors, line style, and all other attributes remain unchanged.</p>
                 """
+            if module_id == "FUSE":
+                return """
+                <h2>Fuse Model Help</h2>
+                <h3>1. Recognition</h3>
+                <ul>
+                  <li>Only graphic objects classified <b>FUSE</b> in Element Management are processed.</li>
+                  <li>Each FUSE nominates only its single nearest <b>Transformer_OH</b>. A transformer may be used by only one FUSE; conflicts are won by the closer FUSE, while the others are counted only and never fall back to another transformer.</li>
+                  <li>Only an assigned FUSE continues. The assigned transformer name uses the exact Jeddah pole-transformer rule: pure-numeric, white, no-background Text; TOP → RIGHT → GLOBAL priority; distance uses the minimum edge-to-edge distance between the transformer rectangle and the Text rectangle; direction uses rectangle placement; maximum distance 300. Center-point distance is not used. The selected graphical name must then be unique in 13505. The fuse NAME is <b>FUSE + transformer name</b>.</li>
+                </ul>
+                <h3>2. Database / Feeder</h3>
+                <p>The drawing feeder uses the shared RMU → Pole Switch → Pole Transformer first-unique rule. Derived NAME + FEEDER_ID must uniquely match 13513 / dms_disconnector_device; Expected KeyID uses Domain 40.</p>
+                <h3>3. Safe Write-back</h3>
+                <p>Only selected FUSE-classified objects are written to Workspace safe copies: app=6500000, voltype=13513.BV_ID, p_ReportType=1, state=41, keyid=Expected KeyID.</p>
+                """
             if module_id == "TRANSFORMER":
                 return """
                 <h2>Pole Transformer Model Help</h2>
                 <h3>1. Recognition and Feeder</h3>
                 <ul>
-                  <li>Only elements marked <b>Transformer_OH</b> in Element Management are recognized as pole transformers. Only <b>Text</b> within distance 200 is eligible; all target transformers compete globally, the nearest transformer owns each Text, and separate Text objects may contain the same name. Numeric names such as 97803 are supported.</li>
+                  <li>Pole-transformer recognition is two-level: a devref that points exactly to <b>Transformer_OH.pb.icn.g</b> is recognized first without requiring an Element Management mark; other element files fall back to the <b>TRANSFORMER_OH</b> classification. Only eligible numeric white background-free <b>Text</b> within rectangle minimum-edge distance 300 is eligible; all target transformers compete globally, the nearest transformer owns each Text, and separate Text objects may contain the same name. Numeric names such as 97803 are supported.</li>
                   <li>G-root <b>facID</b> is queried exactly in 13500 / dms_feeder_device. RMU, ConnectLine, node_area, and CBreaker topology are not analyzed by this module.</li>
                   <li>Only a unique facName is used as the fallback when the root facID is unavailable; otherwise the row remains unresolved.</li>
                 </ul>
@@ -1567,9 +2984,9 @@ class MainWindow(QMainWindow):
                 <h2>Pole Switch Model Help</h2>
                 <h3>1. Recognition Rules</h3>
                 <ul>
-                  <li>Only <b>CBreakerDis</b> objects whose element file is marked <b>LBS</b>, <b>SEC</b>, or <b>AR</b> in Element Management are included.</li>
-                  <li>The element mark is mandatory; devref text, key_name, and p_NameString are not type-recognition sources.</li>
-                  <li>Only valid Text within distance 300 is eligible; all CBreakerDis targets compete globally, the nearest device wins, and separate Text objects may contain the same name. RMU, ConnectLine, node_area, and other topology are not analyzed by this module.</li>
+                  <li>Pole-switch identity is determined <b>only</b> by the Element Management classification: <b>LBS</b>, <b>SEC</b>, or <b>AR</b>.</li>
+                  <li>The concrete G XML tag is not restricted. CBreakerDis, CBreaker, or any future/custom element type is accepted when its devref resolves to one of those classifications. XML tag name, devref text, key_name, and p_NameString are not type-recognition sources.</li>
+                  <li>Only valid Text within rectangle minimum-edge distance 200 is eligible; center-point distance is not used. All classified pole-switch targets compete globally, the nearest device wins, and separate Text objects may contain the same name. RMU, ConnectLine, node_area, and other topology are not analyzed by this module.</li>
                 </ul>
                 <h3>2. Database Chain</h3>
                 <p>Graphical name → 13501 / dms_combined_device.NAME (if not found, CODE) → 13501.ID → 13502 / dms_cb_device.combined_id. The target device is 13502.ID and Domain is fixed at 40 for KeyID calculation.</p>
@@ -1593,7 +3010,7 @@ class MainWindow(QMainWindow):
               <li><b>devref names are not interpreted:</b> only CBreakerDis participates. Y devices must share one template, Q devices must share one template, and the Y/Q templates must differ. ZhaiWaiJieDiDaoZha (for example RMU_ES), BusDis, and all other objects are excluded.</li>
               <li>If text type and valid devref type disagree, the final RMU type uses the devref result and the report raises WARN.</li>
               <li><b>SMART/NORMAL:</b> SMART and SMR graphical markers are globally assigned to the nearest RMU. Any SMART/SMR marker makes the cabinet SMART; otherwise it is NORMAL.</li>
-               <li>RMU names are searched only above the rectangle, and only Text within distance 200 is eligible; each RMU keeps exactly one nearest Text.</li>
+               <li>RMU names are searched only above the rectangle. Distance uses the minimum edge-to-edge distance between the RMU rectangle and Text rectangle; only Text within 200 is eligible and each RMU keeps exactly one nearest Text.</li>
                <li>Each Text belongs to only one nearest RMU, preventing the same name from being reused by adjacent cabinets.</li>
               <li>Names are strings. Standard compact names are supported, plus the field form <b>number + space + suffix</b> such as <b>66 B</b>. Arbitrary descriptive text containing spaces is still rejected.</li>
             </ul>
@@ -1634,17 +3051,33 @@ class MainWindow(QMainWindow):
             <p>Original G files are never modified. Only safe Workspace copies are changed.</p>
             """
 
+        if module_id == "FUSE":
+            return """
+            <h2>熔断器模型帮助</h2>
+            <h3>1. 图元识别</h3>
+            <ul>
+              <li>只处理图元管理中分类标记为 <b>FUSE</b> 的图元。</li>
+              <li>每个 FUSE 只提名几何位置最近的 <b>Transformer_OH</b>；同一柱上变压器只能分配给一个 FUSE，冲突时由距离更近者获得，其他 FUSE 只统计、不关联，也不再找第二近变压器。</li>
+              <li>只有成功分配柱上变压器的 FUSE 才继续。锁定最近柱上变压器后，名称完全沿用吉达柱上变压器模型规则：全图只使用<b>纯数字、白色、无背景</b> Text，方向优先级固定为<b>上方 → 右方 → 全局兜底</b>，同级按柱上变压器矩形框到 Text 矩形框的最小边缘距离最近，方向按两个矩形的相对位置判断，最大距离 300；不再使用中心点距离；图形选中的名称必须在 13505 唯一。熔断器 NAME 固定为 <b>FUSE + 变压器名称</b>。</li>
+            </ul>
+            <h3>2. 数据库和馈线</h3>
+            <p>图级馈线只按 G 文件名 → 405/substation → 13500/dms_feeder_device 精确确定。然后按 NAME + FEEDER_ID 唯一查询 13513 / dms_disconnector_device，Domain=40 计算并校验 Expected KeyID。</p>
+            <h3>3. 安全回写</h3>
+            <p>只回写已勾选 FUSE 图元的 app、voltype、p_ReportType、state、keyid 到 Workspace 安全副本，原始 G 文件不修改。</p>
+            """
         if module_id == "TRANSFORMER":
             return """
             <h2>柱上变压器模型帮助</h2>
             <h3>1. 识别与馈线</h3>
             <ul>
-              <li>只识别图元管理中标记为 <b>Transformer_OH</b> 的图元，被标记图元直接视为柱上变压器；先对本图全部目标变压器全局分配 <b>Text</b>/名称，距离更近的设备优先，同一名称不重复使用，支持 97803 这类纯数字名称。</li>
-              <li>优先按 G 根节点 <b>facID</b> 精确查询 13500 / dms_feeder_device；不分析 RMU、ConnectLine、node_area 或 CBreaker 拓扑链路。</li>
-              <li>根 facID 查不到时，仅使用唯一 facName 兜底；仍无法唯一确定时阻断。</li>
+              <li>柱上变压器按两级规则识别：优先检查 devref 是否精确指向 <b>Transformer_OH.pb.icn.g</b>，命中后直接认定为柱上变压器，不依赖图元管理分类；未命中标准图元时，再以图元管理中的 <b>TRANSFORMER_OH</b> 分类标记作为兜底。识别完成后再全局收集名称候选，候选必须是<b>纯数字、白色、无背景</b>的 <b>Text</b>。</li>
+              <li>名称查找严格按 <b>上方 → 右方 → 全局兜底</b> 的优先级执行：方向按 Transformer 矩形框与 Text 矩形框的相对位置判定；只要存在可分配的上方候选，就不使用右方/其他方向；没有上方候选才找右方；上方和右方都没有时才从其余方向全局兜底。同一优先级内按两矩形最小边缘距离最近，最大距离 300，一条 Text 仍只分配给一个 Transformer_OH。</li>
+              <li>距离按被标记柱上变压器矩形框与 Text 矩形框的最小边缘距离计算，最大距离为 300；方向按两个矩形的相对位置判定；中心点距离和 Text 锚点距离均不再使用。</li>
+              <li>关联柱上变压器前必须先由 G 文件名唯一确定图级馈线；任何图中设备都不能反推或覆盖该 FEEDER_ID。</li>
+              <li>图级 FEEDER_ID 确定后，当前柱上变压器的 13505.FEEDER_ID 必须与之完全一致，否则阻断关联。</li>
             </ul>
             <h3>2. 数据库链路</h3>
-            <p>最近 Text 名称直接解析 + feeder_id → 13505 / dms_tr_device 的 NAME、FEEDER_ID 精确匹配 → 取 13505.ID，按 Domain=1 计算 Expected KeyID。</p>
+            <p>最近 Text 名称 → 13505 / dms_tr_device 唯一匹配 → 校验该记录 FEEDER_ID 与图级馈线一致 → 取 13505.ID，按 Domain=1 计算 Expected KeyID。</p>
             <h3>3. 安全回写</h3>
             <pre>
     app1/app2="6500000"
@@ -1653,20 +3086,20 @@ class MainWindow(QMainWindow):
     state1/state2="18"
     keyid1/keyid2="Expected KeyID"
             </pre>
-            <p>只将用户勾选的 Transformer_OH 标记图元写入 Workspace 安全副本，原始 G 文件不修改。</p>
+            <p>只将用户勾选的已识别柱上变压器图元写入 Workspace 安全副本，原始 G 文件不修改。</p>
             """
         if module_id == "POLE_SWITCH":
             return """
             <h2>柱上开关模型帮助</h2>
             <h3>1. 识别规则</h3>
             <ul>
-              <li>只识别对应图元文件在图元管理中标记为 <b>LBS</b>、<b>SEC</b> 或 <b>AR</b> 的 <b>CBreakerDis</b> 图元。</li>
-              <li>图元标记是强制条件，不从 devref、key_name 或 p_NameString 猜测设备类型。</li>
-              <li>扫描整张 G 图的有效 Text，在所有目标柱上开关之间全局分配名称，距离更近者优先且名称不重复；不分析 RMU、ConnectLine、node_area 或其他拓扑关系。</li>
-              <li>Text.ts 中的换行名称（例如 <b>AUTO RECLOSER 101601</b>）会规范空白后作为一个完整名称保留；只有 <b>kV</b>、<b>A</b>、<b>V</b> 等单位 Text 不参与设备名称分配，名称不读取 DText。</li>
+              <li>柱上开关设备类型<b>只以图元管理中的 LBS / SEC / AR 分类标记为准</b>。</li>
+              <li>不限制 G 文件中的 XML 元素类型：CBreakerDis、CBreaker 或其它未来/自定义元素都可以，只要该图元的 devref 对应到 LBS/SEC/AR 分类。XML 元素名、devref 字符串、key_name、p_NameString 都不用于猜测设备类型。</li>
+              <li>扫描整张 G 图的 Text，候选必须<b>明确设置颜色且不能是白色</b>，具体颜色和深浅不限；最大距离 <b>200</b>。名称方向优先级固定为 <b>上方 → 右方 → 全局兜底</b>，同一级别取最近候选，且一个 Text 只能分给一个柱上开关。</li>
+              <li>未设置颜色和白色 Text 全部排除；红色、深红色、黄色、蓝色、绿色等其他显式非白色均可参与候选。<b>kV</b>、<b>A</b>、<b>V</b> 等单位 Text 仍不参与设备名称分配，名称不读取 DText。</li>
             </ul>
-            <h3>2. 数据库链路</h3>
-            <p>图上名称 → 13501 / dms_combined_device.NAME（未命中再按 CODE）→ 13501.ID → 13502 / dms_cb_device.combined_id；目标设备使用 13502.ID，Domain 固定为 40 计算 KeyID。</p>
+            <h3>2. 馈线与数据库链路</h3>
+            <p>关联柱上开关前先由 G 文件名 → 405/substation → 13500/dms_feeder_device 唯一确定图级 FEEDER_ID。柱上开关查询数据库时，普通名称会先删除图上名称中的 <b>点号、横杠和空格</b>，例如 SEC-2385、SEC 2385、SEC.2385 都按 <b>SEC2385</b> 查询；但若分类为 AR/LBS/SEC 且图上名称严格符合“设备族+数字-数字”的复合格式（如 <b>LBS96527-21240</b>、<b>LBS33513-97376</b>），则保留中间横杠并直接按原名查询；然后按 13501 / dms_combined_device.NAME（未命中再按 CODE）→ 13501.ID → 13502 / dms_cb_device.combined_id。13501 与 13502 的 FEEDER_ID 必须一致，并且必须等于图级 FEEDER_ID。目标设备使用 13502.ID，Domain 固定为 40 计算 KeyID。</p>
             <h3>3. 安全回写</h3>
             <pre>
     app="6500000"
@@ -1683,25 +3116,37 @@ class MainWindow(QMainWindow):
             <h2>配网主站设备关联帮助</h2>
             <h3>1. 强制识别</h3>
             <p>只扫描 CBreaker、Disconnector、GroundDisconnector 图元；Bus 不在本模块处理，不分析拓扑，也不从无关文字猜测设备。</p>
-            <h3>2. 数据库匹配</h3>
-            <p>首先按图内唯一设备证据确定一个 FEEDER_ID：优先使用环网柜，其次柱上开关，再其次柱上变压器；同一优先级出现多个不同 FEEDER_ID 时直接阻断，并在报告中列出来源和证据。确认馈线后，按 BAY_ID 查询并强制校验目标记录属于该 FEEDER_ID。默认 CBreaker → 407 / breaker / 域 40、Disconnector → 408 / disconnector / 域 30、GroundDisconnector → 409 / grounddisconnector / 域 30。没有唯一馈线时不执行关联。</p>
+            <h3>2. 厂站 / 馈线 / Bay 与数据库匹配</h3>
+            <p>主站设备不再依赖 RMU 已有关联来确定馈线。程序只按 G 文件名唯一确定图级 FEEDER_ID：405 精确找站；普通 NN 生成 AH3NN，AGNN 生成 AG4NN；13500 按 ST_ID+NAME 精确确认。随后使用该站和馈线名称/代码在 406/Bay 中定位唯一 BAY_ID，再保持原有规则查询 407/408/409；每个目标记录仍必须证明属于文件名确定的 FEEDER_ID，无法证明或不一致都阻断。</p>
             <h3>3. 安全回写</h3>
             <p>沿用现有关联回写规则，只修改 Workspace 安全副本中的目标属性，不删除原有 XML 属性，原始 G 文件不修改。</p>
+            """
+
+        if module_id == "BULK":
+            return """
+            <h2>一键多模型关联帮助</h2>
+            <p>这是模型工作区中的编排模式，不复制、不替换任何吉达独立模型业务规则。</p>
+            <ol>
+              <li>勾选一个或多个需要执行的独立模型模块。</li>
+              <li>点击<b>模型校验</b>，所有已选模块都基于同一份冻结 G 文件快照调用各自现有校验逻辑。</li>
+              <li>在统一的“待关联设备”表格中确认候选；跨模块写回冲突会显示但禁止勾选。</li>
+              <li>点击<b>执行模型关联</b>，只处理已勾选候选，并按固定安全顺序累计执行：RMU → 柱上开关 → 柱上变压器 → 熔断器 → 配网主站设备 → 馈线。</li>
+              <li>本地原始 G 与 SSH 服务器 G 均不修改，只在 Workspace 安全副本中累计写回。</li>
+            </ol>
             """
 
         if module_id == "FEEDER":
             return """
             <h2>馈线模型帮助</h2>
 
-            <h3>1. 馈线确定方式</h3>
+            <h3>1. 馈线自动识别方式</h3>
             <ol>
-              <li><b>G 根节点 facID</b>：选择 FACID 模式时，按当前根 facID 精确查询 13500 / dms_feeder_device。</li>
-              <li><b>文件名</b>：同时支持单文件和批量目录。每个文件独立解析变电站 + 馈线号；例如 JED-NTH-ABH-03 在 ABH 站内解析 03（如 AH303），JED-NTH-ABH-AH303 则直接使用 AH303。</li>
-              <li><b>人工输入</b>：用户输入馈线名称后，必须唯一匹配到 13500 / dms_feeder_device。</li>
-              <li><b>三种来源相互独立：</b>已有 G 根 facID 只表示当前关联，不再强制覆盖文件名/人工输入选择。</li>
-              <li>若本次目标与已有 facID / FeedLine 馈线归属不同，必须显式勾选“允许覆盖现有 facID 和馈线段关联”才生成安全副本覆盖/重关联候选。</li>
-              <li><b>不再使用 RMU、环网柜、连接拓扑或 FEEDER_ID 反向推断馈线。</b></li>
-              <li>三种方式最终都无法唯一确认时，整张 G 图直接报错并阻断，不创建馈线段，也不执行 FeedLine 关联。</li>
+              <li><b>唯一来源：G 文件名。</b>文件名必须符合 JED-&lt;三位区域代码&gt;-&lt;站名&gt;-&lt;两位馈线号&gt;.sln.pic.g，例如 JED-NTH-ABH-03。</li>
+              <li>程序取文件名中的站名 ABH，精确查询 405 / substation.NAME，必须恰好得到 1 个站 ID。</li>
+              <li>普通两位编号固定拼接 AH3，例如 03 → AH303；若文件名最后一段是 AGNN，则插入 4，例如 AG06 → AG406；再按 13500 / dms_feeder_device.ST_ID=站ID 且 NAME=目标名精确查询，必须恰好 1 条。</li>
+              <li>13500.ID 即本图唯一 FEEDER_ID。环网柜、柱上开关、柱上变压器、G 根 facID、源侧 CBreaker 和人工选择都不能反推或覆盖该馈线。</li>
+              <li>文件名不合规则直接报错并要求修改文件名；13500 中找不到目标馈线时提示“馈线不存在，请检查该图的馈线是否已创建”。</li>
+              <li>后续所有设备必须证明其数据库 FEEDER_ID 等于该图 FEEDER_ID，否则单独阻断该设备关联。</li>
             </ol>
 
             <h3>2. 数据库查询与创建边界</h3>
@@ -1744,18 +3189,18 @@ class MainWindow(QMainWindow):
           <li>如果文字类型与 devref 类型不一致，报告中显示“类型交叉校验=NO”，最终“环网柜类型”采用 devref 类型；该差异本身不改变 RMU 数据库关联资格。</li>
           <li><b>智能环网柜识别：</b>在整张 G 图全局寻找 Text 中精确的 SMART 和 SMR，并把每个标识唯一归属给距离最近的 RMU。SMART 通常在柜内、SMR 可以在柜外，因此不设置最大距离限制。</li>
           <li>一个 RMU 只要命中 SMART 或 SMR 任意一种，报告“是否智能”列显示 <b>SMART</b>；未命中则显示 <b>NORMAL</b>。若两种标识都归属于同一个柜，“智能标识”仍记录 <b>SMART, SMR</b>。</li>
-           <li>环网柜名称默认搜索矩形框上方，也可以多选右侧、左侧或下方；只使用距离不超过 200 的 Text，多选时按距离只保留最近的一个 Text。</li>
-           <li>每个 RMU 只保留一个名称；同一 Text 全局只归属距离最近的一个环网柜，避免名称重复使用。</li>
+           <li>环网柜名称始终以 RMU 矩形框为几何基准，只识别完整位于矩形框外、且在矩形框上方的 Text；右侧、左侧、下方和全局兜底全部禁用。上方没有有效名称时直接判定识别失败；距离按 RMU 矩形框与 Text 矩形框最小边缘距离计算，只使用距离不超过 200 的 Text。</li>
+           <li>每个 RMU 只保留一个名称；同一 Text 全局只归属矩形最小边缘距离最近的一个环网柜，避免名称重复使用。</li>
           <li>名称始终按照字符串处理，支持数字、字母、横线、下划线等常见工程名称。</li>
         </ul>
 
         <h3>2. 设备名称规则（固定）</h3>
         <ul>
           <li><b>CBreakerDis：</b>只使用环网柜内部、与开关图元空间对应的图上文字作为设备名称。XML <code>p_NameString</code> 完全不参与设备命名。</li>
-          <li><b>ZhaiWaiJieDiDaoZha：</b>与 CBreakerDis 做最近唯一空间配对，逻辑设备名称=配对开关图上名称+D。</li>
-          <li><b>BusDis：</b>逻辑设备名称固定为 <b>BUS</b>。</li>
-          <li>上述逻辑设备名称必须与当前 RMU 下数据库设备 <b>CODE</b> 唯一对应；NAME 不参与判断。</li>
-          <li>开关图上文字无法唯一识别、数据库不存在相同 CODE 或同 CODE 存在多条记录时，报告会明确指出对应环网柜并提示检查开关命名方式。</li>
+          <li><b>CBreakerDis：</b>识别出 Y1/Y2/Y3/Q1/Q2/Q3... 后，先在当前 RMU 且当前文件名馈线内按数据库 <b>NAME</b> 精确匹配；NAME 没找到时才用同值 <b>CODE</b> 兜底。</li>
+          <li><b>ZhaiWaiJieDiDaoZha：</b>与 CBreakerDis 做最近唯一空间配对。Y1/Y2/Y3... 优先匹配 NAME=KY1/KY2/KY3...；Q1/Q2/Q3... 优先匹配 NAME=KQ1/KQ2/KQ3...；NAME 没找到时再用原 CODE=Y1D/Y2D/Y3D/Q1D/Q2D/Q3D... 兜底。</li>
+          <li><b>BusDis：</b>逻辑设备名称固定为 <b>BUS</b>，仍按原 CODE 规则匹配。</li>
+          <li>NAME 匹配一旦唯一成功就直接采用，不再让 CODE 覆盖；NAME 多条直接阻断，只有 NAME 为 0 条时才允许进入 CODE 兜底。</li>
         </ul>
 
         <h3>2.1 RMU 柜型两套规则与交叉验证</h3>
@@ -1770,16 +3215,17 @@ class MainWindow(QMainWindow):
         <h3>3. 强制校验与可修复原则</h3>
         <p><b>核心原则：</b>数据库当前事实正确且能够唯一确定时，允许程序修复 G 文件中的旧关联、错关联、旧 KeyID、错误 Domain 等问题；只有数据库事实本身无法唯一确定时才阻断。</p>
         <ul>
-          <li>环网柜数据库记录必须唯一；0 条或多条时环网柜汇总直接 FAIL。</li>
-          <li>设备 CODE 必须与当前图上逻辑设备名称 一致；NAME 不参与判断。</li>
-          <li>RMU 唯一后，每个 G 设备独立判断：当前 RMU 内 CODE 必须与逻辑设备名称 唯一对应，并且目标数据库设备必须属于当前 RMU。</li>
+          <li>所有图都只通过 G 文件名 → 405/substation → 13500/dms_feeder_device 唯一确定图级 FEEDER_ID；RMU、开关、变压器、facID 都不参与馈线判定。</li>
+          <li>环网柜名称允许在数据库中跨馈线重复，但文件名确定的 FEEDER_ID 下必须恰好有 1 条同名 RMU；0 条或多条直接 FAIL。</li>
+          <li>RMU 唯一后，每个柜内设备都必须同时满足：COMBINED_ID=当前 RMU.ID，且设备 FEEDER_ID=文件名确定的 FEEDER_ID。</li>
+          <li>CBreakerDis 使用 NAME 优先、CODE 兜底；接地刀闸使用 KY*/KQ* NAME 优先、Y*D/Q*D CODE 兜底。</li>
           <li>已有 KeyID 只用于判断当前模型是否需要修复：旧设备 ID、表号、域号或 KeyID 错误，不再作为数据库当前正确目标的硬阻断条件。</li>
-          <li>如果旧设备被删除后重新创建并产生新 ID，只要当前 CODE/图上逻辑名称 仍能唯一确定本 RMU 内的新设备，就允许重新关联。</li>
+          <li>如果旧设备被删除后重新创建并产生新 ID，只要 NAME 优先/CODE 兜底规则仍能在当前 RMU + 当前馈线内唯一确定新设备，就允许重新关联。</li>
           <li>如果当前 KeyID 指向其他环网柜，但本 RMU 内已经唯一确定正确目标设备，则标记为 RMU_RELINK，并允许重新关联到当前环网柜。</li>
           <li>同一 RMU 内某些设备不符合条件时，只阻断这些设备；其它符合条件的设备仍可以正常关联。</li>
           <li>模型校验完成后，工作区会展示设备明细选择表，并可按环网柜名称快速筛选；只有数据库事实已唯一确定且需要写回的设备可勾选。</li>
           <li>执行模型关联时直接使用校验阶段已确定并由用户勾选的设备，只处理本次勾选记录，不再重新全量循环所有环网柜；本次关联报告也只记录本次实际选择和写回结果。</li>
-          <li>RMU 模块不进行任何馈线或 facID 判断，支持单线图、合成图和环网图；同一 G 图内环网柜名称重复时，重复名称对应的环网柜全部禁止关联。</li>
+          <li>RMU 在所有图中都必须校验文件名确定的图级 FEEDER_ID；其它馈线上的同名环网柜不参与，只有当前馈线下没有同名 RMU 或仍有多条同名 RMU 时才阻断。</li>
         </ul>
 
         <h3>4. RMU 安全回写</h3>
@@ -2143,13 +3589,14 @@ class MainWindow(QMainWindow):
         central_layout = QVBoxLayout(central_box)
         central_layout.setContentsMargins(14, 18, 14, 14)
         central_cfg = dict(self.cfg.get("central_config", {}) or {})
-        central_layout.addWidget(
-            QLabel(
-                "首次部署由 Admin 输入并初始化图元标记、数据库和文件服务器配置；"
-                "普通客户端只读取中央配置。客户端可以修改本机设置，但不会发布到中央配置，"
-                "需要时点击【连接并同步中央配置】即可重新读取。"
-            )
+        central_tip = QLabel(
+            "软件启动只读取本机缓存，不会自动访问中央仓库。普通客户端可以修改并保存本机配置，也可以手动同步中央共享配置；"
+            "只有上传/发布配置到中央仓库需要 Admin 权限。任何机器都可以手动抢占 Admin。"
+            "当 Admin 被其他机器抢占后，本机仅后台检查很小的 instance.json 并自动降权；"
+            "该检查不会同步数据库、服务器或图元配置。"
         )
+        central_tip.setWordWrap(True)
+        central_layout.addWidget(central_tip)
         central_grid = QGridLayout()
         self.central_edits = {}
         central_fields = [
@@ -2175,14 +3622,17 @@ class MainWindow(QMainWindow):
             self.central_edits[key] = edit
         central_layout.addLayout(central_grid)
         central_actions = QHBoxLayout()
+        self.central_save_local_button = QPushButton("保存本机连接配置")
+        self.central_save_local_button.clicked.connect(self.save_central_connection_locally)
         self.central_sync_button = QPushButton("连接并同步中央配置")
         self.central_sync_button.clicked.connect(self.sync_central_configuration)
         self.central_publish_button = QPushButton("保存并发布全部配置")
         self.central_publish_button.clicked.connect(self.publish_current_configuration)
-        self.central_init_button = QPushButton("初始化并设为 Admin")
-        self.central_init_button.clicked.connect(self.initialize_central_configuration)
+        self.central_init_button = QPushButton("抢占 Admin 权限")
+        self.central_init_button.clicked.connect(self.takeover_central_configuration)
         self.central_release_button = QPushButton("释放 Admin 权限")
         self.central_release_button.clicked.connect(self.release_central_configuration)
+        central_actions.addWidget(self.central_save_local_button)
         central_actions.addWidget(self.central_sync_button)
         central_actions.addWidget(self.central_publish_button)
         central_actions.addWidget(self.central_init_button)
@@ -2217,7 +3667,8 @@ class MainWindow(QMainWindow):
 
         text = QLabel(
             f"• 当前工作目录下自动生成的报告保留 {WORKSPACE_RETENTION_DAYS} 天\n"
-            "• 每次执行任务前必须进行 Oracle 预检查\n"
+            "• 软件启动不检查 Oracle/SSH/中央服务器；只有显式操作才连接。成为 Admin 后仅每 10 秒轻量检查一次 Admin 所有权\n"
+            "• 每次执行模型任务时才进行 Oracle 预检查\n"
             "• 模型回写必须先生成校验候选\n"
             "• 原始 G 文件不修改；关联前先复制到 Workspace 安全副本\n"
             "• 回写目标必须通过 G 图元类型 + XML ID 唯一定位\n"
@@ -2233,27 +3684,76 @@ class MainWindow(QMainWindow):
 
         return page
 
+    def _is_current_central_admin(self) -> bool:
+        state = dict(self.cfg.get("_central_sync", {}) or {})
+        if str(state.get("status") or "").upper() != "ACTIVE":
+            return False
+        if str(state.get("admin_machine_id") or "") != str(self.cfg.get("machine_id") or ""):
+            return False
+        remote_epoch = int(state.get("admin_epoch", 0) or 0)
+        return self._admin_session_epoch is not None and remote_epoch == int(self._admin_session_epoch)
+
+    def _adopt_admin_session_if_owner(self):
+        state = dict(self.cfg.get("_central_sync", {}) or {})
+        is_owner = (
+            str(state.get("status") or "").upper() == "ACTIVE"
+            and str(state.get("admin_machine_id") or "")
+            == str(self.cfg.get("machine_id") or "")
+        )
+        self._admin_session_epoch = (
+            int(state.get("admin_epoch", 0) or 0) if is_owner else None
+        )
+
+    def _apply_shared_configuration_permissions(self, is_admin: bool):
+        """Keep local configuration editable; gate only central publishing.
+
+        Normal clients may edit and save database, SSH and element settings in
+        their own local cache.  Admin ownership controls only operations that
+        upload shared configuration to the central repository.
+        """
+        for edit in getattr(self, "db_edits", {}).values():
+            edit.setReadOnly(False)
+        if hasattr(self, "db_save_button"):
+            self.db_save_button.setEnabled(True)
+
+        for edit in getattr(self, "ssh_edits", {}).values():
+            edit.setReadOnly(False)
+        if hasattr(self, "ssh_save_button"):
+            self.ssh_save_button.setEnabled(True)
+
+        element_page = getattr(self, "element_management_page", None)
+        if element_page is not None and hasattr(element_page, "set_admin_mode"):
+            element_page.set_admin_mode(is_admin)
+
+        graphics_page = getattr(self, "graphics_workspace_page", None)
+        if graphics_page is not None and hasattr(graphics_page, "set_admin_mode"):
+            graphics_page.set_admin_mode(
+                is_admin,
+                self._admin_session_epoch if is_admin else None,
+            )
+
     def _refresh_central_status(self):
         if not hasattr(self, "central_status"):
             return
         state = dict(self.cfg.get("_central_sync", {}) or {})
         status = str(state.get("status") or "UNKNOWN").upper()
         message = str(state.get("message") or "")
-        is_current_admin = (
-            status == "ACTIVE"
-            and str(state.get("admin_machine_id") or "")
-            == str(self.cfg.get("machine_id") or "")
-        )
-        can_initialize = status in {"UNINITIALIZED", "UNASSIGNED"}
-        recorded_admin_id = str(state.get("admin_machine_id") or "")
-        if status == "UNINITIALIZED" and recorded_admin_id:
-            can_initialize = recorded_admin_id == str(self.cfg.get("machine_id") or "")
+        is_current_admin = self._is_current_central_admin()
+
+        # Normal clients can always explicitly take over Admin.  Startup never
+        # reads the server, so LOCAL_ONLY is deliberately treated as non-Admin
+        # until the operator explicitly syncs or takes over.
         if hasattr(self, "central_init_button"):
-            self.central_init_button.setEnabled(can_initialize)
+            self.central_init_button.setEnabled(status != "DISABLED" and not is_current_admin)
+            self.central_init_button.setText(
+                self._t("当前机器已是 Admin") if is_current_admin else self._t("抢占 Admin 权限")
+            )
         if hasattr(self, "central_publish_button"):
             self.central_publish_button.setEnabled(is_current_admin)
         if hasattr(self, "central_release_button"):
             self.central_release_button.setEnabled(is_current_admin)
+        self._apply_shared_configuration_permissions(is_current_admin)
+
         admin_name = str(state.get("admin_machine_name") or "").strip()
         admin_ip = str(state.get("admin_ip") or "").strip()
         admin_desc = " / ".join(value for value in (admin_name, admin_ip) if value)
@@ -2263,17 +3763,20 @@ class MainWindow(QMainWindow):
             "ACTIVE": (
                 f"已连接中央配置；当前机器为 Admin（{admin_desc}）。"
                 if is_current_admin
-                else f"已连接中央配置；当前 Admin：{admin_desc}；当前机器为普通客户端。"
+                else f"当前 Admin：{admin_desc}；本机为普通客户端，可修改并保存本机配置、同步中央配置，但不能发布中央仓库；可随时抢占 Admin。"
             ),
-            "UNASSIGNED": "中央配置已存在，但当前没有 Admin；只有完成 Admin 初始化的机器才能发布配置。",
-            "UNINITIALIZED": "中央配置尚未初始化；请由 Admin 机器首次初始化，其他机器只能读取配置。",
+            "UNASSIGNED": "中央配置当前没有 Admin；任意客户端都可以抢占 Admin。",
+            "UNINITIALIZED": "中央共享配置尚未初始化；请先抢占 Admin，再用本机配置发布。",
             "OFFLINE": "中央配置暂时不可用，将继续使用本机缓存。",
             "DISABLED": "中央配置同步已关闭。",
-            "UNKNOWN": "尚未读取中央配置。",
+            "LOCAL_ONLY": "当前仅使用本机缓存；启动未访问中央仓库。本机配置可修改保存，可手动同步中央配置；发布中央仓库需要 Admin。",
+            "UNKNOWN": "尚未读取中央配置；本机配置可修改保存，发布中央仓库需要 Admin。",
         }
+        rendered_status = self._rt(labels.get(status, status))
+        rendered_message = self._rt(message) if message else ""
         self.central_status.setText(
-            f"状态：{labels.get(status, status)}"
-            + (f"\n{message}" if message else "")
+            f"{self._t('状态')}：{rendered_status}"
+            + (f"\n{rendered_message}" if rendered_message else "")
         )
         self.central_status.setStyleSheet(
             "color:#006B52;background:#EAF8F2;"
@@ -2281,6 +3784,79 @@ class MainWindow(QMainWindow):
             if status in {"ACTIVE", "UNASSIGNED"}
             else "color:#7A4B00;background:#FFF6DF;"
             "border:1px solid #E7C66A;border-radius:6px;padding:8px;"
+        )
+
+        # v4.2.13: Admin ownership polling can call set_admin_mode() long after
+        # the original language switch.  Re-apply presentation translation to
+        # the pages whose status/help text is rebuilt by that callback so English
+        # mode cannot regress to Chinese every 10 seconds.
+        if getattr(self, "language", "zh_CN") == "en_US":
+            element_page = getattr(self, "element_management_page", None)
+            if element_page is not None:
+                retranslate_qt_tree(element_page, self.language)
+            graphics_page = getattr(self, "graphics_workspace_page", None)
+            if graphics_page is not None and hasattr(graphics_page, "set_language"):
+                try:
+                    graphics_page.set_language(self.language)
+                except Exception:
+                    pass
+
+    def _schedule_central_admin_ownership_check(self):
+        """Poll only instance.json while this app session is the current Admin."""
+        if not self._is_current_central_admin():
+            return
+        worker = self._central_admin_check_worker
+        if worker is not None and worker.isRunning():
+            return
+        worker = CentralAdminOwnershipWorker(dict(self.cfg), self)
+        self._central_admin_check_worker = worker
+        worker.checked.connect(self._on_central_admin_ownership_checked)
+        worker.failed.connect(self._on_central_admin_ownership_check_failed)
+        worker.finished.connect(self._clear_central_admin_check_worker)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _clear_central_admin_check_worker(self):
+        self._central_admin_check_worker = None
+
+    def _on_central_admin_ownership_check_failed(self, _message: str):
+        # A temporary network failure must not silently change local settings
+        # or role.  Any publish/release action still performs a server-side
+        # ownership check and therefore remains safe.
+        return
+
+    def _on_central_admin_ownership_checked(self, remote_state: dict):
+        if not self._is_current_central_admin():
+            return
+        previous = dict(self.cfg.get("_central_sync", {}) or {})
+        local_id = str(self.cfg.get("machine_id") or "")
+        local_epoch = int(self._admin_session_epoch or 0)
+        remote_id = str(remote_state.get("admin_machine_id") or "")
+        remote_epoch = int(remote_state.get("admin_epoch", 0) or 0)
+        still_owner = (
+            str(remote_state.get("status") or "").upper() == "ACTIVE"
+            and remote_id == local_id
+            and remote_epoch == local_epoch
+        )
+        if still_owner:
+            # Update only ownership metadata.  Never merge central business
+            # configuration in this background check.
+            previous.update(remote_state)
+            previous["message"] = "Admin 权限有效；后台仅检查所有权，未自动同步中央配置。"
+            self.cfg["_central_sync"] = previous
+            self._refresh_central_status()
+            return
+
+        self.cfg["_central_sync"] = dict(remote_state or {})
+        self._admin_session_epoch = None
+        self._refresh_central_status()
+        admin_name = str(remote_state.get("admin_machine_name") or "").strip()
+        admin_ip = str(remote_state.get("admin_ip") or "").strip()
+        owner = " / ".join(x for x in (admin_name, admin_ip) if x) or "其他客户端"
+        QMessageBox.information(
+            self,
+            "Admin 权限已释放",
+            f"Admin 权限已被 {owner} 接管。当前程序已自动切换为普通客户端；本机配置仍可修改保存和同步，但不能发布到中央仓库。",
         )
 
     def _current_central_config(self) -> dict:
@@ -2304,22 +3880,65 @@ class MainWindow(QMainWindow):
     def _save_central_connection(self):
         self.cfg["central_config"] = self._current_central_config()
 
-    def sync_central_configuration(self):
+    def save_central_connection_locally(self):
+        """Save only the central endpoint locally; do not connect to it."""
         try:
             self._save_central_connection()
+            save_settings(self.cfg)
+            self._refresh_graphics_workspace_configuration()
+            self.statusBar().showMessage(
+                self._rt("中央仓库连接配置已保存到本机；未访问服务器。"),
+                3500,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "保存中央仓库连接配置失败", str(exc))
+
+    def sync_central_configuration(self):
+        """Manually pull central shared settings and overwrite local cache."""
+        try:
+            self._save_central_connection()
+            # Save the operator-entered central endpoint locally even if the
+            # remote server is temporarily unavailable.
+            save_settings(self.cfg)
             sync_central_settings(self.cfg, raise_on_error=True)
             save_settings(self.cfg)
+            self._adopt_admin_session_if_owner()
+            self._refresh_shared_configuration_views()
             self._refresh_central_status()
             QMessageBox.information(
                 self,
                 "读取中央配置",
-                "中央配置读取完成。请重新打开软件，使数据库、文件服务器和图元标记全部重新载入。",
+                "中央配置已手动同步，并已覆盖本机的图元标记、数据库和文件服务器缓存。",
             )
         except Exception as exc:
+            self._refresh_central_status()
             QMessageBox.warning(self, "读取中央配置失败", str(exc))
 
-    def _collect_shared_configuration(self):
-        """Collect the currently visible values before central publish/init."""
+    def _refresh_shared_configuration_views(self):
+        """Refresh visible editors after an explicit central-cache overwrite."""
+        db_cfg = dict(self.cfg.get("db", {}) or {})
+        for key, edit in getattr(self, "db_edits", {}).items():
+            edit.setText(str(db_cfg.get(key, "")))
+
+        ssh_cfg = dict(self.cfg.get("ssh", {}) or {})
+        for key, edit in getattr(self, "ssh_edits", {}).items():
+            edit.setText(str(ssh_cfg.get(key, "")))
+
+        element_page = getattr(self, "element_management_page", None)
+        if element_page is not None and hasattr(element_page, "reload_local_cache"):
+            element_page.reload_local_cache()
+        self._refresh_graphics_workspace_configuration()
+
+    def _refresh_graphics_workspace_configuration(self):
+        page = getattr(self, "graphics_workspace_page", None)
+        if page is not None and hasattr(page, "refresh_from_main_configuration"):
+            try:
+                page.refresh_from_main_configuration()
+            except Exception as exc:
+                self.log(f"图形工作区配置桥接失败：{exc}")
+
+    def _collect_shared_configuration(self, *, save_local=True):
+        """Collect visible shared values; optionally persist them locally."""
         if hasattr(self, "central_edits"):
             self._save_central_connection()
         if hasattr(self, "db_edits"):
@@ -2334,20 +3953,16 @@ class MainWindow(QMainWindow):
                 "remote_directory": element_page.directory_edit.text().strip(),
                 "records": [dict(row) for row in element_page.rows],
             }
-        save_settings(self.cfg)
+        if save_local:
+            save_settings(self.cfg)
 
     def publish_current_configuration(self):
-        """Publish database, file-server and element-mark settings together."""
+        """Explicitly publish all current local shared settings."""
         try:
-            state = dict(self.cfg.get("_central_sync", {}) or {})
-            machine_id = str(self.cfg.get("machine_id") or "")
-            admin_id = str(state.get("admin_machine_id") or "")
-            if state.get("status") != "ACTIVE" or machine_id != admin_id:
-                raise ValueError(
-                    "当前机器不是 Admin，不能发布中央配置。"
-                    "请先点击【初始化并设为 Admin】或由现有 Admin 释放权限。"
-                )
-            self._collect_shared_configuration()
+            # Do not require a prior sync.  The explicit publish operation
+            # contacts the server and CentralConfigClient verifies that this
+            # machine is still the recorded Admin before writing anything.
+            self._collect_shared_configuration(save_local=False)
             version = publish_central_settings(self.cfg)
             save_settings(self.cfg)
             self._refresh_central_status()
@@ -2358,6 +3973,43 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             QMessageBox.warning(self, "中央配置发布失败", str(exc))
+
+    def takeover_central_configuration(self):
+        """Explicitly take over Admin ownership without syncing shared config."""
+        state = dict(self.cfg.get("_central_sync", {}) or {})
+        admin_name = str(state.get("admin_machine_name") or "").strip()
+        admin_ip = str(state.get("admin_ip") or "").strip()
+        current_owner = " / ".join(x for x in (admin_name, admin_ip) if x)
+        detail = (
+            f"当前已知 Admin：{current_owner}。\n\n" if current_owner else ""
+        )
+        answer = QMessageBox.question(
+            self,
+            "抢占 Admin 权限",
+            detail
+            + "抢占后，本机将立即获得共享配置的修改、保存和发布权限；"
+            "原 Admin 程序检测到所有权变化后会自动降级。\n\n"
+            "本操作只变更 Admin 所有权，不会自动同步或发布数据库、服务器、图元配置。是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self._save_central_connection()
+            save_settings(self.cfg)
+            epoch = takeover_central_admin(self.cfg)
+            self._admin_session_epoch = int(epoch)
+            save_settings(self.cfg)
+            self._refresh_central_status()
+            QMessageBox.information(
+                self,
+                "Admin 抢占完成",
+                "当前机器已成为 Admin。现在可以修改并保存本机共享配置，再按需点击【保存并发布全部配置】。"
+                "\n本次抢占没有自动同步或发布任何中央业务配置。",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "抢占 Admin 失败", str(exc))
 
     def initialize_central_configuration(self):
         answer = QMessageBox.question(
@@ -2374,13 +4026,20 @@ class MainWindow(QMainWindow):
             self._collect_shared_configuration()
             save_settings(self.cfg)
             version = initialize_central_settings(self.cfg)
+            # Compatibility path; normal v4.1.45 UI uses Admin takeover.
+            try:
+                state = read_central_admin_state(self.cfg)
+                self.cfg["_central_sync"].update(state)
+                self._adopt_admin_session_if_owner()
+            except Exception:
+                pass
             save_settings(self.cfg)
             self._refresh_central_status()
             QMessageBox.information(
                 self,
                 "中央配置初始化完成",
                 f"当前机器已成为 Admin，中央配置版本：{version}。\n"
-                "其他机器首次启动时会自动读取这些配置。",
+                "其他机器只有手动点击【连接并同步中央配置】时才会读取这些配置。",
             )
         except Exception as exc:
             QMessageBox.warning(self, "中央配置初始化失败", str(exc))
@@ -2397,6 +4056,7 @@ class MainWindow(QMainWindow):
             return
         try:
             version = release_central_admin(self.cfg)
+            self._admin_session_epoch = None
             save_settings(self.cfg)
             self._refresh_central_status()
             QMessageBox.information(
@@ -2443,7 +4103,9 @@ class MainWindow(QMainWindow):
                 "FEEDER": "Feeder Model" if self.language == "en_US" else "馈线模型",
                 "POLE_SWITCH": "Pole Switch Model" if self.language == "en_US" else "柱上开关模型",
                 "TRANSFORMER": "Pole Transformer Model" if self.language == "en_US" else "柱上变压器模型",
+                "FUSE": "Fuse Model" if self.language == "en_US" else "熔断器模型",
                 "MASTER_STATION": "Master Station Device Association" if self.language == "en_US" else "配网主站设备关联",
+                "BULK": "Multi-Model Association" if self.language == "en_US" else "一键多模型关联",
             }
             for i in range(self.module_combo.count()):
                 module_id = str(self.module_combo.itemData(i) or "").upper()
@@ -2467,7 +4129,7 @@ class MainWindow(QMainWindow):
             self.header_subtitle_label.setText(
                 "Distribution Model Manager · Model Validation · Validated Candidates · Safe Write-back"
                 if self.language == "en_US"
-                else f"{APP_NAME_EN} · 模型校验 · 校验候选 · 安全回写"
+                else f"{APP_NAME_EN} · 模型关联 · 图形处理 · 安全回写"
             )
         if hasattr(self, "header_version_label"):
             self.header_version_label.setText(
@@ -2476,6 +4138,14 @@ class MainWindow(QMainWindow):
                 else f"{APP_EDITION} · {APP_SITE_LABEL}  |  v{APP_VERSION}"
             )
         self._update_scope_notice()
+        if hasattr(self, "graphics_workspace_page") and hasattr(self.graphics_workspace_page, "set_language"):
+            try:
+                self.graphics_workspace_page.set_language(self.language)
+            except Exception:
+                pass
+        # Central status contains dynamic Admin ownership text and must be rebuilt
+        # after every language change instead of keeping the previous-language string.
+        self._refresh_central_status()
         if hasattr(self, "about_text_label"):
             if self.language == "en_US":
                 self.about_text_label.setText(
@@ -2520,6 +4190,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # v4.2.13: several pages rebuild status/help text after the first
+        # language pass (central Admin state, element cache state, RMU settings,
+        # embedded graphics pages).  Run one final presentation-only pass so a
+        # dynamic Chinese value cannot remain visible in English mode.
+        retranslate_qt_tree(self, self.language)
+
         if save:
             save_settings(self.cfg)
             self.log(
@@ -2527,6 +4203,18 @@ class MainWindow(QMainWindow):
                 if self.language == "en_US"
                 else "语言已切换为简体中文。"
             )
+
+    def _set_workspace_status(self, text):
+        if hasattr(self, "workspace_status"):
+            self.workspace_status.setText(self._rt(text))
+
+    def _set_batch_status(self, text):
+        if hasattr(self, "batch_status_label"):
+            self.batch_status_label.setText(self._rt(text))
+
+    def _set_batch_source_status(self, text):
+        if hasattr(self, "batch_source_status"):
+            self.batch_source_status.setText(self._rt(text))
 
     def _t(self, text):
         return tr(text, self.language)
@@ -2564,7 +4252,7 @@ class MainWindow(QMainWindow):
         quick_text = QLabel(
             "1. 在【数据库】页面确认 Oracle 配置，可先点击‘测试数据库连接’。\n"
             "2. 进入【模型工作区】，选择 RMU 环网柜模型或馈线模型，并选择 G 文件/目录。\n"
-            "3. RMU 模块配置名称来源与设备表/域；馈线模块配置 13503 馈线段表及域号。\n"
+            "3. 各独立模块页面直接展示完整的设备识别、数据库关联、安全校验和 G 文件回写逻辑；固定工程表号/域号不再作为模型页面编辑项。\n"
             "4. 点击底部【模型校验】执行校验，并生成 HTML / CSV 以及可关联清单。\n"
             "5. 在可关联清单中勾选需要处理的设备或 FeedLine，然后点击【执行模型关联】。\n"
             "6. 执行前会显示最终确认摘要；模型关联只修改 Workspace 中的安全副本，原始 G 文件不变。\n"
@@ -2579,7 +4267,7 @@ class MainWindow(QMainWindow):
         rmu_naming_text = QLabel(
             "• 环网柜只有在矩形框内同时存在 CBreakerDis、ZhaiWaiJieDiDaoZha、BusDis 三类图元时才识别为 RMU。\n"
             "• RMU 柜型：柜内 Y*/Q* 文字与 CBreakerDis.devref 模板结构独立计算并交叉验证；devref 不解析任何现场图元关键字，只检查 Y 类同模板、Q 类同模板且 Y/Q 模板可区分。有效 devref 与文字冲突时仍以 devref 为准，同时 WARN。\n"
-             "• 环网柜名称默认搜索矩形框上方，也可以多选右侧、左侧或下方；多选时按距离只保留最近的一个 Text。\n"
+             "• 环网柜名称只识别完整位于矩形框外、且在矩形框上方的 Text；右侧、左侧、下方和全局兜底全部禁用，上方找不到名称即 FAIL；框内 Text 永不作为柜名。\n"
              "• 每个 RMU 只保留一个名称；每个 Text 全局只分配给距离最近的一个环网柜。\n"
             "• 绿色依据 G 文件属性判断：lc=0,255,0 或 lcc=#00ff00；实际名称读取 Text 的 ts 属性。\n"
             "• 环网柜名称始终按字符串处理，支持 42646、RMU-42646、ABC_123、JED-RMU-01、ABC.01 等常见工程名称，不会强制转换成数字。"
@@ -2593,9 +4281,10 @@ class MainWindow(QMainWindow):
         naming_text = QLabel(
             "【设备名称规则（固定）】\n"
             "• CBreakerDis：只使用环网柜内图上文字；XML p_NameString 完全不参与设备命名。\n"
-            "• ZhaiWaiJieDiDaoZha：逻辑名称=配对开关图上名称+D。\n"
+            "• ZhaiWaiJieDiDaoZha：与柜内开关一对一配对；Y1/Y2/Y3 优先匹配数据库 NAME=KY1/KY2/KY3，Q1/Q2/Q3 优先匹配 NAME=KQ1/KQ2/KQ3；NAME 找不到时再用原 CODE=Y1D/Y2D/Y3D/Q1D/Q2D/Q3D 兜底。\n"
             "• BusDis：逻辑名称固定为 BUS。\n"
-            "• 图上开关名称必须与当前 RMU 下数据库 CODE 唯一对应；失败时明确告警对应环网柜并提示检查命名方式。\n\n"
+            "• CBreakerDis：图上识别到 Y1/Y2/Y3/Q1/Q2/Q3... 后，先在当前 RMU 且当前文件名馈线内匹配数据库 NAME；NAME 找不到时才用同值 CODE 兜底。\n"
+            "• 所有柜内目标设备必须同时满足：COMBINED_ID 属于当前唯一 RMU，FEEDER_ID 等于文件名确定的图级馈线；任一不满足都禁止关联。\n\n"
             "【RMU 柜型识别】\n"
             "• 第一套：柜内 Y1/Y2/Y3... 每个计 L；Q1/Q2/Q3... 每个计 T，形成文字柜型。\n"
             "• 第二套：只分析 CBreakerDis.devref 模板结构；Y 类同模板、Q 类同模板，且 Y/Q 模板必须不同。ZhaiWaiJieDiDaoZha/RMU_ES 等不参与，且不解析任何现场 devref 名称含义。\n"
@@ -2603,8 +4292,8 @@ class MainWindow(QMainWindow):
 "• 环网柜数据库记录为 0 条或多条时，环网柜汇总直接 FAIL。若 G 设备未关联，禁止自动关联。\n"
             "• 环网柜数据库记录为 0 条或多条，但 G 设备已经有人为 KeyID 时，不丢弃该模型：继续反解当前设备并校验 CODE/图上逻辑名称 和实际所属环网柜。\n"
             "• 唯一 RMU 下，若旧 KeyID 实际属于其它环网柜，使用紫色 RMU_RELINK 标记，可以覆盖旧模型并重新关联到当前 RMU；只有 RMU 本身不唯一时才继续作为硬阻断。\n"
-            "• RMU 模块中的馈线和 facID 判断已完全关闭，支持合成图和环网图；但同一 G 图内环网柜名称重复时，重复名称对应的环网柜全部阻断。馈线模型关联由独立的【馈线模型】模块处理。\n"
-            "• 唯一 RMU 下以当前数据库为准：CODE/图上逻辑名称 和目标设备 RMU 归属通过后，即使旧设备 ID、表号、域号、KeyID 已失效，也允许重新关联。"
+            "• RMU 模块不再通过任何设备反推馈线；所有图统一只认 G 文件名 → 405/substation → 13500/dms_feeder_device 得到的唯一 FEEDER_ID。RMU 本身不属于该馈线时禁止关联。\n"
+            "• 唯一 RMU 下以当前数据库为准：NAME 优先/CODE 兜底匹配、目标设备 RMU 归属和 FEEDER_ID 均通过后，即使旧设备 ID、表号、域号、KeyID 已失效，也允许重新关联。"
         )
         naming_text.setWordWrap(True)
         naming_layout.addWidget(naming_text)
@@ -2613,12 +4302,11 @@ class MainWindow(QMainWindow):
         db_rule = QGroupBox("数据库强制校验")
         db_layout = QVBoxLayout(db_rule)
         db_text = QLabel(
-            "• 13502 / CBreakerDis：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称；NAME 不参与判断。\n"
-            "• 13514 / ZhaiWaiJieDiDaoZha：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称（开关名称+D）；NAME 不参与判断。\n"
-            "• 13506 / BusDis：CODE 不得为空，且 CODE 必须等于当前图上逻辑设备名称；图上文字模式固定为 BUS；NAME 不参与判断。\n"
-            "• 设备校验以 G 文件实际存在的图元为准，只查询这些图元最终需要的 CODE。\n"
-            "• 数据库中与 G 图元 CODE 无关的其它设备记录忽略，不参与数量比较。\n"
-            "• G 图元需要的 CODE 不存在，或同一 CODE 匹配到多条记录时，才作为设备模型错误并阻止关联。"
+            "• 13502 / CBreakerDis：先在当前 RMU + 当前文件名馈线范围内按 NAME 精确匹配；NAME 为 0 条时才按同值 CODE 精确兜底；NAME 或 CODE 多条都禁止自动选择。\n"
+            "• 13514 / ZhaiWaiJieDiDaoZha：Y* 优先 NAME=KY*，Q* 优先 NAME=KQ*；NAME 为 0 条时才使用原 CODE=Y*D/Q*D 兜底。\n"
+            "• 13506 / BusDis：逻辑 CODE 固定 BUS，并同样强制校验当前 RMU 与当前文件名馈线归属。\n"
+            "• 目标 RMU 必须属于文件名确定的 FEEDER_ID；柜内设备必须同时属于该 RMU 且 FEEDER_ID 相同。\n"
+            "• 匹配只针对 G 文件实际存在的图元；其它无关数据库记录不参与数量比较。"
         )
         db_text.setWordWrap(True)
         db_layout.addWidget(db_text)
@@ -2627,13 +4315,13 @@ class MainWindow(QMainWindow):
         colors = QGroupBox("状态颜色说明")
         colors_layout = QVBoxLayout(colors)
         colors_text = QLabel(
-            "绿色 PASS：设备模型校验正常；已有人工关联且 CODE、环网柜归属均正确时也可显示绿色。\n"
+            "绿色 PASS：设备模型校验正常；已有人工关联且名称匹配、环网柜归属、馈线归属均正确时也可显示绿色。\n"
             "黄色 WARN：设备尚未关联，但满足自动关联条件。\n"
             "黄色 WARN：设备当前未关联，但数据库当前目标唯一有效，可以关联。\n"
             "橙色 RELINK：旧设备 ID、KeyID、表号或域号已过期/错误，或旧设备被删除重建；数据库当前目标唯一有效，可以重新关联。\n"
             "紫色 RMU_RELINK：旧 KeyID 指向其他环网柜，但当前 RMU 内已唯一确定正确设备，可以强制重新关联。\n"
-            "红色 FAIL：数据库当前事实无法唯一确定安全目标，例如 RMU 0/多条、CODE 0/多条、CODE/图上逻辑名称 不一致、目标设备不属于当前 RMU、Expected KeyID/BV_ID 无效。\n"
-            "RMU 报告不输出馈线状态；馈线模块使用独立报告。"
+            "红色 FAIL：数据库当前事实无法唯一确定安全目标，例如 RMU 0/多条、NAME/CODE 0/多条、目标设备不属于当前 RMU、设备不属于文件名馈线、Expected KeyID/BV_ID 无效。\n"
+            "RMU 报告会携带文件名确定的图级馈线，并把它作为 RMU 与柜内设备的硬约束。"
         )
         colors_text.setWordWrap(True)
         colors_layout.addWidget(colors_text)
@@ -2648,7 +4336,7 @@ class MainWindow(QMainWindow):
             "app=6500000, voltype=数据库设备BV_ID, p_ReportType=1, state=41, keyid=Expected KeyID\n\n"
             "BusDis 回写：\n"
             "app=6500000, voltype=数据库设备BV_ID, p_ReportType=1, state=15, keyid=Expected KeyID\n\n"
-            "模型关联不会修改图上设备名称，也不会读取 XML p_NameString 作为设备名称。馈线信息完全不参与判断；数据库当前唯一 RMU 和 CODE/图上逻辑名称 匹配结果是关联依据。旧 KeyID 仅用于识别 PASS / RELINK / RMU_RELINK，不会阻止修复已经过期的模型关联。"
+            "模型关联不会修改图上设备名称，也不会读取 XML p_NameString 作为设备名称。图级馈线只由文件名确定；RMU 必须属于该馈线，柜内设备必须同时属于当前 RMU 和该馈线。CBreakerDis 按 NAME 优先/CODE 兜底，接地刀闸按 KY*/KQ* NAME 优先、Y*D/Q*D CODE 兜底。旧 KeyID 仅用于识别 PASS / RELINK / RMU_RELINK，不会阻止修复已经过期的模型关联。"
         )
         assoc_text.setWordWrap(True)
         assoc_layout.addWidget(assoc_text)
@@ -2715,7 +4403,7 @@ class MainWindow(QMainWindow):
         safety_text = QLabel(
             "• 执行模型关联前建议保留 G 文件源目录的额外工程备份。\n"
             "• 如果图上设备文字本身错误，图上文字模式也会得到错误名称，因此必须查看报告后再执行关联。\n"
-            "• 表号和域号可以修改，但修改后会直接影响 Expected KeyID，请仅在确认数据库定义后调整。\n"
+            "• 模型页面不再提供表号/域号编辑入口；固定工程定义只以关联逻辑说明呈现，避免误操作改变 Expected KeyID。\n"
             "• 本工具为团队内部工程工具，不建议在未验证的数据库或未知版本 G 文件上直接批量回写。"
         )
         safety_text.setWordWrap(True)
@@ -2790,6 +4478,12 @@ class MainWindow(QMainWindow):
         self.apply_btn.setEnabled(False)
         if hasattr(self, "association_table"):
             self._clear_association_table()
+
+        current_module_id = str(self.module_combo.currentData() or "").upper()
+        if hasattr(self, "batch_candidate_box"):
+            self.batch_candidate_box.setVisible(
+                current_module_id == "BULK" and bool(self._batch_candidate_rows)
+            )
         self.refresh_operation_state()
 
         # 文件来源属于模型工作区公共能力。RMU 与 FEEDER 共用完全相同的
@@ -2802,9 +4496,10 @@ class MainWindow(QMainWindow):
         if (
             hasattr(self, "input_source_combo")
             and self._current_input_source() == "SSH"
+            and current_module_id != "BULK"
         ):
-            self.workspace_status.setText(self._rt(
-                "SSH只读模式：RMU/馈线模型校验都会重新下载服务器当前最新 G 文件。"
+            self._set_workspace_status(self._rt(
+                "SSH只读模式：模型校验会重新下载服务器当前最新 G 文件。"
             ))
             apply_status_style(self.workspace_status, False)
 
@@ -2820,9 +4515,9 @@ class MainWindow(QMainWindow):
         ).upper()
         notices = {
             "RMU": (
-                "RMU: 支持单线图、合成图和环网图。"
+                "RMU: 单线图会校验图级馈线；合成图、环网图保持原 RMU 逻辑。"
                 if self.language != "en_US"
-                else "RMU: single-line, composite, and ring-network drawings are supported."
+                else "RMU: single-line drawings validate graph feeder membership; composite/ring drawings keep the historical RMU behavior."
             ),
             "FEEDER": (
                 "馈线：必须使用单馈线图。"
@@ -2839,19 +4534,78 @@ class MainWindow(QMainWindow):
                 if self.language != "en_US"
                 else "Pole transformer: a single-feeder drawing is required."
             ),
+            "FUSE": (
+                "熔断器：必须使用单馈线图。"
+                if self.language != "en_US"
+                else "Fuse: a single-feeder drawing is required."
+            ),
             "MASTER_STATION": (
                 "配网主站设备：必须使用单馈线图。"
                 if self.language != "en_US"
                 else "Master-station devices: a single-feeder drawing is required."
+            ),
+            "BULK": (
+                "一键多模型关联：勾选需要执行的独立模型，先统一校验，再确认候选并按固定顺序安全关联。"
+                if self.language != "en_US"
+                else "Multi-model association: select independent modules, validate them together, confirm candidates, then apply them in the fixed safe order."
             ),
         }
         self.workspace_scope_notice.setText(
             notices.get(module_id, "请选择模型类型。" if self.language != "en_US" else "Select a model type.")
         )
 
+    def _handle_validate_action(self):
+        module_id = str(self.module_combo.currentData() or "").upper()
+        if module_id == "BULK":
+            self.start_batch_validation()
+        else:
+            self.start_job("VALIDATE")
+
+    def _handle_apply_action(self):
+        module_id = str(self.module_combo.currentData() or "").upper()
+        if module_id == "BULK":
+            self.apply_batch_association()
+        else:
+            self.apply_association()
+
     def refresh_operation_state(self):
-        module_id = self.module_combo.currentData()
+        module_id = str(self.module_combo.currentData() or "").upper()
         if not module_id:
+            return
+
+        # Always restore the shared Model Workspace action captions when the
+        # operator switches between independent and one-click modes.
+        self.validate_btn.setText(
+            "Model Validation" if self.language == "en_US" else "模型校验"
+        )
+        self.apply_btn.setText(
+            "Execute Association" if self.language == "en_US" else "执行模型关联"
+        )
+
+        if module_id == "BULK":
+            self.validate_btn.setEnabled(True)
+            selected = self._selected_batch_module_ids()
+            selected_candidates = len(self._selected_batch_candidate_ids())
+            validated = bool(
+                self.current_batch_validation
+                and selected
+                and list(self.current_batch_validation.get("selected_modules", []) or []) == selected
+            )
+            self.apply_btn.setEnabled(bool(validated and selected_candidates > 0))
+            if validated:
+                self._set_workspace_status(
+                    f"一键多模型校验已完成；当前已确认 {selected_candidates} 个待关联对象。"
+                    if self.language != "en_US"
+                    else f"Multi-model validation is complete; {selected_candidates} association candidates are currently selected."
+                )
+                apply_status_style(self.workspace_status, True)
+            else:
+                self._set_workspace_status(
+                    "请选择需要调用的独立模型模块，然后先点击【模型校验】。"
+                    if self.language != "en_US"
+                    else "Select the independent model modules, then run Model Validation first."
+                )
+                apply_status_style(self.workspace_status, False)
             return
 
         module = self.modules[module_id]
@@ -2862,7 +4616,7 @@ class MainWindow(QMainWindow):
             and self.current_preview.get("changes_by_file")
         )
 
-        if str(module_id).upper() == "RMU":
+        if module_id == "RMU":
             selected_count = len(
                 self._selected_association_keys()
                 if hasattr(self, "association_table")
@@ -2880,13 +4634,21 @@ class MainWindow(QMainWindow):
                 module.supports("APPLY_ASSOCIATION") and has_preview
             )
 
-        self.workspace_status.setText(self._t("请选择下方具体任务按钮执行。"))
+        self._set_workspace_status(self._t("请选择下方具体任务按钮执行。"))
         apply_status_style(self.workspace_status, False)
 
     def _set_task_buttons_enabled(self, enabled: bool):
-        module_id = self.module_combo.currentData()
-        module = self.modules.get(module_id) if module_id else None
+        module_id = str(self.module_combo.currentData() or "").upper()
 
+        if module_id == "BULK":
+            self.validate_btn.setEnabled(bool(enabled))
+            if not enabled:
+                self.apply_btn.setEnabled(False)
+            else:
+                self.refresh_operation_state()
+            return
+
+        module = self.modules.get(module_id) if module_id else None
         self.validate_btn.setEnabled(
             bool(enabled and module and module.supports("VALIDATE"))
         )
@@ -2904,7 +4666,13 @@ class MainWindow(QMainWindow):
             )
         ).upper()
 
-        if report_kind == "FEEDER":
+        if report_kind == "BATCH":
+            labels = {
+                "validation": ("打开批量校验汇总 HTML", "打开批量校验汇总 CSV", ""),
+                "association": ("打开批量关联汇总 HTML", "打开批量关联汇总 CSV", ""),
+                "preview": ("打开批量汇总 HTML", "打开批量汇总 CSV", ""),
+            }
+        elif report_kind == "FEEDER":
             labels = {
                 "validation": (
                     "打开校验 HTML",
@@ -2958,6 +4726,12 @@ class MainWindow(QMainWindow):
                     "",
                 ),
             }
+        elif report_kind == "FUSE":
+            labels = {
+                "validation": ("打开校验 HTML", "打开校验熔断器 CSV", ""),
+                "preview": ("打开预览 HTML", "打开预览熔断器 CSV", ""),
+                "association": ("打开关联结果 HTML", "打开关联结果熔断器 CSV", ""),
+            }
         elif report_kind == "MASTER_STATION":
             labels = {
                 "validation": ("打开校验 HTML", "打开校验配网主站设备 CSV", ""),
@@ -3005,13 +4779,20 @@ class MainWindow(QMainWindow):
             button.setEnabled(exists)
             button.setVisible(exists)
 
+        self._update_batch_artifact_buttons(task_type)
+
     # ------------------------------------------------------------
     # Logging
     # ------------------------------------------------------------
     def log(self, text):
+        message = translate_runtime_text(text, self.language)
         if hasattr(self, "log_edit"):
-            self.log_edit.appendPlainText(translate_runtime_text(text, self.language))
+            self.log_edit.appendPlainText(message)
             scrollbar = self.log_edit.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+        if getattr(self, "_batch_task_active", False) and hasattr(self, "batch_log_edit"):
+            self.batch_log_edit.appendPlainText(message)
+            scrollbar = self.batch_log_edit.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
 
 
@@ -3038,7 +4819,7 @@ class MainWindow(QMainWindow):
             return
 
         message = f"上次记录的文件或目录不存在：\n{value}"
-        self.workspace_status.setText("上次记录的文件或目录不存在，请重新选择。")
+        self._set_workspace_status("上次记录的文件或目录不存在，请重新选择。")
         apply_status_style(self.workspace_status, False)
         self.log(message)
 
@@ -3063,23 +4844,12 @@ class MainWindow(QMainWindow):
         db["port"] = int(db["port"])
         return db
 
-    def _publish_central_if_admin(self):
-        state = dict(self.cfg.get("_central_sync", {}) or {})
-        machine_id = str(self.cfg.get("machine_id") or "")
-        owner = str(state.get("admin_machine_id") or "")
-        if state.get("status") != "ACTIVE" or not machine_id or owner != machine_id:
-            return None
-        version = publish_central_settings(self.cfg)
-        save_settings(self.cfg)
-        self._refresh_central_status()
-        return version
-
     def save_database_settings(self):
         try:
             self.cfg["db"] = self.current_db_config()
             save_settings(self.cfg)
-            self._publish_central_if_admin()
-            self.statusBar().showMessage(self._rt("数据库配置已保存。"), 3000)
+            self._refresh_graphics_workspace_configuration()
+            self.statusBar().showMessage(self._rt("数据库配置已保存到本机。"), 3000)
         except Exception as exc:
             QMessageBox.critical(self, "数据库配置", str(exc))
 
@@ -3092,7 +4862,7 @@ class MainWindow(QMainWindow):
 
             self.cfg["db"] = config
             save_settings(self.cfg)
-            self._publish_central_if_admin()
+            self._refresh_graphics_workspace_configuration()
 
             self.db_status.setText(self._t("数据库连接正常"))
             self.db_status.show()
@@ -3149,18 +4919,18 @@ class MainWindow(QMainWindow):
         """Persist the current SSH/SFTP read-only source configuration.
 
         This mirrors the database module's explicit save action.  The password
-        is stored in the same workspace config JSON used by the existing
-        database settings so the last user-entered values are restored on the
-        next application launch.
+        and endpoint are stored in the local per-user cache (with the legacy
+        workspace config kept as a secondary copy), so they are restored on
+        the next application launch without contacting the server.
         """
         try:
             cfg = self._current_ssh_config()
             self.cfg["ssh"] = cfg
             self.cfg["input_source"] = "SSH"
             save_settings(self.cfg)
-            self._publish_central_if_admin()
+            self._refresh_graphics_workspace_configuration()
             self._set_ssh_connection_status(
-                "SSH 配置已保存；下次启动将自动恢复最后一次保存的输入。",
+                "SSH 配置已保存到本机；下次启动将自动恢复最后一次保存的输入。",
                 "success",
             )
             self.statusBar().showMessage(self._rt("SSH 配置已保存。"), 3000)
@@ -3203,17 +4973,32 @@ class MainWindow(QMainWindow):
             )
         return self.input_edit.text().strip()
 
+    def _invalidate_batch_snapshot(self, reason=""):
+        had_batch = self.current_batch_validation is not None
+        self.current_batch_validation = None
+        self.current_batch_settings = {}
+        self.current_batch_files = []
+        self.current_batch_source_info = {}
+        if hasattr(self, "batch_apply_btn"):
+            self.batch_apply_btn.setEnabled(False)
+        if hasattr(self, "batch_candidate_table"):
+            self._clear_batch_candidate_table()
+        if had_batch and hasattr(self, "batch_status_label"):
+            self._set_batch_status(
+                f"批量校验结果已失效：{reason or '输入或配置已变化'}"
+            )
+
     def _invalidate_validation_snapshot(self, reason=""):
-        if self.current_preview is None:
-            return
+        had_single = self.current_preview is not None
         self.current_preview = None
         self.current_snapshot_files = []
         self.current_source_info = {}
         self.apply_btn.setEnabled(False)
         self._clear_association_table()
-        if reason:
+        self._invalidate_batch_snapshot(reason)
+        if reason and had_single:
             self.workspace_status.show()
-            self.workspace_status.setText(self._rt(
+            self._set_workspace_status(self._rt(
                 f"输入已变化，请重新执行模型校验：{reason}"
             ))
             apply_status_style(self.workspace_status, False)
@@ -3231,14 +5016,17 @@ class MainWindow(QMainWindow):
                 "SSH只读模式：请先测试连接或刷新 G 文件列表。",
                 "neutral",
             )
-            self.workspace_status.setText(self._t(
+            self._set_workspace_status(self._t(
                 "SSH模式：请选择远程 G 文件后执行模型校验。"
             ))
         else:
-            self.workspace_status.setText(self._t(
+            self._set_workspace_status(self._t(
                 "本地模式：请选择 G 文件或目录。"
             ))
         apply_status_style(self.workspace_status, False)
+        if hasattr(self, "batch_input_source_combo"):
+            self._sync_batch_source_controls_from_workspace()
+            self._update_batch_input_source_stack_height()
 
     def _update_input_source_stack_height(self):
         """Only reserve the height needed by the currently visible source page."""
@@ -3285,9 +5073,6 @@ class MainWindow(QMainWindow):
         text: str,
         state: str = "neutral",
     ):
-        if not hasattr(self, "ssh_connection_status"):
-            return
-
         styles = {
             "success": (
                 "background:#E8F7F1; color:#006B52; "
@@ -3306,11 +5091,16 @@ class MainWindow(QMainWindow):
                 "border:1px solid #D7E0E4;"
             ),
         }
-        self.ssh_connection_status.setText(self._rt(text))
-        self.ssh_connection_status.setStyleSheet(
+        style = (
             styles.get(state, styles["neutral"])
             + "border-radius:6px; padding:7px 10px;"
         )
+        for attr in ("ssh_connection_status", "batch_ssh_connection_status"):
+            label = getattr(self, attr, None)
+            if label is None:
+                continue
+            label.setText(self._rt(text))
+            label.setStyleSheet(style)
 
     def test_ssh_connection(self):
         try:
@@ -3332,6 +5122,7 @@ class MainWindow(QMainWindow):
             self.cfg["ssh"] = cfg
             self.cfg["input_source"] = "SSH"
             save_settings(self.cfg)
+            self._refresh_graphics_workspace_configuration()
             self._set_ssh_connection_status(
                 "SSH/SFTP 连接正常；远程文件源为只读。",
                 "success",
@@ -3385,6 +5176,8 @@ class MainWindow(QMainWindow):
             "working",
         )
         self.refresh_ssh_btn.setEnabled(False)
+        if hasattr(self, "batch_refresh_ssh_btn"):
+            self.batch_refresh_ssh_btn.setEnabled(False)
         self._remote_refresh_started_at = datetime.now()
         self._remote_refresh_timer.start()
 
@@ -3477,6 +5270,7 @@ class MainWindow(QMainWindow):
                     )
                 self._set_ssh_connection_status(status, "success")
                 self.log(log_text)
+                self._sync_remote_selection_checks()
                 self._update_remote_count_label()
                 return
 
@@ -3492,7 +5286,12 @@ class MainWindow(QMainWindow):
             # path. _rebuild_remote_file_table() also suppresses continuous
             # header ResizeToContents work while the 2k+ rows are populated.
             self._rebuild_remote_file_table()
+            self._rebuild_batch_remote_file_table()
             self._apply_remote_file_filter(self.remote_search_edit.text())
+            if hasattr(self, "batch_remote_search_edit"):
+                self._apply_batch_remote_file_filter(
+                    self.batch_remote_search_edit.text()
+                )
             self._invalidate_validation_snapshot("远程 G 文件列表已变化")
             self._set_ssh_connection_status(
                 f"SSH/SFTP 连接正常；远程文件源为只读。"
@@ -3521,6 +5320,8 @@ class MainWindow(QMainWindow):
         self._remote_refresh_timer.stop()
         self._remote_refresh_started_at = None
         self.refresh_ssh_btn.setEnabled(True)
+        if hasattr(self, "batch_refresh_ssh_btn"):
+            self.batch_refresh_ssh_btn.setEnabled(True)
         worker = self.remote_list_worker
         self.remote_list_worker = None
         if worker is not None:
@@ -3637,12 +5438,83 @@ class MainWindow(QMainWindow):
         self._update_remote_count_label()
 
     def _update_remote_count_label(self):
-        visible_count = self._remote_visible_count
-        self.remote_count_label.setText(
-            (f"Total {len(self.remote_file_rows)} | Visible {visible_count} | Selected {len(self.remote_selected_names)}")
-            if self.language == "en_US" else
-            (f"总数 {len(self.remote_file_rows)} | 当前显示 {visible_count} | 已选择 {len(self.remote_selected_names)}")
-        )
+        selected_count = len(self.remote_selected_names)
+        if hasattr(self, "remote_count_label"):
+            visible_count = self._remote_visible_count
+            self.remote_count_label.setText(
+                (f"Total {len(self.remote_file_rows)} | Visible {visible_count} | Selected {selected_count}")
+                if self.language == "en_US" else
+                (f"总数 {len(self.remote_file_rows)} | 当前显示 {visible_count} | 已选择 {selected_count}")
+            )
+        if hasattr(self, "batch_remote_count_label"):
+            visible_count = self._batch_remote_visible_count
+            self.batch_remote_count_label.setText(
+                (f"Total {len(self.remote_file_rows)} | Visible {visible_count} | Selected {selected_count}")
+                if self.language == "en_US" else
+                (f"总数 {len(self.remote_file_rows)} | 当前显示 {visible_count} | 已选择 {selected_count}")
+            )
+
+    def _sync_remote_check_state(self, name: str, checked: bool, skip_workspace=False, skip_batch=False):
+        """Keep workspace/batch remote checkboxes consistent without rebuilding tables."""
+        target_state = Qt.Checked if checked else Qt.Unchecked
+
+        if not skip_workspace and hasattr(self, "remote_file_table"):
+            row = self._remote_row_by_name.get(name)
+            if row is not None:
+                self._remote_table_populating = True
+                self.remote_file_table.blockSignals(True)
+                try:
+                    item = self.remote_file_table.item(row, 0)
+                    if item is not None and item.checkState() != target_state:
+                        item.setCheckState(target_state)
+                finally:
+                    self.remote_file_table.blockSignals(False)
+                    self._remote_table_populating = False
+
+        if not skip_batch and hasattr(self, "batch_remote_file_table"):
+            row = self._batch_remote_row_by_name.get(name)
+            if row is not None:
+                self._batch_remote_table_populating = True
+                self.batch_remote_file_table.blockSignals(True)
+                try:
+                    item = self.batch_remote_file_table.item(row, 0)
+                    if item is not None and item.checkState() != target_state:
+                        item.setCheckState(target_state)
+                finally:
+                    self.batch_remote_file_table.blockSignals(False)
+                    self._batch_remote_table_populating = False
+
+    def _sync_remote_selection_checks(self):
+        """Synchronize every existing checkbox with shared remote_selected_names."""
+        if hasattr(self, "remote_file_table"):
+            self._remote_table_populating = True
+            self.remote_file_table.blockSignals(True)
+            try:
+                for name, row in self._remote_row_by_name.items():
+                    item = self.remote_file_table.item(row, 0)
+                    if item is None:
+                        continue
+                    state = Qt.Checked if name in self.remote_selected_names else Qt.Unchecked
+                    if item.checkState() != state:
+                        item.setCheckState(state)
+            finally:
+                self.remote_file_table.blockSignals(False)
+                self._remote_table_populating = False
+
+        if hasattr(self, "batch_remote_file_table"):
+            self._batch_remote_table_populating = True
+            self.batch_remote_file_table.blockSignals(True)
+            try:
+                for name, row in self._batch_remote_row_by_name.items():
+                    item = self.batch_remote_file_table.item(row, 0)
+                    if item is None:
+                        continue
+                    state = Qt.Checked if name in self.remote_selected_names else Qt.Unchecked
+                    if item.checkState() != state:
+                        item.setCheckState(state)
+            finally:
+                self.batch_remote_file_table.blockSignals(False)
+                self._batch_remote_table_populating = False
 
     def _on_remote_file_item_changed(self, item):
         if self._remote_table_populating or item.column() != 0:
@@ -3650,10 +5522,16 @@ class MainWindow(QMainWindow):
         name = str(item.data(Qt.UserRole) or "")
         if not name:
             return
-        if item.checkState() == Qt.Checked:
+        checked = item.checkState() == Qt.Checked
+        if checked:
             self.remote_selected_names.add(name)
         else:
             self.remote_selected_names.discard(name)
+        self._sync_remote_check_state(
+            name,
+            checked,
+            skip_workspace=True,
+        )
         self._update_remote_count_label()
         self._invalidate_validation_snapshot(
             "远程 G 文件选择发生变化"
@@ -3684,6 +5562,8 @@ class MainWindow(QMainWindow):
             table.setUpdatesEnabled(True)
             table.blockSignals(False)
             self._remote_table_populating = False
+
+        self._sync_remote_selection_checks()
         table.viewport().update()
         self._update_remote_count_label()
         self._invalidate_validation_snapshot(
@@ -3694,13 +5574,14 @@ class MainWindow(QMainWindow):
         """Clear selection/search without rebuilding thousands of table cells."""
         self.remote_selected_names.clear()
         self._remote_filter_timer.stop()
+        if hasattr(self, "_batch_remote_filter_timer"):
+            self._batch_remote_filter_timer.stop()
 
         table = self.remote_file_table
         self._remote_table_populating = True
         table.blockSignals(True)
         table.setUpdatesEnabled(False)
         try:
-            # Reuse the existing table items. Only checked rows are changed.
             for row in range(table.rowCount()):
                 item = table.item(row, 0)
                 if item is not None and item.checkState() != Qt.Unchecked:
@@ -3712,7 +5593,6 @@ class MainWindow(QMainWindow):
             finally:
                 self.remote_search_edit.blockSignals(False)
 
-            # Clearing the search means every already-created row is visible.
             for row in range(table.rowCount()):
                 if table.isRowHidden(row):
                     table.setRowHidden(row, False)
@@ -3721,7 +5601,21 @@ class MainWindow(QMainWindow):
             table.blockSignals(False)
             self._remote_table_populating = False
 
+        if hasattr(self, "batch_remote_search_edit"):
+            self.batch_remote_search_edit.blockSignals(True)
+            try:
+                self.batch_remote_search_edit.clear()
+            finally:
+                self.batch_remote_search_edit.blockSignals(False)
+
+        self._sync_remote_selection_checks()
+        if hasattr(self, "batch_remote_file_table"):
+            for row in range(self.batch_remote_file_table.rowCount()):
+                self.batch_remote_file_table.setRowHidden(row, False)
+            self.batch_remote_file_table.viewport().update()
+
         self._remote_visible_count = len(self.remote_file_rows)
+        self._batch_remote_visible_count = len(self.remote_file_rows)
         table.viewport().update()
         self._update_remote_count_label()
         self._invalidate_validation_snapshot(
@@ -3893,9 +5787,685 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "打开本次运行目录失败", str(exc))
 
     # ------------------------------------------------------------
+    # Batch model association
+    # ------------------------------------------------------------
+    def _clear_batch_candidate_table(self):
+        self._batch_candidate_rows = []
+        table = getattr(self, "batch_candidate_table", None)
+        if table is not None:
+            self._batch_candidate_table_populating = True
+            try:
+                table.setRowCount(0)
+            finally:
+                self._batch_candidate_table_populating = False
+        if hasattr(self, "batch_candidate_box"):
+            self.batch_candidate_box.setVisible(False)
+        if hasattr(self, "batch_candidate_summary"):
+            self.batch_candidate_summary.setText(
+                "完成批量校验后，这里会列出所有可安全关联对象。"
+            )
+        if hasattr(self, "batch_apply_btn"):
+            self.batch_apply_btn.setText("执行模型关联")
+            self.batch_apply_btn.setEnabled(False)
+
+    def _populate_batch_candidate_table(self, candidate_rows):
+        self._batch_candidate_rows = [dict(row or {}) for row in (candidate_rows or [])]
+        table = getattr(self, "batch_candidate_table", None)
+        if table is None:
+            return
+
+        # Batch-only UI optimization: constructing thousands of QTableWidget
+        # items while sorting/signals/repaints are active can stall the GUI for
+        # several seconds.  Freeze those expensive services during population;
+        # independent module tables are not changed.
+        sorting_enabled = table.isSortingEnabled()
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        table.setSortingEnabled(False)
+        self._batch_candidate_table_populating = True
+        try:
+            table.clearContents()
+            table.setRowCount(len(self._batch_candidate_rows))
+            for row_index, row in enumerate(self._batch_candidate_rows):
+                blocked = bool(row.get("blocked"))
+                select_item = QTableWidgetItem("" if not blocked else "—")
+                select_item.setData(Qt.UserRole, str(row.get("candidate_id") or ""))
+                if blocked:
+                    select_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                    select_item.setToolTip(str(row.get("reason") or "跨模块写回冲突"))
+                else:
+                    select_item.setFlags(
+                        Qt.ItemIsSelectable
+                        | Qt.ItemIsEnabled
+                        | Qt.ItemIsUserCheckable
+                    )
+                    select_item.setCheckState(Qt.Checked)
+                table.setItem(row_index, 0, select_item)
+
+                values = [
+                    row.get("module_name", ""),
+                    row.get("g_file", ""),
+                    row.get("xml_id", ""),
+                    row.get("device_name", ""),
+                    row.get("database_target", ""),
+                    row.get("status", ""),
+                    row.get("reason", ""),
+                ]
+                for offset, value in enumerate(values, start=1):
+                    text = str(value or "")
+                    item = QTableWidgetItem(text)
+                    # Tooltips are useful for long status/reason fields but
+                    # need not duplicate every short cell in very large runs.
+                    if offset >= 6 or len(text) > 48:
+                        item.setToolTip(text)
+                    table.setItem(row_index, offset, item)
+        finally:
+            self._batch_candidate_table_populating = False
+            table.setSortingEnabled(sorting_enabled)
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
+            table.viewport().update()
+
+        if hasattr(self, "batch_candidate_box"):
+            self.batch_candidate_box.setVisible(bool(self._batch_candidate_rows))
+        self._update_batch_candidate_selection_state()
+
+    def _selected_batch_candidate_ids(self):
+        table = getattr(self, "batch_candidate_table", None)
+        if table is None:
+            return []
+        selected = []
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            if item is None:
+                continue
+            if not (item.flags() & Qt.ItemIsUserCheckable):
+                continue
+            if item.checkState() == Qt.Checked:
+                candidate_id = str(item.data(Qt.UserRole) or "")
+                if candidate_id:
+                    selected.append(candidate_id)
+        return selected
+
+    def _set_all_batch_candidates_checked(self, checked):
+        table = getattr(self, "batch_candidate_table", None)
+        if table is None:
+            return
+        self._batch_candidate_table_populating = True
+        try:
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)
+                if item is None or not (item.flags() & Qt.ItemIsUserCheckable):
+                    continue
+                item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        finally:
+            self._batch_candidate_table_populating = False
+        self._update_batch_candidate_selection_state()
+
+    def _on_batch_candidate_item_changed(self, item):
+        if self._batch_candidate_table_populating:
+            return
+        if item is not None and item.column() == 0:
+            self._update_batch_candidate_selection_state()
+
+    def _update_batch_candidate_selection_state(self):
+        rows = list(self._batch_candidate_rows or [])
+        safe_count = sum(1 for row in rows if not row.get("blocked"))
+        blocked_count = sum(1 for row in rows if row.get("blocked"))
+        selected_count = len(self._selected_batch_candidate_ids())
+
+        if hasattr(self, "batch_candidate_summary"):
+            parts = [f"可安全关联 {safe_count} 项", f"已选 {selected_count} 项"]
+            if blocked_count:
+                parts.append(f"跨模块冲突 {blocked_count} 项（已禁用）")
+            self.batch_candidate_summary.setText("；".join(parts) + "。")
+
+        if hasattr(self, "batch_apply_btn"):
+            self.batch_apply_btn.setText(
+                f"执行模型关联（已选 {selected_count} 项）"
+                if selected_count
+                else "执行模型关联"
+            )
+            can_apply = bool(
+                self.current_batch_validation
+                and selected_count > 0
+                and not getattr(self, "_batch_task_active", False)
+            )
+            self.batch_apply_btn.setEnabled(can_apply)
+
+    def _selected_batch_module_ids(self):
+        selected = []
+        for module_id in BATCH_MODULE_ORDER:
+            check = getattr(self, "batch_module_checks", {}).get(module_id)
+            if check is not None and check.isChecked():
+                selected.append(module_id)
+        return selected
+
+    def _update_batch_single_line_notice(self):
+        label = getattr(self, "batch_single_line_notice", None)
+        if label is None:
+            return
+        selected = set(self._selected_batch_module_ids())
+        restricted = [
+            BATCH_MODULE_LABELS[mid]
+            for mid in ("MASTER_STATION", "FEEDER")
+            if mid in selected
+        ]
+        if self.language == "en_US":
+            english_names = {
+                "配网主站设备": "Master-station Devices",
+                "馈线": "Feeder",
+            }
+            if restricted:
+                selected_names = ", ".join(
+                    english_names.get(name, name) for name in restricted
+                )
+                label.setText(
+                    f"Single-line drawing restriction: selected [{selected_names}]. "
+                    "Master-station Devices and Feeder association are allowed only on single-line drawings. "
+                    "Composite or ring drawings are blocked during batch validation and are not written back. "
+                    "Other modules continue to use their existing independent-module rules."
+                )
+            else:
+                label.setText(
+                    "Drawing scope reminder: Master-station Devices and Feeder association are allowed only on "
+                    "single-line drawings. If selected later, composite or ring drawings will be blocked during "
+                    "batch validation and will not be written back. Other modules continue to use their existing rules."
+                )
+        elif restricted:
+            label.setText(
+                "单线图限制：当前已选择【" + "、".join(restricted) + "】。"
+                "配网主站设备和馈线模型只允许在单线图中执行关联；"
+                "如果 G 图是合成图或环网图，这些模块会在批量校验阶段自动阻断，不会写回。"
+                "其他模块仍按各自独立模块的现有规则校验。"
+            )
+        else:
+            label.setText(
+                "图纸范围提醒：配网主站设备、馈线模型只允许在单线图中执行关联；"
+                "如果后续勾选这两个模块，合成图或环网图会在批量校验阶段自动阻断，不会写回。"
+                "其他模块仍按各自独立模块的现有规则校验。"
+            )
+
+    def _on_batch_module_selection_changed(self, *_args):
+        selected = self._selected_batch_module_ids()
+        self.cfg["batch_modules"] = list(selected)
+        save_settings(self.cfg)
+        self._invalidate_batch_snapshot("批量模块选择已变化")
+        self._update_batch_single_line_notice()
+        if hasattr(self, "batch_status_label"):
+            if selected:
+                names = "、".join(
+                    BATCH_MODULE_LABELS.get(mid, mid) for mid in selected
+                )
+                self._set_batch_status(f"已选择：{names}；请执行批量校验。")
+            else:
+                self._set_batch_status("尚未选择批量关联模块")
+
+    def _collect_batch_settings(self, selected_module_ids, input_is_directory=False):
+        settings_by_module = {}
+        for module_id in selected_module_ids:
+            widget = self.module_widgets[module_id]
+            settings = widget.collect_settings()
+            settings["element_catalog"] = dict(
+                self.cfg.get("element_catalog", {}) or {}
+            )
+            settings["input_is_directory"] = bool(input_is_directory)
+            settings["language"] = self.language
+            settings_by_module[module_id] = settings
+        return settings_by_module
+
+    @staticmethod
+    def _batch_settings_equal(left, right):
+        try:
+            return json.dumps(left, sort_keys=True, ensure_ascii=False, default=str) == json.dumps(
+                right, sort_keys=True, ensure_ascii=False, default=str
+            )
+        except Exception:
+            return left == right
+
+    def start_batch_validation(self):
+        # v4.2.1: one-click multi-model association is integrated into the
+        # Model Workspace and therefore uses the same source controls directly.
+        selected = self._selected_batch_module_ids()
+        if not selected:
+            QMessageBox.warning(
+                self,
+                "批量模型关联",
+                "请至少勾选一个需要批量执行的关联模块。",
+            )
+            return
+
+        source_type = self._current_input_source()
+        files = []
+        source_info = {}
+        input_is_directory = False
+        input_description = ""
+        ssh_snapshot_request = {}
+
+        try:
+            # Collect module settings before starting the worker so invalid UI
+            # values are reported immediately and no background task is started.
+            if source_type == "LOCAL":
+                input_value = self.input_edit.text().strip()
+                if not input_value:
+                    raise ValueError("请先选择 G 文件或目录。")
+                input_path = Path(input_value)
+                if not input_path.exists():
+                    raise ValueError(f"文件或目录不存在：\n{input_value}")
+                input_is_directory = input_path.is_dir()
+                files = self.resolve_files(input_value)
+                if not files:
+                    raise ValueError("当前文件/目录中没有找到可处理的 .g 文件。")
+                source_info = {
+                    "source_type": "LOCAL",
+                    "read_only_source": True,
+                    "input_path": input_value,
+                    "files": [str(Path(p).resolve()) for p in files],
+                }
+                input_description = input_value
+                self.cfg["input_path"] = input_value
+            elif source_type == "SSH":
+                ssh_cfg = self._current_ssh_config()
+                current_signature = (
+                    ssh_cfg["host"],
+                    int(ssh_cfg["port"]),
+                    ssh_cfg["username"],
+                    ssh_cfg["remote_directory"],
+                )
+                if self.remote_list_signature != current_signature:
+                    raise ValueError(
+                        "SSH服务器地址、用户名或远程目录与当前文件列表不一致。"
+                        "请点击【刷新 G 文件列表】后重新选择文件。"
+                    )
+                selected_remote_files = list(self._selected_remote_files())
+                if not selected_remote_files:
+                    raise ValueError(
+                        "请先加载 SSH 服务器 G 文件列表，并勾选至少一个远程 .g 文件。"
+                    )
+                # v4.2.15: batch-only SSH snapshot preparation is deferred to
+                # BatchValidationWorker.  Single-model SSH behavior is left
+                # unchanged.  Capture the exact selected RemoteGFile objects
+                # now so later UI changes cannot alter the running batch.
+                ssh_snapshot_request = {
+                    **ssh_cfg,
+                    "selected_files": selected_remote_files,
+                }
+                self.cfg["ssh"] = ssh_cfg
+                input_description = self._current_input_description()
+            else:
+                raise ValueError(f"不支持的文件来源：{source_type}")
+
+            settings_by_module = self._collect_batch_settings(
+                selected,
+                input_is_directory=input_is_directory,
+            )
+            self.cfg["batch_modules"] = list(selected)
+            self.cfg["db"] = self.current_db_config()
+            self.cfg["input_source"] = source_type
+            save_settings(self.cfg)
+        except Exception as exc:
+            QMessageBox.critical(self, "批量校验配置错误", str(exc))
+            return
+
+        try:
+            run_dir = create_run_directory()
+        except Exception as exc:
+            QMessageBox.critical(self, "创建 Workspace 运行目录失败", str(exc))
+            return
+
+        self._set_task_buttons_enabled(False)
+        self._batch_task_active = True
+        if hasattr(self, "batch_log_edit"):
+            self.batch_log_edit.clear()
+        if hasattr(self, "batch_progress_bar"):
+            self.batch_progress_bar.setValue(0)
+            self.batch_progress_message.setText("批量校验准备中……")
+        self.batch_validate_btn.setEnabled(False)
+        self.batch_apply_btn.setEnabled(False)
+        self.current_batch_validation = None
+        self._clear_batch_candidate_table()
+        self.current_batch_settings = {}
+        self.current_batch_files = []
+        self.current_batch_source_info = {}
+        self.current_preview = None
+        self.current_snapshot_files = []
+        self.current_source_info = {}
+        self._clear_association_table()
+        self.log_edit.clear()
+        self.current_artifacts = {}
+        self.current_task_type = ""
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_message.setText(self._t("批量校验准备中……"))
+        self._set_batch_status("正在准备批量校验输入……")
+
+        # v4.2.15 batch-only stability: SSH download/hash/final-stat sweep
+        # no longer runs in the GUI thread.  Local files are already known;
+        # SSH files will be prepared by BatchValidationWorker.
+        if source_type == "LOCAL" and not files:
+            self._batch_task_active = False
+            self._set_task_buttons_enabled(True)
+            self.batch_validate_btn.setEnabled(True)
+            QMessageBox.critical(self, "批量文件准备失败", "没有可用于本次批量模型校验的 G 文件。")
+            return
+
+        if source_type == "SSH":
+            self.workspace_status.show()
+            self._set_workspace_status(
+                "正在后台获取 SSH 服务器本次批量校验的最新稳定 G 文件快照……"
+            )
+            apply_status_style(self.workspace_status, False)
+
+        # Settings were already collected before the worker starts.  Batch
+        # mode freezes this exact settings snapshot and does not re-read UI
+        # controls after the asynchronous SSH preparation.
+        self.current_run_dir = run_dir
+        self.current_batch_files = list(files)
+        self.current_batch_source_info = dict(source_info)
+        self.current_batch_settings = settings_by_module
+
+        names = "、".join(BATCH_MODULE_LABELS.get(mid, mid) for mid in selected)
+        self.log(f"\n开始批量模型校验：{names}")
+        self.log(
+            f"文件来源：{source_type} | 本次输入：{input_description or self._current_input_description()}"
+        )
+        self._set_batch_status(f"正在批量校验：{names}")
+
+        report_root = Path(run_dir) / "batch_validation_report"
+        self.batch_worker = BatchValidationWorker(
+            self.current_db_config(),
+            self.modules,
+            files,
+            settings_by_module,
+            selected,
+            report_root,
+            self.language,
+            source_info=source_info,
+            ssh_snapshot_request=ssh_snapshot_request,
+            run_dir=run_dir,
+        )
+        self.batch_worker.log.connect(self.on_worker_log)
+        self.batch_worker.progress.connect(self.on_worker_progress)
+        self.batch_worker.completed.connect(self._on_batch_validation_completed)
+        self.batch_worker.failed.connect(self._on_batch_job_failed)
+        self.batch_worker.start()
+
+    def _on_batch_validation_completed(self, bundle):
+        self._set_task_buttons_enabled(True)
+        self.batch_validate_btn.setEnabled(True)
+        self._batch_task_active = False
+        self.current_batch_validation = dict(bundle or {})
+        prepared_files = list(self.current_batch_validation.pop("_batch_prepared_files", []) or [])
+        prepared_source_info = dict(self.current_batch_validation.pop("_batch_source_info", {}) or {})
+        if prepared_files:
+            self.current_batch_files = [Path(value) for value in prepared_files]
+        if prepared_source_info:
+            self.current_batch_source_info = prepared_source_info
+        rows = list(self.current_batch_validation.get("module_rows", []) or [])
+        conflicts = list(self.current_batch_validation.get("conflicts", []) or [])
+        candidate_rows = list(
+            self.current_batch_validation.get("candidate_rows", []) or []
+        )
+        total_candidates = sum(int(row.get("candidate_count", 0) or 0) for row in rows)
+        blocked_candidates = sum(1 for row in candidate_rows if row.get("blocked"))
+        safe_candidates = max(0, len(candidate_rows) - blocked_candidates)
+
+        self._populate_batch_candidate_table(candidate_rows)
+        if total_candidates > 0:
+            if blocked_candidates:
+                self._set_batch_status(
+                    f"批量校验完成：共 {total_candidates} 个候选；可安全关联 {safe_candidates} 个，"
+                    f"跨模块冲突 {blocked_candidates} 个已禁用。请确认下方待关联设备。"
+                )
+                self.log(
+                    f"批量确认：{blocked_candidates} 个跨模块冲突对象已在待关联列表中禁用，"
+                    f"其余 {safe_candidates} 个安全对象可由用户确认后执行。"
+                )
+            else:
+                self._set_batch_status(
+                    f"批量校验完成：{len(rows)} 个模块，共 {total_candidates} 个可关联对象；"
+                    "请在下方确认待关联设备。"
+                )
+        else:
+            self._set_batch_status(
+                f"批量校验完成：{len(rows)} 个模块均无需要写回的对象。"
+            )
+            self._clear_batch_candidate_table()
+
+        self.current_artifacts = {
+            "task_type": "validation",
+            "report_kind": "BATCH",
+            "operation": "BATCH_VALIDATE",
+            "run_dir": str(self.current_run_dir),
+            "report_dir": str(Path(self.current_run_dir) / "batch_validation_report"),
+            "html": str(self.current_batch_validation.get("summary_html", "")),
+            "rmu_csv": str(self.current_batch_validation.get("summary_csv", "")),
+            "device_csv": "",
+            "change_log_csv": "",
+            "source_info": dict(self.current_batch_source_info or {}),
+        }
+        self.current_task_type = "validation"
+        self.progress_bar.setValue(100)
+        self.progress_message.setText("批量模型校验完成")
+        if hasattr(self, "batch_progress_bar"):
+            self.batch_progress_bar.setValue(100)
+            self.batch_progress_message.setText("批量模型校验完成")
+        self.workspace_status.show()
+        self._set_workspace_status("批量模型校验完成")
+        apply_status_style(self.workspace_status, not bool(conflicts))
+        self._update_artifact_buttons("validation")
+
+    def apply_batch_association(self):
+        # The integrated BULK pseudo model shares the Model Workspace source
+        # controls; the frozen validation snapshot below still guards edits.
+        bundle = self.current_batch_validation
+        if not bundle:
+            QMessageBox.information(
+                self,
+                "批量模型关联",
+                "请先执行批量校验。",
+            )
+            return
+
+        selected = list(bundle.get("selected_modules", []) or [])
+        current_selected = self._selected_batch_module_ids()
+        if selected != current_selected:
+            self._invalidate_batch_snapshot("批量模块选择已变化")
+            QMessageBox.warning(self, "批量模型关联", "批量模块选择已变化，请重新执行批量校验。")
+            return
+
+        try:
+            input_is_directory = False
+            if str(self.current_batch_source_info.get("source_type", "")).upper() == "LOCAL":
+                input_path = Path(str(self.current_batch_source_info.get("input_path", "") or ""))
+                input_is_directory = input_path.is_dir() if str(input_path) else False
+            current_settings = self._collect_batch_settings(
+                selected,
+                input_is_directory=input_is_directory,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "批量模型关联", str(exc))
+            return
+
+        if not self._batch_settings_equal(current_settings, self.current_batch_settings):
+            self._invalidate_batch_snapshot("模块配置已变化")
+            QMessageBox.warning(
+                self,
+                "批量模型关联",
+                "批量校验后模块配置发生变化。为避免使用旧结果，请重新执行批量校验。",
+            )
+            return
+
+        selected_candidate_ids = self._selected_batch_candidate_ids()
+        if not selected_candidate_ids:
+            QMessageBox.information(
+                self,
+                "批量模型关联",
+                "请在‘待关联设备’列表中至少勾选一个可关联对象。",
+            )
+            return
+
+        # v4.2.15: do not deepcopy/filter the complete validation bundle on
+        # the GUI thread.  Count the already-confirmed candidate rows here for
+        # the confirmation dialog, then let BatchAssociationExecutionWorker
+        # prepare the execution bundle in the background.
+        selected_id_set = {str(value) for value in selected_candidate_ids}
+        selected_rows = [
+            row for row in (bundle.get("candidate_rows", []) or [])
+            if str(row.get("candidate_id") or "") in selected_id_set
+        ]
+        if any(bool(row.get("blocked")) for row in selected_rows):
+            QMessageBox.critical(
+                self,
+                "批量模型关联",
+                "当前选中的对象包含跨模块写回冲突，禁止执行。请重新确认待关联设备。",
+            )
+            return
+
+        counts_by_module = {}
+        for row in selected_rows:
+            module_id = str(row.get("module_id") or "")
+            counts_by_module[module_id] = counts_by_module.get(module_id, 0) + 1
+        total_candidates = len(selected_rows)
+        if total_candidates <= 0:
+            QMessageBox.information(self, "批量模型关联", "当前没有勾选任何可关联对象。")
+            return
+
+        detail_lines = [
+            f"{BATCH_MODULE_LABELS.get(module_id, module_id)}: {counts_by_module[module_id]} 个"
+            for module_id in BATCH_MODULE_ORDER
+            if counts_by_module.get(module_id, 0) > 0
+        ]
+        answer = QMessageBox.question(
+            self,
+            "确认执行批量模型关联",
+            "即将执行你在‘待关联设备’列表中勾选的对象。\n\n"
+            + "\n".join(detail_lines)
+            + f"\n\n合计：{total_candidates} 个。\n"
+            "未勾选对象不会写回；各独立模块仍使用原有数据库复核和安全规则。"
+            "其中配网主站设备、馈线模型只允许单线图，非单线图对象会在校验阶段阻断。"
+            "原始 G 文件不会修改，最终只生成累计安全副本。\n\n是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        self._set_task_buttons_enabled(False)
+        self._batch_task_active = True
+        self.batch_validate_btn.setEnabled(False)
+        self.batch_apply_btn.setEnabled(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_message.setText("正在执行批量模型关联……")
+        if hasattr(self, "batch_progress_bar"):
+            self.batch_progress_bar.setValue(0)
+            self.batch_progress_message.setText("正在执行批量模型关联……")
+        self._set_batch_status("正在执行批量模型关联……")
+
+        output_root = Path(self.current_run_dir) / "batch_g_output"
+        report_root = Path(self.current_run_dir) / "batch_association_result_report"
+        self.batch_worker = BatchAssociationExecutionWorker(
+            self.current_db_config(),
+            self.modules,
+            self.current_batch_files,
+            current_settings,
+            bundle,
+            selected_candidate_ids,
+            output_root,
+            report_root,
+            self.language,
+        )
+        self.batch_worker.log.connect(self.on_worker_log)
+        self.batch_worker.progress.connect(self.on_worker_progress)
+        self.batch_worker.completed.connect(self._on_batch_association_completed)
+        self.batch_worker.failed.connect(self._on_batch_job_failed)
+        self.batch_worker.start()
+
+    def _on_batch_association_completed(self, result):
+        self._set_task_buttons_enabled(True)
+        self.batch_validate_btn.setEnabled(True)
+        self.batch_apply_btn.setEnabled(False)
+        result = dict(result or {})
+        applied = int(result.get("applied_count", 0) or 0)
+        skipped = int(result.get("skipped_count", 0) or 0)
+        selected = int(result.get("selected_count", 0) or 0)
+
+        report_dir = Path(self.current_run_dir) / "batch_association_result_report"
+        try:
+            log_path = report_dir / "console.log"
+            log_text = (
+                self.batch_log_edit.toPlainText()
+                if hasattr(self, "batch_log_edit")
+                else self.log_edit.toPlainText()
+            )
+            log_path.write_text(log_text, encoding="utf-8")
+        except Exception as exc:
+            self.log(f"保存批量关联 console.log 失败：{exc}")
+
+        self.current_artifacts = {
+            "task_type": "association",
+            "report_kind": "BATCH",
+            "operation": "BATCH_APPLY_ASSOCIATION",
+            "run_dir": str(self.current_run_dir),
+            "report_dir": str(report_dir),
+            "html": str(result.get("summary_html", "")),
+            "rmu_csv": str(result.get("summary_csv", "")),
+            "device_csv": "",
+            "change_log_csv": "",
+            "source_info": dict(self.current_batch_source_info or {}),
+            "g_output_dir": str(result.get("output_g_dir", "")),
+        }
+        self.current_task_type = "association"
+        self.current_batch_validation = None
+        self._clear_batch_candidate_table()
+        self.progress_bar.setValue(100)
+        self.progress_message.setText("批量模型关联完成")
+        if hasattr(self, "batch_progress_bar"):
+            self.batch_progress_bar.setValue(100)
+            self.batch_progress_message.setText("批量模型关联完成")
+        self._set_batch_status(
+            f"批量关联完成：候选 {selected}，成功写回 {applied}，执行时跳过 {skipped}。"
+        )
+        self.workspace_status.show()
+        self._set_workspace_status("批量模型关联完成，最终累计安全副本已生成")
+        apply_status_style(self.workspace_status, True)
+        self._update_artifact_buttons("association")
+        self.log(
+            f"批量模型关联完成：候选={selected}，成功写回={applied}，执行时跳过={skipped}；"
+            f"原始 G 文件未修改；最终输出目录={result.get('output_g_dir', '')}"
+        )
+        self._batch_task_active = False
+
+    def _on_batch_job_failed(self, exc):
+        self._batch_task_active = False
+        self._set_task_buttons_enabled(True)
+        if hasattr(self, "batch_validate_btn"):
+            self.batch_validate_btn.setEnabled(True)
+        if hasattr(self, "batch_apply_btn"):
+            self.batch_apply_btn.setEnabled(False)
+        message = str(exc)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_message.setText("批量任务失败")
+        if hasattr(self, "batch_progress_bar"):
+            self.batch_progress_bar.setValue(0)
+            self.batch_progress_message.setText("批量任务失败")
+        self._set_batch_status("批量任务失败，请查看 Console 日志。")
+        self.workspace_status.show()
+        self._set_workspace_status("批量任务失败")
+        apply_status_style(self.workspace_status, False)
+        self.log(f"批量任务失败：{message}")
+        QMessageBox.critical(self, "批量任务失败", message)
+
+    # ------------------------------------------------------------
     # Run model job
     # ------------------------------------------------------------
     def start_job(self, operation):
+        if str(self.module_combo.currentData() or "").upper() == "BULK":
+            if str(operation).upper() == "VALIDATE":
+                self.start_batch_validation()
+            return
         module_id = None
         module = None
         operation_label = str(operation)
@@ -4015,14 +6585,6 @@ class MainWindow(QMainWindow):
                 "allow_feeder_override",
                 "feeder_drawing_mode",
                 "auto_create_missing_sections",
-                "pole_switch_name_numeric",
-                "pole_switch_name_format",
-                "pole_switch_name_colors",
-                "pole_switch_name_has_background",
-                "transformer_name_numeric",
-                "transformer_name_format",
-                "transformer_name_colors",
-                "transformer_name_has_background",
             ):
                 if key in settings:
                     self.cfg[key] = settings[key]
@@ -4047,6 +6609,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        self._invalidate_batch_snapshot("已启动独立模块校验")
         self._set_task_buttons_enabled(False)
         self.current_preview = None
         self.apply_btn.setEnabled(False)
@@ -4070,7 +6633,7 @@ class MainWindow(QMainWindow):
         try:
             if source_type == "SSH":
                 self.workspace_status.show()
-                self.workspace_status.setText(self._rt(
+                self._set_workspace_status(self._rt(
                     "正在从 SSH 服务器重新获取本次选择文件的最新稳定版本……"
                 ))
                 apply_status_style(self.workspace_status, False)
@@ -4104,7 +6667,7 @@ class MainWindow(QMainWindow):
                     "后续模型关联必须使用同一快照，"
                     "不会再次从服务器下载。"
                 )
-                self.workspace_status.setText(
+                self._set_workspace_status(
                     f"SSH最新快照准备完成：{len(files)} 个 G 文件。"
                 )
                 apply_status_style(self.workspace_status, True)
@@ -4121,7 +6684,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._set_task_buttons_enabled(True)
             self.progress_message.setText(self._t("文件准备失败"))
-            self.workspace_status.setText(self._t("文件准备失败"))
+            self._set_workspace_status(self._t("文件准备失败"))
             apply_status_style(self.workspace_status, False)
             self.log(f"文件准备失败：{exc}")
             QMessageBox.critical(
@@ -4132,7 +6695,7 @@ class MainWindow(QMainWindow):
             return
 
         self.workspace_status.show()
-        self.workspace_status.setText(
+        self._set_workspace_status(
             "正在进行 Oracle 数据库预检查……"
         )
         apply_status_style(self.workspace_status, False)
@@ -4161,16 +6724,22 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def on_worker_progress(self, percent, message):
-        self.progress_bar.setValue(max(0, min(100, int(percent))))
+        value = max(0, min(100, int(percent)))
+        self.progress_bar.setValue(value)
+        translated = translate_runtime_text(message, self.language) if message else ""
         if message:
-            self.progress_message.setText(translate_runtime_text(message, self.language))
+            self.progress_message.setText(translated)
+        if getattr(self, "_batch_task_active", False) and hasattr(self, "batch_progress_bar"):
+            self.batch_progress_bar.setValue(value)
+            if translated:
+                self.batch_progress_message.setText(translated)
 
     def on_worker_log(self, text):
         self.log(text)
 
         if "Oracle 预检查：通过" in text:
             self.workspace_status.show()
-            self.workspace_status.setText(self._t("Oracle 数据库预检查通过"))
+            self._set_workspace_status(self._t("Oracle 数据库预检查通过"))
             apply_status_style(self.workspace_status, True)
 
     def _sync_feeder_facid_lock_from_preview(self, preview_data):
@@ -4223,7 +6792,7 @@ class MainWindow(QMainWindow):
             current_module = str(
                 self.module_combo.currentData() or ""
             ).upper()
-            if current_module in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"}:
+            if current_module in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"}:
                 self._populate_association_table(self.current_preview)
                 if current_module == "FEEDER":
                     self.log(
@@ -4240,6 +6809,12 @@ class MainWindow(QMainWindow):
                 elif current_module == "POLE_SWITCH":
                     self.log(
                         f"模型校验已生成可关联柱上开关清单："
+                        f"可关联/重新关联设备 {change_count} 个。"
+                        "请在工作区表格中勾选需要处理的设备。"
+                    )
+                elif current_module == "FUSE":
+                    self.log(
+                        f"模型校验已生成可关联熔断器清单："
                         f"可关联/重新关联设备 {change_count} 个。"
                         "请在工作区表格中勾选需要处理的设备。"
                     )
@@ -4270,7 +6845,7 @@ class MainWindow(QMainWindow):
         self.progress_message.setText(self._rt(
             "模型校验完成，报告和可关联清单已生成"
         ))
-        self.workspace_status.setText(self._t("任务执行完成"))
+        self._set_workspace_status(self._t("任务执行完成"))
         apply_status_style(self.workspace_status, True)
         QTimer.singleShot(3500, self.workspace_status.hide)
 
@@ -4288,11 +6863,14 @@ class MainWindow(QMainWindow):
             self.log(f"柱上开关 CSV：{self.current_artifacts.get('rmu_csv', '')}")
         elif report_kind == "TRANSFORMER":
             self.log(f"柱上变压器 CSV：{self.current_artifacts.get('rmu_csv', '')}")
+        elif report_kind == "FUSE":
+            self.log(f"熔断器 CSV：{self.current_artifacts.get('rmu_csv', '')}")
         elif report_kind == "MASTER_STATION":
             self.log(f"配网主站设备 CSV：{self.current_artifacts.get('rmu_csv', '')}")
         else:
             self.log(f"环网柜 CSV：{self.current_artifacts.get('rmu_csv', '')}")
             self.log(f"设备 CSV：{self.current_artifacts.get('device_csv', '')}")
+        self.log(f"关联失败 CSV：{self.current_artifacts.get('failure_csv', '')}")
 
         # 保存完整的本次 Console 日志到当前任务的实际报告目录。
         try:
@@ -4342,7 +6920,7 @@ class MainWindow(QMainWindow):
         self._set_task_buttons_enabled(True)
         self.progress_message.setText(self._t("任务执行失败"))
         self.workspace_status.show()
-        self.workspace_status.setText(self._t("任务执行失败"))
+        self._set_workspace_status(self._t("任务执行失败"))
         apply_status_style(self.workspace_status, False)
 
         self.log(text)
@@ -4450,7 +7028,7 @@ class MainWindow(QMainWindow):
             return
 
         module_id = str(self.module_combo.currentData() or "").upper()
-        if module_id not in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"}:
+        if module_id not in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"}:
             return
 
         candidate_lookup = self._candidate_change_lookup(preview_data)
@@ -4463,7 +7041,8 @@ class MainWindow(QMainWindow):
             )
             self.association_selection_tip.setText(self._rt(
                 "模型校验完成后，这里展示 G 文件设备明细。只有数据库当前事实已经唯一确定、"
-                "并且需要关联或重新关联的设备才允许勾选。执行模型关联时只处理你勾选的设备。"
+                "并且需要关联或重新关联的设备才允许勾选。若选择“仅 SMART”保护/EFI策略，"
+                "NORMAL 环网柜中已有关联的 EFI 会作为策略强制清理项自动勾选且不可取消。"
             ))
             self.association_filter_label.setText(self._t("环网柜名称筛选"))
             self.rmu_filter_edit.setPlaceholderText(
@@ -4559,6 +7138,33 @@ class MainWindow(QMainWindow):
                     item["_source_file"] = source_file
                     item["_file_name"] = file_name
                     display_rows.append(item)
+        elif module_id == "FUSE":
+            self.association_selection_box.setTitle(
+                self._t("可关联熔断器选择（模型校验结果）")
+            )
+            self.association_selection_tip.setText(self._rt(
+                "这里只展示已经独占分配到最近 Transformer_OH、且需要回写的 FUSE。重复争用同一变压器而未分配成功的 FUSE 只进入报告统计，不进入关联选择。"
+                "已分配 FUSE 锁定最近柱上变压器后，完全按柱上变压器模型的“纯数字 + 白色 + 无背景、上方 → 右方 → 全局、同级最近、最大 200”规则取得名称，再生成 FUSE+变压器名称，最后按图级馈线查询 13513。"
+            ))
+            self.association_filter_label.setText(self._t("熔断器快速筛选"))
+            self.rmu_filter_edit.setPlaceholderText(
+                self._t("输入熔断器名称、最近柱上变压器、馈线ID或XML ID")
+            )
+            headers = [
+                self._t(x) for x in [
+                    "选择", "G文件", "图元XML ID", "最近柱上变压器", "熔断器名称",
+                    "设备距离", "馈线ID", "当前KeyID", "目标设备ID",
+                    "Expected KeyID", "状态", "处理说明",
+                ]
+            ]
+            for report in reports:
+                source_file = str(report.get("g_file", "") or "")
+                file_name = str(report.get("file_name", "") or Path(source_file).name)
+                for fuse_row in report.get("fuse_rows", []) or []:
+                    item = dict(fuse_row)
+                    item["_source_file"] = source_file
+                    item["_file_name"] = file_name
+                    display_rows.append(item)
         elif module_id == "MASTER_STATION":
             self.association_selection_box.setTitle(
                 self._t("可关联配网主站设备选择（模型校验结果）")
@@ -4593,7 +7199,7 @@ class MainWindow(QMainWindow):
                 self._t("可关联柱上变压器选择（模型校验结果）")
             )
             self.association_selection_tip.setText(self._rt(
-                "模型校验完成后，这里展示 TransformerDis 变压器明细。"
+                "模型校验完成后，这里展示 TRANSFORMER_OH 分类标记的柱上变压器明细。"
                 "只有名称、馈线和 13505 目标唯一，且 Expected KeyID 校验通过的对象才允许勾选。"
             ))
             self.association_filter_label.setText(self._t("柱上变压器快速筛选"))
@@ -4633,13 +7239,24 @@ class MainWindow(QMainWindow):
                 check_item = QTableWidgetItem()
                 check_item.setData(Qt.UserRole, key)
                 if is_candidate:
-                    check_item.setFlags(
-                        Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
-                    )
-                    check_item.setCheckState(Qt.Unchecked)
-                    check_item.setToolTip(self._rt(
-                        "数据库当前事实唯一正确，可选择执行关联/重新关联。"
-                    ))
+                    candidate_change = candidate_lookup.get(key, {}) or {}
+                    is_mandatory_policy = bool(candidate_change.get("mandatory_policy_change"))
+                    if is_mandatory_policy:
+                        # Strategy cleanup must accompany SMART_ONLY execution.
+                        # Keep it checked and disable user toggling.
+                        check_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                        check_item.setCheckState(Qt.Checked)
+                        check_item.setToolTip(self._rt(
+                            "仅 SMART 策略强制项：将清除非智能环网柜已存在的保护/EFI关联，不能取消。"
+                        ))
+                    else:
+                        check_item.setFlags(
+                            Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+                        )
+                        check_item.setCheckState(Qt.Unchecked)
+                        check_item.setToolTip(self._rt(
+                            "数据库当前事实唯一正确，可选择执行关联/重新关联。"
+                        ))
                 else:
                     check_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                     check_item.setText("—")
@@ -4690,6 +7307,15 @@ class MainWindow(QMainWindow):
                         row.get("device_model", ""), row.get("devref", ""),
                         row.get("graphical_name", ""), row.get("name_distance", ""),
                         row.get("name_direction", ""),
+                        row.get("current_keyid", ""), row.get("db_device_id", ""),
+                        row.get("expected_keyid", ""), self._row_status_text(row),
+                        self._rt(row.get("reason", "")),
+                    ]
+                elif module_id == "FUSE":
+                    values = [
+                        row["_file_name"], row.get("xml_id", ""),
+                        row.get("nearest_transformer_name", ""), row.get("derived_fuse_name", ""),
+                        row.get("nearest_transformer_distance", ""), row.get("feeder_id", ""),
                         row.get("current_keyid", ""), row.get("db_device_id", ""),
                         row.get("expected_keyid", ""), self._row_status_text(row),
                         self._rt(row.get("reason", "")),
@@ -4833,6 +7459,8 @@ class MainWindow(QMainWindow):
             elif module_id == "TRANSFORMER":
                 # Transformer name, feeder, keyids, target and XML ID.
                 columns = (2, 3, 4, 5, 6, 7, 9, 11)
+            elif module_id == "FUSE":
+                columns = (2, 3, 4, 6, 7, 8, 9, 11)
             elif module_id == "MASTER_STATION":
                 columns = (1, 2, 3, 4, 5, 6, 9, 11)
             else:
@@ -4883,7 +7511,13 @@ class MainWindow(QMainWindow):
                     item is not None
                     and item.flags() & Qt.ItemIsUserCheckable
                 ):
-                    item.setCheckState(Qt.Unchecked)
+                    key = item.data(Qt.UserRole)
+                    mandatory = False
+                    if key and self.current_preview:
+                        candidate = self._candidate_change_lookup(self.current_preview).get(str(key), {})
+                        mandatory = bool(candidate.get("mandatory_policy_change"))
+                    if not mandatory:
+                        item.setCheckState(Qt.Unchecked)
         finally:
             self._association_table_populating = False
         self._update_association_selection_state()
@@ -4962,22 +7596,43 @@ class MainWindow(QMainWindow):
         report_dir,
         module_id,
     ):
-        """Export exact XML attribute before/after values for this write-back."""
+        """Export exact XML before/after values with CN/EN CSV parity."""
         report_dir = Path(report_dir)
         report_dir.mkdir(parents=True, exist_ok=True)
-        path = report_dir / "model_change_log.csv"
 
         fields = [
-            "时间",
-            "模型",
-            "源G文件",
-            "输出G文件",
-            "G图元类型",
-            "图元XML ID",
-            "属性",
-            "修改前",
-            "修改后",
+            "timestamp",
+            "model",
+            "source_g_file",
+            "output_g_file",
+            "object_type",
+            "xml_id",
+            "attribute",
+            "before",
+            "after",
         ]
+        labels_cn = {
+            "timestamp": "时间",
+            "model": "模型",
+            "source_g_file": "源G文件",
+            "output_g_file": "输出G文件",
+            "object_type": "G图元类型",
+            "xml_id": "图元XML ID",
+            "attribute": "属性",
+            "before": "修改前",
+            "after": "修改后",
+        }
+        labels_en = {
+            "timestamp": "Timestamp",
+            "model": "Model",
+            "source_g_file": "Source G File",
+            "output_g_file": "Output G File",
+            "object_type": "G Object Type",
+            "xml_id": "XML ID",
+            "attribute": "Attribute",
+            "before": "Before",
+            "after": "After",
+        }
         rows = []
         stamp = datetime.now().isoformat(timespec="seconds")
 
@@ -4993,34 +7648,36 @@ class MainWindow(QMainWindow):
             for change in result.get("changes", []) or []:
                 before = dict(change.get("before", {}) or {})
                 after = dict(change.get("after", {}) or {})
-                keys = list(after.keys())
-                for key in keys:
+                for key in list(after.keys()):
                     rows.append({
-                        "时间": stamp,
-                        "模型": str(module_id or ""),
-                        "源G文件": source_file,
-                        "输出G文件": output_file,
-                        "G图元类型": str(change.get("tag", "")),
-                        "图元XML ID": str(change.get("xml_id", "")),
-                        "属性": str(key),
-                        "修改前": (
-                            ""
-                            if before.get(key) is None
-                            else str(before.get(key))
-                        ),
-                        "修改后": str(after.get(key, "")),
+                        "timestamp": stamp,
+                        "model": str(module_id or ""),
+                        "source_g_file": source_file,
+                        "output_g_file": output_file,
+                        "object_type": str(change.get("tag", "")),
+                        "xml_id": str(change.get("xml_id", "")),
+                        "attribute": str(key),
+                        "before": "" if before.get(key) is None else str(before.get(key)),
+                        "after": str(after.get(key, "")),
                     })
 
-        with path.open(
-            "w",
-            encoding="utf-8-sig",
-            newline="",
-        ) as file:
-            writer = csv.DictWriter(file, fieldnames=fields)
-            writer.writeheader()
-            writer.writerows(rows)
+        def write_one(path, labels):
+            with Path(path).open("w", encoding="utf-8-sig", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow([labels[field] for field in fields])
+                for row in rows:
+                    writer.writerow([row.get(field, "") for field in fields])
 
-        return str(path)
+        if str(self.language or "zh_CN") == "en_US":
+            path = report_dir / "model_change_log_EN.csv"
+            write_one(path, labels_en)
+            return str(path)
+
+        cn_path = report_dir / "model_change_log_CN.csv"
+        en_path = report_dir / "model_change_log_EN.csv"
+        write_one(cn_path, labels_cn)
+        write_one(en_path, labels_en)
+        return str(cn_path)
 
     @staticmethod
     def _association_status_breakdown(execution_preview):
@@ -5039,6 +7696,9 @@ class MainWindow(QMainWindow):
         return counts
 
     def apply_association(self):
+        if str(self.module_combo.currentData() or "").upper() == "BULK":
+            self.apply_batch_association()
+            return
         if not self.current_preview or not self.current_preview.get("changes_by_file"):
             QMessageBox.information(
                 self,
@@ -5049,7 +7709,7 @@ class MainWindow(QMainWindow):
 
         module_id = str(self.module_combo.currentData() or "")
 
-        if module_id.upper() in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"}:
+        if module_id.upper() in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"}:
             execution_preview = self._selected_association_preview()
             if not execution_preview or not execution_preview.get(
                 "changes_by_file"
@@ -5060,15 +7720,13 @@ class MainWindow(QMainWindow):
                     (
                         "请先在“可关联馈线 / 馈线段选择”表格中勾选至少一个需要处理的馈线对象。"
                         if module_id.upper() == "FEEDER"
-                        else (
-                            "请先在“可关联柱上开关选择”表格中勾选至少一个需要关联或重新关联的设备。"
-                            if module_id.upper() == "POLE_SWITCH"
-                            else (
-                                "请先在“可关联柱上变压器选择”表格中勾选至少一个需要关联或重新关联的设备。"
-                                if module_id.upper() == "TRANSFORMER"
-                                else "请先在“可关联设备选择”表格中勾选至少一个需要关联或重新关联的设备。"
-                            )
-                        )
+                        else "请先在“可关联柱上开关选择”表格中勾选至少一个需要关联或重新关联的设备。"
+                        if module_id.upper() == "POLE_SWITCH"
+                        else "请先在“可关联柱上变压器选择”表格中勾选至少一个需要关联或重新关联的设备。"
+                        if module_id.upper() == "TRANSFORMER"
+                        else "请先在“可关联熔断器选择”表格中勾选至少一个需要关联或重新关联的设备。"
+                        if module_id.upper() == "FUSE"
+                        else "请先在“可关联设备选择”表格中勾选至少一个需要关联或重新关联的设备。"
                     ),
                 )
                 return
@@ -5093,12 +7751,10 @@ class MainWindow(QMainWindow):
             for key, value in sorted(status_counts.items())
         ) or "无"
         skip_label = (
-            "馈线文件"
-            if module_id == "FEEDER"
-            else "柱上开关"
-            if module_id == "POLE_SWITCH"
-            else "柱上变压器"
-            if module_id == "TRANSFORMER"
+            "馈线文件" if module_id == "FEEDER"
+            else "柱上开关" if module_id == "POLE_SWITCH"
+            else "柱上变压器" if module_id == "TRANSFORMER"
+            else "熔断器" if module_id == "FUSE"
             else "RMU"
         )
         target_label = "馈线对象" if module_id == "FEEDER" else "设备图元"
@@ -5154,7 +7810,7 @@ class MainWindow(QMainWindow):
                     f"G files involved: {selected_file_count}\n"
                     f"Candidate status: {status_summary}\n\n"
                     "The program will recheck 13500 / dms_feeder_device and 13505 / dms_tr_device, "
-                    "verify Expected KeyID Domain 1, and write both TransformerDis keyid1/keyid2 fields "
+                    "verify Expected KeyID Domain 1, and write both pole-transformer keyid1/keyid2 fields "
                     "to Workspace safe copies.\n\n"
                     "Original G files will not be modified.\n\n"
                     "Proceed with model association?"
@@ -5166,6 +7822,30 @@ class MainWindow(QMainWindow):
                     f"候选状态：{status_summary}\n\n"
                     "执行时会重新查询 13500 馈线和 13505 变压器设备，"
                     "重新校验 Domain=1 的 Expected KeyID，并将 keyid1/keyid2 两组字段写入 Workspace 安全副本。\n\n"
+                    "原始 G 文件不会被修改。\n\n"
+                    "是否确认执行？"
+                )
+        elif module_id.upper() == "FUSE":
+            if self.language == "en_US":
+                message = (
+                    f"This run will process only the {change_count} selected fuse objects.\n"
+                    f"G files involved: {selected_file_count}\n"
+                    f"Candidate status: {status_summary}\n\n"
+                    "At execution time the program will re-resolve the drawing feeder, the one-to-one nearest Transformer_OH ownership, "
+                    "the assigned transformer's pole-transformer name, derived FUSE name, 13513 record, and Domain 40 Expected KeyID, "
+                    "then write only the selected XML objects to Workspace safe copies.\n\n"
+                    "Original G files will not be modified.\n\n"
+                    "Proceed with model association?"
+                )
+            else:
+                message = (
+                    f"本次将只处理已勾选的 {change_count} 个熔断器图元。\n"
+                    f"涉及 G 文件：{selected_file_count} 个\n"
+                    f"候选状态：{status_summary}\n\n"
+                    "执行时会重新识别图级馈线，并重新计算 FUSE 与最近 Transformer_OH 的一对一独占分配；"
+                    "只有仍然获得同一柱上变压器的 FUSE 才会继续按柱上变压器模块规则解析名称、生成 FUSE+名称，"
+                    "再查询 13513 / dms_disconnector_device 并校验 Domain=40 的 Expected KeyID，"
+                    "然后只按 XML ID 写入 Workspace 安全副本。\n\n"
                     "原始 G 文件不会被修改。\n\n"
                     "是否确认执行？"
                 )
@@ -5212,8 +7892,8 @@ class MainWindow(QMainWindow):
                     f"{db_write_notice}\n"
                     "The program will recheck current feeder-section occupancy in the database. If the database has insufficient sections and completion is enabled, "
                     "the missing sections will be created first, the database will be queried again, and Expected KeyID will then be recalculated.\n"
-                    "FeedLine write-back is limited to app, p_ReportType, state, voltype, and keyid. FACID, file-name, and manual feeder sources are independent. "
-                    "When file-name/manual mode resolves a target different from the current root facID, the root facID and cross-feeder FeedLine associations are changed only if the explicit override option is enabled.\n\n"
+                    "FeedLine write-back is limited to app, p_ReportType, state, voltype, and keyid. "
+                    "The target feeder is resolved only from the strict JED filename: exact 405/substation.NAME -> NN becomes AH3NN / AGNN becomes AG4NN -> exact 13500 ST_ID + NAME. RMU, Pole Switch, Pole Transformer, root facID, source CBreaker text and manual input never select or override the feeder; every target device must belong to that FEEDER_ID.\n\n"
                     "Original G files and SSH server files will not be modified; only the Workspace/g_output safe copy is changed.\n\n"
                     "Proceed with model association?"
                 )
@@ -5234,8 +7914,8 @@ class MainWindow(QMainWindow):
                     f"{db_write_notice}\n"
                     "程序会重新确认当前数据库馈线段占用情况；如数据库数量不足且启用了补齐，"
                     "会先创建缺失馈线段并重新查询数据库，再计算 Expected KeyID。\n"
-                    "FeedLine 只回写 app、p_ReportType、state、voltype、keyid 这 5 个属性；FACID、文件名、人工输入三种馈线来源相互独立。"
-                    "当文件名/人工输入解析出的目标与当前根 facID 不同时，只有明确启用“允许覆盖现有 facID 和馈线段关联”后，才会覆盖根 facID 并重新关联跨馈线 FeedLine。\n\n"
+                    "FeedLine 只回写 app、p_ReportType、state、voltype、keyid 这 5 个属性。"
+                    "目标馈线唯一由 G 文件名确定：普通 NN 文件名按站名精确查 405 后生成 AH3NN；新增 AGNN 文件名按站名精确查 405 后生成 AG4NN；最后均按 13500 的 ST_ID+NAME 精确唯一确认。环网柜、柱上开关、柱上变压器、根 facID、源侧 CBreaker 名称和人工输入均不参与馈线识别。\n\n"
                     "原始 G 文件和 SSH 服务器文件都不会被修改，"
                     "只修改 Workspace/g_output 安全副本。\n\n"
                     "是否确认执行？"
@@ -5302,7 +7982,7 @@ class MainWindow(QMainWindow):
                     "模型校验输入快照不存在，请重新执行模型校验。"
                 )
 
-            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"}:
+            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"}:
                 selected_source_files = {
                     str(Path(p).resolve())
                     for p in execution_preview.get(
@@ -5393,7 +8073,7 @@ class MainWindow(QMainWindow):
                 if Path(p).exists()
             ]
 
-            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"}:
+            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"}:
                 # Execution reports are intentionally operation-scoped:
                 # only the rows explicitly selected by the user are included.
                 # The full drawing is NOT scanned/validated again after
@@ -5477,7 +8157,7 @@ class MainWindow(QMainWindow):
                     "正在生成模型关联完成报告……"
                 ))
 
-            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "MASTER_STATION"} and not reports:
+            if module_id in {"RMU", "FEEDER", "POLE_SWITCH", "TRANSFORMER", "FUSE", "MASTER_STATION"} and not reports:
                 raise RuntimeError(
                     "模型关联已执行，但没有生成本次选中对象的执行报告。"
                 )
@@ -5501,6 +8181,7 @@ class MainWindow(QMainWindow):
                 module.module_id,
             )
 
+            multi_table_report = str(module.module_id).upper() in {"RMU", "FEEDER"}
             self.current_artifacts = {
                 "task_type": "association",
                 "report_kind": module.module_id,
@@ -5512,8 +8193,11 @@ class MainWindow(QMainWindow):
                     str(csv_paths[0]) if len(csv_paths) > 0 else ""
                 ),
                 "device_csv": (
-                    str(csv_paths[1]) if len(csv_paths) > 1 else ""
+                    str(csv_paths[1])
+                    if multi_table_report and len(csv_paths) > 1
+                    else ""
                 ),
+                "failure_csv": str(csv_paths[-1]) if csv_paths else "",
                 "change_log_csv": str(change_log_csv),
                 "source_info": dict(self.current_source_info or {}),
                 "g_output_dir": str(output_dir),
@@ -5546,7 +8230,7 @@ class MainWindow(QMainWindow):
                 self._t("模型关联完成，最终 HTML / CSV 报告已生成")
             )
             self.workspace_status.show()
-            self.workspace_status.setText(
+            self._set_workspace_status(
                 self._t("模型关联完成，最终报告已生成")
             )
             apply_status_style(self.workspace_status, True)
@@ -5559,10 +8243,12 @@ class MainWindow(QMainWindow):
             is_feeder = module.module_id == "FEEDER"
             is_pole_switch = module.module_id == "POLE_SWITCH"
             is_transformer = module.module_id == "TRANSFORMER"
+            is_fuse = module.module_id == "FUSE"
             is_master_station = module.module_id == "MASTER_STATION"
             object_label = (
                 "FeedLine 图元" if is_feeder
                 else "柱上变压器图元" if is_transformer
+                else "熔断器图元" if is_fuse
                 else "配网主站设备图元" if is_master_station
                 else "设备图元"
             )
@@ -5573,26 +8259,19 @@ class MainWindow(QMainWindow):
             )
             self.log(f"关联完成 HTML：{html_path}")
             if len(csv_paths) > 0:
-                self.log(
-                    (
-                        f"关联完成馈线汇总 CSV：{csv_paths[0]}"
-                        if is_feeder
-                        else (
-                            f"关联完成柱上开关 CSV：{csv_paths[0]}"
-                            if is_pole_switch
-                            else (
-                                f"关联完成柱上变压器 CSV：{csv_paths[0]}"
-                                if is_transformer
-                                else (
-                                    f"关联完成配网主站设备 CSV：{csv_paths[0]}"
-                                    if is_master_station
-                                    else f"关联完成环网柜 CSV：{csv_paths[0]}"
-                                )
-                            )
-                        )
-                    )
-                )
-            if len(csv_paths) > 1:
+                if is_feeder:
+                    self.log(f"关联完成馈线汇总 CSV：{csv_paths[0]}")
+                elif is_pole_switch:
+                    self.log(f"关联完成柱上开关 CSV：{csv_paths[0]}")
+                elif is_transformer:
+                    self.log(f"关联完成柱上变压器 CSV：{csv_paths[0]}")
+                elif is_fuse:
+                    self.log(f"关联完成熔断器 CSV：{csv_paths[0]}")
+                elif is_master_station:
+                    self.log(f"关联完成配网主站设备 CSV：{csv_paths[0]}")
+                else:
+                    self.log(f"关联完成环网柜 CSV：{csv_paths[0]}")
+            if len(csv_paths) > 1 and (is_feeder or not (is_pole_switch or is_transformer or is_fuse or is_master_station)):
                 self.log(
                     (
                         f"关联完成馈线段明细 CSV：{csv_paths[1]}"
@@ -5600,6 +8279,8 @@ class MainWindow(QMainWindow):
                         else f"关联完成设备 CSV：{csv_paths[1]}"
                     )
                 )
+            if csv_paths:
+                self.log(f"关联完成失败明细 CSV：{csv_paths[-1]}")
             self.log(f"模型修改记录 CSV：{change_log_csv}")
 
             self._write_run_manifest(
@@ -5676,7 +8357,7 @@ class MainWindow(QMainWindow):
             self.progress_message.setText(self._t("模型关联失败"))
             QApplication.processEvents()
             self.workspace_status.show()
-            self.workspace_status.setText(self._t("模型关联失败"))
+            self._set_workspace_status(self._t("模型关联失败"))
             apply_status_style(self.workspace_status, False)
             self.log(f"模型关联失败：{exc}")
             try:

@@ -88,6 +88,35 @@ def classification_is(record: dict | None, *keywords: str) -> bool:
     )
 
 
+def element_keys_for_classification(catalog, *keywords: str) -> set[str]:
+    """Collect every exact element key carrying the requested classification.
+
+    One business classification can intentionally point to several element
+    definition files.  Returning the complete key set mirrors the operator's
+    workflow: first select all catalog rows marked with the classification,
+    then accept a G devref when it matches any one of those marked rows.
+    """
+    keys: set[str] = set()
+    if not isinstance(catalog, dict):
+        return keys
+    records = catalog.get("records", [])
+    if not isinstance(records, list):
+        return keys
+    for record in records:
+        if not isinstance(record, dict) or not classification_is(record, *keywords):
+            continue
+        keys.update(_record_keys(record))
+    return keys
+
+
+def devref_has_classification(devref: str, catalog, *keywords: str) -> bool:
+    """Return True when devref matches any catalog row with the classification."""
+    candidates = set(element_key_candidates(devref))
+    if not candidates:
+        return False
+    return bool(candidates.intersection(element_keys_for_classification(catalog, *keywords)))
+
+
 def name_format_penalty(text: str, preference: str) -> int:
     """Return 0 for a name that satisfies the configured format."""
     value = re.sub(r"\s+", " ", str(text or "").strip())

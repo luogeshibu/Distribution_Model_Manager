@@ -52,7 +52,7 @@ class FeederTopologyResolver:
 
         anchors={}
         frames=self.parser.find_rmu_frames(parsed)
-        assigned=self.parser.assign_rmu_label_candidates_globally(parsed,frames,["top","bottom","left","right"])
+        assigned=self.parser.assign_rmu_label_candidates_globally(parsed,frames,["top"])
         for frame in frames:
             cands=list(assigned.get((frame.frame.xml_index,frame.frame.xml_id),[]))
             cands.sort(key=lambda x:(float(x.score),x.obj.xml_index))

@@ -2,55 +2,26 @@ from pathlib import Path
 
 from dmm.config.defaults import DEFAULT_DEVICE_RULES
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_rmu_validator_has_no_feeder_validation():
+def test_rmu_module_uses_filename_feeder_resolution_for_all_drawings():
     text = (
-        PROJECT_ROOT
-        / "src"
-        / "dmm"
-        / "domain"
-        / "rmu"
-        / "validator.py"
+        PROJECT_ROOT / "src" / "dmm" / "application" / "modules" / "rmu.py"
     ).read_text(encoding="utf-8")
-
-    forbidden = [
-        "get_feeder_info(",
-        "get_station_info(",
-        "feeder_hint_from_g_filename",
-        "normalize_feeder_text",
-        "FEEDER_MISMATCH",
-        "device_feeder_match",
-        "file_feeder_hint",
-        "g_file_feeder",
-    ]
-
-    for token in forbidden:
-        assert token not in text, token
+    assert "resolve_drawing_feeder" in text
+    assert "required_feeder_id" in text
+    assert 'if drawing_type == "SINGLE_FEEDER"' not in text
+    assert 'report["feeder_context_required"] = "YES"' in text
 
 
-def test_rmu_report_has_no_feeder_columns_or_status():
+def test_rmu_validator_filters_same_name_database_records_by_required_feeder():
     text = (
-        PROJECT_ROOT
-        / "src"
-        / "dmm"
-        / "infrastructure"
-        / "reporting"
-        / "writer.py"
+        PROJECT_ROOT / "src" / "dmm" / "domain" / "rmu" / "validator.py"
     ).read_text(encoding="utf-8")
-
-    forbidden = [
-        '"FEEDER":',
-        '"g_file_feeder"',
-        '"device_feeder_match"',
-        '"file_feeder_hint"',
-        '"feeder_match"',
-    ]
-
-    for token in forbidden:
-        assert token not in text, token
+    assert "_filter_rmu_records_by_feeder" in text
+    assert "RMU_NOT_FOUND_IN_CURRENT_FEEDER" in text
+    assert "RMU_DUPLICATE_IN_FEEDER" in text
 
 
 def test_busdis_domain_remains_one():

@@ -27,6 +27,7 @@ if ([string]::IsNullOrWhiteSpace($AppVersion)) {
 
 $BuildScriptVersion = $AppVersion
 $AppName = "Distribution_Model_Manager_v$AppVersion"
+$ReleasePackageName = "Distribution_Model_Manager_Jeddah_v$AppVersion"
 
 $VenvDir = Join-Path $ProjectRoot ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
@@ -36,7 +37,7 @@ $DistDir = Join-Path $ProjectRoot "dist"
 $DistAppDir = Join-Path $DistDir $AppName
 
 $ReleaseDir = Join-Path $ProjectRoot "release"
-$ReleaseZip = Join-Path $ReleaseDir "$AppName.zip"
+$ReleaseZip = Join-Path $ReleaseDir "$ReleasePackageName.zip"
 
 $IconPath = Join-Path $ProjectRoot "src\dmm\resources\app_logo.ico"
 
@@ -67,6 +68,7 @@ Write-Host " Build script version : $BuildScriptVersion"
 Write-Host " Script path          : $($MyInvocation.MyCommand.Path)"
 Write-Host " Project root         : $ProjectRoot"
 Write-Host " Target               : $AppName"
+Write-Host " Release package      : $ReleasePackageName"
 Write-Host "============================================================"
 Write-Host ""
 
@@ -105,7 +107,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "[3/6] Verifying Python dependencies..."
 
-& $VenvPython -c "import getpass, ssl, socket, secrets, oracledb, cryptography, cffi, _cffi_backend, PySide6, paramiko, bcrypt, nacl; print('Dependencies OK'); print('oracledb=', oracledb.__version__); print('cryptography=', cryptography.__version__)"
+& $VenvPython -c "import getpass, ssl, socket, secrets, oracledb, cryptography, cffi, _cffi_backend, PySide6, paramiko, bcrypt, nacl, pydantic, platformdirs, openpyxl, g_file_studio; print('Dependencies OK'); print('oracledb=', oracledb.__version__); print('cryptography=', cryptography.__version__); print('g_file_studio=', g_file_studio.__version__)"
 if ($LASTEXITCODE -ne 0) {
     throw "Python dependency verification failed."
 }
@@ -136,6 +138,7 @@ Write-Host "[5/6] Building EXE..."
     --name "$AppName" `
     --icon "$IconPath" `
     --add-data "src\dmm\resources;dmm\resources" `
+    --add-data "resources;resources" `
     --additional-hooks-dir "hooks" `
     --hidden-import "getpass" `
     --hidden-import "ssl" `
@@ -154,6 +157,20 @@ Write-Host "[5/6] Building EXE..."
     --hidden-import "nacl" `
     --hidden-import "dmm.application.modules.rmu" `
     --hidden-import "dmm.application.modules.feeder" `
+    --hidden-import "g_file_studio.ui.pages.small_element_page" `
+    --hidden-import "g_file_studio.ui.pages.id_page" `
+    --hidden-import "g_file_studio.ui.pages.site_profile_page" `
+    --hidden-import "g_file_studio.ui.pages.rmu_page" `
+    --hidden-import "g_file_studio.ui.pages.poke_page" `
+    --hidden-import "g_file_studio.ui.pages.basic_page" `
+    --hidden-import "g_file_studio.ui.pages.merge_page" `
+    --hidden-import "g_file_studio.ui.pages.margin_page" `
+    --hidden-import "g_file_studio.ui.pages.frame_page" `
+    --hidden-import "g_file_studio.ui.pages.orthogonalize_page" `
+    --hidden-import "g_file_studio.ui.pages.jeddah_batch_page" `
+    --hidden-import "g_file_studio.ui.pages.transformer_fuse_page" `
+    --hidden-import "g_file_studio.ui.pages.rmu_efi_page" `
+    --collect-all "g_file_studio" `
     --collect-all "oracledb" `
     --collect-all "cryptography" `
     --collect-all "cffi" `

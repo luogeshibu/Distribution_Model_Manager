@@ -415,6 +415,114 @@ class OracleClient:
         row["_table_name"] = table_name
         return row
 
+    def find_substations_by_name(
+        self,
+        station_name: str,
+        table_id: int = 405,
+    ) -> List[Dict[str, Any]]:
+        """Exact 405/substation lookup by NAME for authoritative Jeddah filename feeder resolution."""
+        lookup = str(station_name or "").strip()
+        if not lookup:
+            return []
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT id, code, name, bv_id, subarea_id
+            FROM {table_name}
+            WHERE TRIM(name) = :station_name
+            ORDER BY id
+            """,
+            {"station_name": lookup},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
+
+    def get_subcontrolarea_info(
+        self,
+        subarea_id: Any,
+        table_id: int = 404,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve one subcontrolarea row and its parent into a readable path.
+
+        Jeddah reports use the station.SUBAREA_ID -> subcontrolarea.ID chain as
+        the authoritative control-area source.  Example:
+            child CODE=JED-CTL, parent CODE=JED -> path "JED CTL".
+        This lookup is read-only and is report enrichment only; feeder
+        association itself still depends on the unique 405 station and 13500
+        feeder match.
+        """
+        if subarea_id in (None, ""):
+            return None
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT
+                sc.id,
+                sc.code,
+                sc.name,
+                sc.father_id,
+                parent.id AS parent_id,
+                parent.code AS parent_code,
+                parent.name AS parent_name
+            FROM {table_name} sc
+            LEFT JOIN {table_name} parent
+              ON parent.id = sc.father_id
+            WHERE sc.id = :subarea_id
+            """,
+            {"subarea_id": int(subarea_id)},
+        )
+        if len(rows) != 1:
+            return None
+
+        row = dict(rows[0])
+        # Some D5000 datasets leave subcontrolarea.CODE empty and expose the
+        # business label in NAME (for example NAME=JED-CTL).  Prefer CODE when
+        # present, otherwise fall back to NAME for both child and parent.
+        code = str(row.get("code") or row.get("name") or "").strip()
+        parent_code = str(row.get("parent_code") or row.get("parent_name") or "").strip()
+        if not parent_code:
+            path = code
+        elif code == parent_code:
+            path = code
+        elif code.upper().startswith((parent_code + "-").upper()):
+            suffix = code[len(parent_code) + 1 :].strip()
+            path = f"{parent_code} {suffix}".strip()
+        else:
+            path = f"{parent_code} {code}".strip()
+
+        row["path"] = " ".join(path.split())
+        row["_table_id"] = int(table_id)
+        row["_table_name"] = table_name
+        return row
+
+    def find_feeders_by_station_and_name(
+        self,
+        station_id: Any,
+        feeder_name: str,
+        table_id: int = 13500,
+    ) -> List[Dict[str, Any]]:
+        """Exact 13500 lookup by ST_ID + NAME for authoritative Jeddah filename feeder resolution."""
+        lookup = str(feeder_name or "").strip()
+        if station_id in (None, "") or not lookup:
+            return []
+        table_name = self.get_table_name(int(table_id))
+        rows = self._query(
+            f"""
+            SELECT id, code, name, st_id, graph_name
+            FROM {table_name}
+            WHERE st_id = :station_id
+              AND TRIM(name) = :feeder_name
+            ORDER BY id
+            """,
+            {"station_id": int(station_id), "feeder_name": lookup},
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
+
     def get_feeders_by_station(
         self,
         station_id: Any,
@@ -463,6 +571,42 @@ class OracleClient:
         rows = self._query(
             f"""
             SELECT id, code, name, feeder_id
+            FROM {table_name}
+            WHERE {where}
+            ORDER BY id
+            """,
+            binds,
+        )
+        for row in rows:
+            row["_table_id"] = int(table_id)
+            row["_table_name"] = table_name
+        return rows
+
+    def get_disconnector_devices_by_name(
+        self,
+        device_name: str,
+        feeder_id: Any = None,
+        table_id: int = 13513,
+    ) -> List[Dict[str, Any]]:
+        """Resolve dms_disconnector_device rows by exact NAME and feeder.
+
+        The Fuse model uses the derived business name ``FUSE`` + nearest
+        pole-transformer name.  FEEDER_ID is an independent hard ownership
+        constraint and is normally supplied from the shared drawing-feeder
+        resolver.
+        """
+        lookup_name = str(device_name or "").strip()
+        if not lookup_name:
+            return []
+        table_name = self.get_table_name(int(table_id))
+        where = "TRIM(name) = :device_name"
+        binds = {"device_name": lookup_name}
+        if feeder_id not in (None, ""):
+            where += " AND feeder_id = :feeder_id"
+            binds["feeder_id"] = int(feeder_id)
+        rows = self._query(
+            f"""
+            SELECT id, code, name, feeder_id, bv_id
             FROM {table_name}
             WHERE {where}
             ORDER BY id
@@ -610,12 +754,14 @@ class OracleClient:
         feeder_id: Any,
         table_id: int = 13500,
     ) -> Optional[Dict[str, Any]]:
-        """
-        Resolve one feeder master record by numeric feeder ID.
+        """Resolve one 13500 feeder plus its database station/control-area path.
 
-        Return the same station+feeder display_name used by
-        find_feeders_by_name_hint(), so an existing FeedLine KeyID can be used
-        to confirm a G title such as ABH-03 against JED NTH ABH 03.
+        Hierarchy:
+            13500.ST_ID -> 405/substation
+            405.SUBAREA_ID -> 404/subcontrolarea
+        The control-area label prefers subcontrolarea.CODE but falls back to
+        NAME because some Jeddah datasets keep CODE empty and store values such
+        as ``JED-CTL`` in NAME.
         """
         if feeder_id in (None, ""):
             return None
@@ -632,40 +778,10 @@ class OracleClient:
                 f.graph_name,
                 s.name AS station_name,
                 s.bv_id AS station_bv_id,
-                CASE
-                    WHEN sc_parent.code IS NULL THEN sc.code
-                    WHEN sc.code = sc_parent.code THEN sc.code
-                    WHEN sc.code LIKE sc_parent.code || '-%' THEN
-                        TRIM(
-                            sc_parent.code || ' ' ||
-                            SUBSTR(sc.code, LENGTH(sc_parent.code) + 2)
-                        )
-                    ELSE TRIM(sc_parent.code || ' ' || sc.code)
-                END AS subcontrolarea_path,
-                TRIM(
-                    NVL(
-                        CASE
-                            WHEN sc_parent.code IS NULL THEN sc.code
-                            WHEN sc.code = sc_parent.code THEN sc.code
-                            WHEN sc.code LIKE sc_parent.code || '-%' THEN
-                                TRIM(
-                                    sc_parent.code || ' ' ||
-                                    SUBSTR(sc.code, LENGTH(sc_parent.code) + 2)
-                                )
-                            ELSE TRIM(sc_parent.code || ' ' || sc.code)
-                        END,
-                        ''
-                    ) || ' ' ||
-                    NVL(s.name, '') || ' ' ||
-                    NVL(f.name, '')
-                ) AS display_name
+                s.subarea_id AS station_subarea_id
             FROM {table_name} f
             LEFT JOIN {station_table} s
               ON s.id = f.st_id
-            LEFT JOIN subcontrolarea sc
-              ON sc.id = s.subarea_id
-            LEFT JOIN subcontrolarea sc_parent
-              ON sc_parent.id = sc.father_id
             WHERE f.id = :feeder_id
             """,
             {"feeder_id": int(feeder_id)},
@@ -675,11 +791,22 @@ class OracleClient:
             return None
 
         row = dict(rows[0])
+        subarea_id = row.get("station_subarea_id")
+        control = self.get_subcontrolarea_info(subarea_id) if subarea_id not in (None, "") else None
+        row["subcontrolarea_path"] = str((control or {}).get("path") or "").strip()
+        row["display_name"] = " ".join(
+            value for value in (
+                row["subcontrolarea_path"],
+                str(row.get("station_name") or "").strip(),
+                str(row.get("name") or "").strip(),
+            ) if value
+        ).strip()
+        if not row["display_name"]:
+            row["display_name"] = str(row.get("name") or "").strip()
         row["_table_id"] = int(table_id)
         row["_table_name"] = table_name
-        if not str(row.get("display_name") or "").strip():
-            row["display_name"] = str(row.get("name") or "").strip()
         return row
+
 
     def get_station_info(self, station_id: Any) -> Optional[Dict[str, Any]]:
         if station_id in (None, ""):

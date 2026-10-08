@@ -34,8 +34,8 @@ def test_rmu_report_can_export_english(tmp_path):
     assert "RMU Name" in text
 
     paths = export_csv_bundle([report], tmp_path / "report.csv", language="en_US")
-    assert paths[0].name.endswith("_rmu_summary.csv")
-    assert paths[1].name.endswith("_device_details.csv")
+    assert paths[0].name.endswith("_rmu_summary_EN.csv")
+    assert paths[1].name.endswith("_device_details_EN.csv")
     assert "RMU Name" in paths[0].read_text(encoding="utf-8-sig")
 
 
@@ -61,6 +61,6 @@ def test_feeder_report_can_export_english(tmp_path):
     assert "Orange CREATE" in text
 
     paths = export_csv_bundle([report], tmp_path / "feeder.csv", language="en_US")
-    assert paths[0].name.endswith("_feeder_summary.csv")
-    assert paths[1].name.endswith("_feeder_section_details.csv")
+    assert paths[0].name.endswith("_feeder_summary_EN.csv")
+    assert paths[1].name.endswith("_feeder_section_details_EN.csv")
     assert "Database Feeder Name" in paths[0].read_text(encoding="utf-8-sig")

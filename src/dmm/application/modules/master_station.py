@@ -9,15 +9,12 @@ from dmm.application.modules.base import ModelModule
 from dmm.application.modules.feeder_context import (
     add_feeder_fields,
     candidate_from_record,
-    resolve_graph_feeder,
-    rmu_keyid_candidates,
-    rmu_positions_from_settings,
+    enforce_device_feeder_membership,
+    resolve_drawing_feeder,
 )
 from dmm.application.modules.jeddah_scope import (
     assess_jeddah_drawing_scope,
-    apply_association_block,
     apply_jeddah_scope_block,
-    check_graph_facid,
     scope_report_fields,
 )
 from dmm.config.defaults import DEFAULT_MASTER_STATION_RULES
@@ -78,9 +75,9 @@ class MasterStationModelModule(ModelModule):
     module_id = "MASTER_STATION"
     display_name = "配网主站设备关联"
     description = (
-        "以每个 CBreaker 为锚点查找最近的 RMU 矩形框，只检查该框内部设备或保护信号的已有关联，"
-        "再反查厂站/馈线，并使用关联上下文中的 BAY_ID 直接关联主站设备表；不解析 G 文件 CODE/NAME，"
-        "仅对多个 Disconnector 做 Bus 侧左右顺序判定。"
+        "主站设备所属厂站/馈线只由 G 文件名唯一确定：文件名 → 405/substation → "
+        "13500/dms_feeder_device；再由该馈线在 406/Bay 中定位唯一 BAY_ID，并按原有规则关联 "
+        "407/408/409。主站图元本身不解析可见 CODE/NAME，仅对多个 Disconnector 做 Bus 侧左右顺序判定。"
     )
     SUPPORTED_OPERATIONS = ("VALIDATE", "PREVIEW_ASSOCIATION", "APPLY_ASSOCIATION")
 
@@ -358,6 +355,131 @@ class MasterStationModelModule(ModelModule):
         if frame is None:
             return None, "MASTER_STATION_RMU_NOT_FOUND: 未找到断路器对应的最近环网柜；该图环网柜请手动关联。", {}
         return cls._resolve_rmu_context(parsed, frame, db, cache)
+
+    @staticmethod
+    def _context_from_filename_feeder(db, feeder_resolution):
+        """Build the master-station Bay context from the filename feeder only.
+
+        Jeddah production rule: the drawing feeder has already been resolved by
+        ``resolve_drawing_feeder`` using filename -> 405 -> 13500.  The
+        master-station module must not inspect an RMU, an existing RMU KeyID,
+        or any other graphical device to decide the feeder.  The remaining
+        legacy Bay/device association is preserved: use the resolved feeder's
+        station and business feeder name/code to locate exactly one 406/Bay.
+        """
+        resolution = feeder_resolution or {}
+        if not resolution.get("ready"):
+            return None, (
+                resolution.get("reason")
+                or "MASTER_STATION_GRAPH_FEEDER_NOT_RESOLVED: 无法按文件名唯一确定图级馈线。"
+            ), {}
+
+        feeder = dict(resolution.get("feeder") or {})
+        feeder_id = int_or_none(resolution.get("feeder_id"))
+        station_id = int_or_none(feeder.get("st_id"))
+        if feeder_id is None:
+            return None, "MASTER_STATION_FEEDER_ID_EMPTY: 文件名解析出的图级 FEEDER_ID 为空。", {}
+        if station_id is None:
+            return None, (
+                "MASTER_STATION_STATION_ID_EMPTY: 文件名解析出的 13500 馈线 ST_ID 为空，"
+                "无法定位 406/Bay。"
+            ), {}
+        if not hasattr(db, "find_bays_by_feeder"):
+            return None, "MASTER_STATION_BAY_API_MISSING: 数据库连接不支持按馈线定位 406/Bay。", {}
+
+        # The filename resolver already calculated the authoritative business
+        # feeder NAME (for example AH323 or AG406). Prefer that exact name;
+        # retain the existing 13500 CODE/NAME/GRAPH_NAME fallback only for
+        # compatibility with older rows whose returned representation differs.
+        hints = []
+        for item in resolution.get("candidates") or []:
+            if str(item.get("kind") or "").upper() == "FILENAME":
+                value = str(item.get("name") or "").strip()
+                if value:
+                    hints.append(value)
+        for key in ("code", "name", "graph_name"):
+            value = str(feeder.get(key) or "").strip()
+            if value:
+                hints.append(value)
+        hints = list(dict.fromkeys(hints))
+        if not hints:
+            return None, (
+                "MASTER_STATION_FEEDER_NAME_EMPTY: 文件名已确定 FEEDER_ID，"
+                "但没有可用于定位 406/Bay 的馈线名称/代码。"
+            ), {}
+
+        matched_hint = ""
+        bays = []
+        for hint in hints:
+            try:
+                rows = db.find_bays_by_feeder(hint, station_id) or []
+            except Exception as exc:
+                return None, f"MASTER_STATION_BAY_QUERY_FAILED: 406/Bay 查询失败：{exc}", {}
+            if rows:
+                matched_hint = hint
+                bays = rows
+                break
+
+        if len(bays) == 0:
+            return None, (
+                "MASTER_STATION_BAY_NOT_FOUND: "
+                f"文件名已确定 FEEDER_ID={feeder_id} / ST_ID={station_id}，"
+                f"但 406/Bay 未找到馈线 {hints[0]} 对应的间隔。"
+            ), {}
+        if len(bays) > 1:
+            return None, (
+                "MASTER_STATION_BAY_NOT_UNIQUE: "
+                f"文件名已确定 FEEDER_ID={feeder_id} / ST_ID={station_id}，"
+                f"但 406/Bay 对馈线 {matched_hint or hints[0]} 匹配 {len(bays)} 条；"
+                "无法安全确定 BAY_ID。"
+            ), {}
+
+        bay = dict(bays[0])
+        bay_id = int_or_none(bay.get("id"))
+        if bay_id is None:
+            return None, "MASTER_STATION_BAY_ID_EMPTY: 唯一 406/Bay 记录 ID 为空。", {}
+
+        station = {}
+        if hasattr(db, "get_station_info"):
+            try:
+                station = db.get_station_info(station_id) or {}
+            except Exception:
+                station = {}
+        station_name = str(
+            feeder.get("station_name") or station.get("name") or ""
+        ).strip()
+        context = {
+            "source": (
+                f"{resolution.get('feeder_source') or 'FILENAME_405_13500'}"
+                f" -> 406/Bay({matched_hint or hints[0]})"
+            ),
+            "source_keyid": "",
+            "source_table_id": "",
+            "source_device_id": "",
+            "source_domain": "",
+            "rmu_id": "",
+            "rmu_name": "",
+            "bay_id": bay_id,
+            "bay_code": str(bay.get("code") or "").strip(),
+            "bay_name": str(bay.get("name") or "").strip(),
+            "station_id": station_id,
+            "station_name": station_name,
+            "feeder_id": feeder_id,
+            "feeder_code": str(feeder.get("code") or "").strip(),
+            "feeder_name": str(
+                feeder.get("display_name") or feeder.get("name") or matched_hint or hints[0]
+            ).strip(),
+            "filename_feeder_name": hints[0],
+        }
+        meta = {
+            "rmu_frame_xml_id": "",
+            "rmu_id": "",
+            "rmu_name": "",
+            "context_anchor_type": "FILENAME_FEEDER",
+            "context_anchor_xml_id": "",
+            "context_anchor_keyid": "",
+        }
+        return context, "", meta
 
     @staticmethod
     def _record_matches_context(record, context, db=None):
@@ -659,27 +781,38 @@ class MasterStationModelModule(ModelModule):
         parsed = GParser().parse(g_file)
         drawing_scope = assess_jeddah_drawing_scope(parsed)
         rules = self._rules(settings)
+        # RMU geometry/KeyID is no longer an input to master-station feeder
+        # resolution.  Keep these counts only as non-authoritative diagnostics
+        # so existing report fields remain compatible.
         frames = GParser().find_rmu_frames(parsed)
         breakers = [obj for obj in parsed.objects if obj.tag == "CBreaker"]
         objects = [obj for obj in parsed.objects if obj.tag in TARGET_TAGS]
-        context_cache = {}
-        feeder_candidates = rmu_keyid_candidates(
-            db,
-            parsed,
-            positions=rmu_positions_from_settings(settings),
+
+        feeder_resolution = resolve_drawing_feeder(
+            db, parsed, settings or {}, log_callback=log_callback
         )
-        local_contexts = {}
+        filename_context, filename_context_error, filename_context_meta = (
+            self._context_from_filename_feeder(db, feeder_resolution)
+        )
+
+        # Every main-station object in this single-feeder drawing uses the
+        # exact same filename-derived station/feeder/Bay context.  No RMU,
+        # existing RMU KeyID or other graphical device is allowed to override
+        # or supply the FEEDER_ID.
+        resolved_contexts = {}
         for obj in objects:
-            local_contexts[_object_identity(obj)] = self._resolve_local_context(
-                parsed, obj, breakers, frames, db, context_cache
+            resolved_contexts[_object_identity(obj)] = (
+                dict(filename_context or {}) if filename_context else None,
+                str(filename_context_error or ""),
+                dict(filename_context_meta or {}),
             )
 
         records_by_bay = {}
-        bay_candidates = []
-        # Main-station tables 407/408/409 are resolved only through the
-        # context BAY_ID.  The G object's visible CODE/NAME is not parsed.
+        # Existing device association remains unchanged: once the filename
+        # feeder resolves the unique 406/Bay, 407/408/409 are queried by that
+        # BAY_ID and the original uniqueness/count/order rules are applied.
         for obj in objects:
-            context = local_contexts[_object_identity(obj)][0] or {}
+            context = resolved_contexts[_object_identity(obj)][0] or {}
             rule = rules.get(obj.tag, {})
             table_id = int(rule.get("table_id", 0) or 0)
             bay_id = int_or_none(context.get("bay_id"))
@@ -693,108 +826,58 @@ class MasterStationModelModule(ModelModule):
                     )
                 except Exception:
                     records_by_bay[cache_key] = []
-            records = records_by_bay[cache_key]
-            bay_reader = getattr(db, "get_bay_by_id", None)
-            bay = bay_reader(bay_id) if bay_reader else None
-            if bay:
-                for record in records:
-                    candidate = candidate_from_record(
-                        db,
-                        record,
-                        kind="POLE_SWITCH" if obj.tag == "CBreaker" else "OTHER",
-                        identity=record.get("id"),
-                        name=record.get("name") or record.get("code"),
-                        source=f"MASTER_{obj.tag}_BAY_ID:{bay_id}:TABLE_{table_id}",
-                    )
-                    feeder_candidates.append(candidate)
-                    bay_candidates.append({
-                        "candidate_feeder_id": candidate.get("feeder_id"),
-                        "bay_id": bay_id,
-                        "bay_code": str(bay.get("code") or "").strip(),
-                        "bay_name": str(bay.get("name") or "").strip(),
-                        "bay_st_id": bay.get("st_id", ""),
-                        "source": f"{obj.tag}:BAY_ID:{bay_id}:TABLE_{table_id}",
-                    })
-        feeder_resolution = resolve_graph_feeder(db, feeder_candidates)
-        facid_check = check_graph_facid(
-            parsed, feeder_resolution.get("feeder_id")
-        )
+
+        # G-root facID is intentionally not read for feeder identification or
+        # association gating.  The G filename is the only authoritative feeder
+        # source for the master-station module.
+        facid_check = {
+            "graph_facid": "",
+            "facid_check": "NOT_USED",
+            "facid_consistent": True,
+            "facid_reason": "G.facID 不参与馈线识别或设备归属判断。",
+        }
+
         graph_context = {}
-        if feeder_resolution.get("ready"):
+        if filename_context:
             feeder = feeder_resolution.get("feeder") or {}
-            resolved_feeder_id = int_or_none(feeder_resolution.get("feeder_id"))
-            matching_bays = [
-                item for item in bay_candidates
-                if int_or_none(item.get("candidate_feeder_id")) == resolved_feeder_id
-            ]
-            unique_bays = []
-            seen_bays = set()
-            for item in matching_bays:
-                bay_key = (
-                    item.get("bay_id"),
-                    item.get("bay_code"),
-                    item.get("bay_name"),
-                )
-                if bay_key not in seen_bays:
-                    seen_bays.add(bay_key)
-                    unique_bays.append(item)
-            graph_bay = unique_bays[0] if len(unique_bays) == 1 else {}
             feeder_db_name = str(feeder.get("name") or "").strip()
             feeder_code = str(feeder.get("code") or "").strip()
             location_parts = [
-                str(feeder.get("station_name") or "").strip(),
+                str(filename_context.get("station_name") or "").strip(),
                 feeder_db_name,
                 feeder_code,
             ]
             location_parts = list(dict.fromkeys(item for item in location_parts if item))
             graph_context = {
-                "source": feeder_resolution.get("feeder_source", ""),
-                "feeder_id": feeder_resolution.get("feeder_id", ""),
-                "feeder_code": str(feeder.get("code") or "").strip(),
+                "source": filename_context.get("source", ""),
+                "feeder_id": filename_context.get("feeder_id", ""),
+                "feeder_code": filename_context.get("feeder_code", ""),
                 "feeder_graph_name": str(feeder.get("graph_name") or "").strip(),
                 "feeder_db_name": feeder_db_name,
-                "feeder_name": str(feeder.get("display_name") or feeder.get("name") or "").strip(),
-                "station_id": feeder.get("st_id", ""),
-                "station_name": str(feeder.get("station_name") or "").strip(),
-                "bay_id": graph_bay.get("bay_id", ""),
-                "bay_code": graph_bay.get("bay_code", ""),
-                "bay_name": graph_bay.get("bay_name", ""),
+                "feeder_name": filename_context.get("feeder_name", ""),
+                "station_id": filename_context.get("station_id", ""),
+                "station_name": filename_context.get("station_name", ""),
+                "bay_id": filename_context.get("bay_id", ""),
+                "bay_code": filename_context.get("bay_code", ""),
+                "bay_name": filename_context.get("bay_name", ""),
                 "location_label": " ".join(location_parts),
             }
-        resolved_contexts = {}
-        for obj in objects:
-            context, context_error, context_meta = local_contexts[_object_identity(obj)]
-            local_feeder_id = int_or_none((context or {}).get("feeder_id"))
-            if feeder_resolution.get("ready"):
-                if local_feeder_id is not None and local_feeder_id != int_or_none(feeder_resolution.get("feeder_id")):
-                    context_error = (
-                        "MASTER_STATION_FEEDER_MISMATCH: 最近环网柜馈线与图级唯一馈线不一致。"
-                    )
-                else:
-                    merged = dict(context or {})
-                    merged.update({
-                        key: value for key, value in graph_context.items()
-                        if value not in (None, "")
-                    })
-                    context = merged
-                    context_error = ""
-            else:
-                context_error = feeder_resolution.get("reason") or context_error
-            resolved_contexts[_object_identity(obj)] = (context, context_error, context_meta)
+
         assignments, assignment_errors = self._assign_bay_records(
             parsed, objects, resolved_contexts, records_by_bay, rules
         )
         if log_callback:
-            if frames:
+            if filename_context:
                 log_callback(
-                    f"[{Path(g_file).name}] 主站设备关联按局部范围执行："
-                    f"断路器={len(breakers)}；环网柜矩形框={len(frames)}；"
-                    "每个对象只使用最近断路器对应 RMU 框内的已有关联。"
+                    f"[{Path(g_file).name}] 主站设备上下文已由文件名确定："
+                    f"ST_ID={filename_context.get('station_id') or '-'}；"
+                    f"FEEDER_ID={filename_context.get('feeder_id') or '-'}；"
+                    f"BAY_ID={filename_context.get('bay_id') or '-'}。"
                 )
             else:
                 log_callback(
                     f"[{Path(g_file).name}] 主站设备关联阻断："
-                    "G 文件未找到环网柜矩形框，该图环网柜请手动关联。"
+                    f"{filename_context_error or '文件名馈线/Bay上下文无法唯一确定。'}"
                 )
         rows = []
         total = max(len(objects), 1)
@@ -807,11 +890,11 @@ class MasterStationModelModule(ModelModule):
             if log_callback and context:
                 log_callback(
                     f"[{Path(g_file).name}] {obj.tag} XML ID={obj.xml_id or '-'}："
-                    f"最近 RMU 框={context.get('rmu_frame_xml_id') or '-'}；"
-                    f"关联锚点={context.get('context_anchor_type') or '-'}"
-                    f"/{context.get('context_anchor_xml_id') or '-'}；"
-                    f"馈线={context.get('feeder_code') or context.get('feeder_id') or '-'}。"
+                    f"文件名馈线={context.get('filename_feeder_name') or context.get('feeder_name') or '-'}；"
+                    f"FEEDER_ID={context.get('feeder_id') or '-'}；"
+                    f"BAY_ID={context.get('bay_id') or '-'}。"
                 )
+            target_record = assignments.get(_object_identity(obj))
             row = self._resolve_object(
                 obj,
                 db,
@@ -819,21 +902,43 @@ class MasterStationModelModule(ModelModule):
                 context,
                 context_error,
                 context_meta,
-                target_record=assignments.get(_object_identity(obj)),
+                target_record=target_record,
                 target_records_count=len(records_by_bay.get((
                     int(rules.get(obj.tag, {}).get("table_id", 0) or 0),
                     int_or_none((context or {}).get("bay_id")),
                 ), [])),
                 target_lookup_error=assignment_error,
             )
-            add_feeder_fields(row, feeder_resolution)
+            if target_record is not None:
+                target_candidate = candidate_from_record(
+                    db,
+                    target_record,
+                    kind="MASTER_STATION",
+                    identity=target_record.get("id"),
+                    name=target_record.get("name") or target_record.get("code"),
+                    source=f"MASTER_{obj.tag}_TARGET",
+                )
+                enforce_device_feeder_membership(
+                    row,
+                    feeder_resolution,
+                    device_feeder_id=target_candidate.get("feeder_id"),
+                    reason_prefix="MASTER_STATION",
+                )
+            else:
+                add_feeder_fields(row, feeder_resolution)
+                if not feeder_resolution.get("ready"):
+                    row.update({
+                        "status": "FAIL",
+                        "severity": "ERROR",
+                        "association_ready": "NO",
+                        "writeback_needed": "NO",
+                        "reason": feeder_resolution.get("reason") or row.get("reason"),
+                    })
             rows.append(row)
             if progress_callback:
                 progress_callback(index, total, f"正在处理主站设备 {index}/{len(objects)}")
         if not drawing_scope["association_allowed"]:
             apply_jeddah_scope_block(rows, drawing_scope)
-        if not facid_check["facid_consistent"]:
-            apply_association_block(rows, facid_check["facid_reason"])
         if log_callback:
             log_callback(
                 f"[{Path(g_file).name}] 配网主站设备识别完成：图元={len(rows)}；"
@@ -850,7 +955,7 @@ class MasterStationModelModule(ModelModule):
             "facid_reason": facid_check["facid_reason"],
             "master_station_rows": rows,
             "association_context": {
-                "mode": "graph_unique_feeder_with_local_rmu_evidence",
+                "mode": "filename_feeder_with_target_membership",
                 "rmu_frame_count": len(frames),
                 "cbreaker_count": len(breakers),
                 "feeder_resolution_source": feeder_resolution.get("feeder_source", "UNRESOLVED"),
@@ -877,7 +982,7 @@ class MasterStationModelModule(ModelModule):
                         or graph_context.get("feeder_name", ""),
                     ) if value
                 ),
-                "message": feeder_resolution.get("reason") or "图级 FEEDER_ID 已按唯一设备证据确认，所有目标按该馈线校验。",
+                "message": filename_context_error or feeder_resolution.get("reason") or "图级 FEEDER_ID 已由 G 文件名 → 405/substation → 13500/dms_feeder_device 唯一确认；406/Bay 由该馈线唯一定位，所有 407/408/409 目标仍必须证明属于该馈线。",
             },
             "summary": {
                 "master_station_count": len(rows),
@@ -886,8 +991,8 @@ class MasterStationModelModule(ModelModule):
                 "master_station_unlinked": sum(1 for row in rows if row.get("status") == "UNLINKED"),
                 "master_station_relink": sum(1 for row in rows if row.get("status") == "RELINK"),
                 "association_ready_count": sum(1 for row in rows if row.get("association_ready") == "YES" and row.get("writeback_needed") == "YES"),
-                "feeder_context_ready": "YES" if feeder_resolution.get("ready") else "NO",
-                "feeder_context_message": feeder_resolution.get("reason") or "图级 FEEDER_ID 已唯一确认。",
+                "feeder_context_ready": "YES" if feeder_resolution.get("ready") and filename_context else "NO",
+                "feeder_context_message": filename_context_error or feeder_resolution.get("reason") or "图级 FEEDER_ID 与 406/Bay 已由文件名馈线上下文唯一确认。",
             },
         }
 
@@ -962,14 +1067,27 @@ class MasterStationModelModule(ModelModule):
         executable = defaultdict(list)
         execution_rows = []
         for source_file, changes in preview_data.get("changes_by_file", {}).items():
+            refreshed_report = self._analyze_file(
+                db, Path(source_file), settings, log_callback
+            )
+            refreshed_by_xml = {
+                str(row.get("xml_id") or ""): row
+                for row in refreshed_report.get("master_station_rows", [])
+            }
             for change in changes:
-                row = dict(change.get("validated_row", {}) or {})
-                if row.get("association_ready") != "YES":
+                row = dict(
+                    refreshed_by_xml.get(str(change.get("xml_id") or ""), {})
+                )
+                if not row or row.get("association_ready") != "YES":
+                    if not row:
+                        row = dict(change.get("validated_row", {}) or {})
+                        row["reason"] = "MASTER_STATION_EXECUTION_TARGET_NOT_FOUND"
                     row["_execution_result"] = "SKIPPED"
                     execution_rows.append((change, row))
                     continue
                 refreshed = dict(change)
                 refreshed["attributes"] = self._attributes_for_row(row)
+                refreshed["validated_row"] = row
                 executable[source_file].append(refreshed)
                 row["_execution_result"] = "READY"
                 execution_rows.append((refreshed, row))

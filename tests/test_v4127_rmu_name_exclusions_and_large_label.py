@@ -60,10 +60,10 @@ def test_exclusion_is_complete_string_not_substring(tmp_path):
     assert _assigned_texts(parser, g) == ["SFI-9001"]
 
 
-def test_large_font_top_label_can_overlap_frame_box_but_still_be_owned(tmp_path):
+def test_large_font_label_overlapping_rmu_frame_is_rejected(tmp_path):
     g = tmp_path / "large-label.g"
-    # This reproduces BABJ 38995: the XML Text bounding box overlaps the frame
-    # top edge, while the text center is still above the RMU.
+    # v4.1.109 hard rule: RMU names must be completely outside the frame.
+    # Center-outside is insufficient when the Text bounding box overlaps RMU.
     _write_fixture(g, [("38995", 139, 127, 155, 128)])
     parser = GParser(
         required_rmu_tags={"CBreakerDis", "ZhaiWaiJieDiDaoZha", "BusDis"},
@@ -71,7 +71,7 @@ def test_large_font_top_label_can_overlap_frame_box_but_still_be_owned(tmp_path)
         excluded_rmu_name_strings=["SFI", "DAS/OK"],
         overlap_tolerance=20,
     )
-    assert _assigned_texts(parser, g) == ["38995"]
+    assert _assigned_texts(parser, g) == []
 
 
 def test_rmu_exclusion_ui_strings_have_english_translations():

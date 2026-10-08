@@ -142,8 +142,9 @@ def test_feeder_html_has_row_marker_checkboxes(tmp_path):
     assert "row-selected" in text
 
     csv_paths = export_csv_bundle(reports, tmp_path / "report.csv")
-    assert len(csv_paths) == 2
+    assert len(csv_paths) == 3
     assert all(Path(p).exists() for p in csv_paths)
+    assert csv_paths[2].name.endswith("_关联失败_CN.csv")
 
 
 def test_existing_correct_section_is_reserved_and_gap_uses_smallest_remaining(tmp_path):

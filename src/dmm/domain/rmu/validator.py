@@ -10,9 +10,14 @@ from typing import Any, Dict, List, Sequence
 from dmm.domain.gfile.parser import GParser, RmuFrame, GObject
 from dmm.config.constants import (
     RMU_RELAY_SIGNAL_CODE,
-    RMU_RELAY_SIGNAL_DEVREF,
+    RMU_RELAY_SIGNAL_CLASSIFICATION,
     RMU_RELAY_SIGNAL_TAG,
     RMU_RELAY_SIGNAL_TABLE_ID,
+)
+from dmm.config.defaults import DEFAULT_RMU_PROTECTION_SCOPE
+from dmm.domain.gfile.element_catalog import (
+    element_key_candidates,
+    element_keys_for_classification,
 )
 from dmm.infrastructure.database.oracle import OracleClient
 
@@ -38,6 +43,8 @@ class RmuValidator:
         device_rules: Dict[str, Dict[str, Any]],
         breaker_name_source: str = "GRAPHICAL_TEXT",
         log=None,
+        protection_scope: str = DEFAULT_RMU_PROTECTION_SCOPE,
+        element_catalog=None,
     ):
         self.db = db
         self.parser = parser
@@ -47,21 +54,116 @@ class RmuValidator:
         # Keep the constructor argument only for backward compatibility with
         # older callers/settings, but intentionally ignore its value.
         self.breaker_name_source = "GRAPHICAL_TEXT"
+        scope = str(protection_scope or DEFAULT_RMU_PROTECTION_SCOPE).strip().upper()
+        self.protection_scope = scope if scope in {"ALL", "SMART_ONLY"} else DEFAULT_RMU_PROTECTION_SCOPE
+        self.element_catalog = element_catalog if isinstance(element_catalog, dict) else {}
+        # Load *all* element definitions marked RMU_PWBH_EFI first.  EFI
+        # discovery later only checks whether a pwbh devref matches any one of
+        # these exact keys; no concrete file name is special.
+        self.efi_element_keys = element_keys_for_classification(
+            self.element_catalog,
+            RMU_RELAY_SIGNAL_CLASSIFICATION,
+        )
         self.log = log or (lambda msg: None)
 
-    @staticmethod
-    def _is_normal_relay_signal(elem):
-        """Match only the explicitly designated EFI G element."""
+    def _is_efi_relay_signal(self, elem):
+        """Match EFI solely through the RMU_PWBH_EFI element classification.
+
+        No concrete element-definition file name is embedded here.  If the
+        element catalog marks multiple files as RMU_PWBH_EFI, every one of
+        those files is accepted when its exact devref is used in the G file.
+        """
         if elem.tag != RMU_RELAY_SIGNAL_TAG:
             return False
-        devref = norm(elem.attrs.get("devref"))
-        file_part = devref.lstrip("#").split(":", 1)[0].replace("\\", "/")
-        return file_part.rsplit("/", 1)[-1].casefold() == RMU_RELAY_SIGNAL_DEVREF
+        devref_keys = set(element_key_candidates(norm(elem.attrs.get("devref"))))
+        return bool(devref_keys.intersection(self.efi_element_keys))
 
     @staticmethod
     def _relay_keyid(elem):
-        """NariPd_Normal uses slot 1 for the EFI value KeyID."""
+        """RMU_PWBH_EFI signals use slot 1 for the EFI value KeyID."""
         return norm(elem.attrs.get("keyid1"))
+
+
+    def _apply_non_smart_relay_policy(self, row, elem):
+        """Apply SMART_ONLY policy to a NORMAL-RMU EFI signal.
+
+        In SMART_ONLY mode a non-smart RMU must not keep an EFI model link.
+        Existing linked EFI attributes are cleared back to the field-observed
+        unlinked state while preserving the original attribute keys.
+        """
+        row["rmu_protection_scope"] = self.protection_scope
+        row["rmu_is_smart"] = "NO"
+        row["selected_name_source"] = "FIXED_EFI_INDICATOR"
+        row["logical_code"] = RMU_RELAY_SIGNAL_CODE
+        row["selected_device_name"] = RMU_RELAY_SIGNAL_CODE
+        row["graphical_name"] = norm(elem.attrs.get("key_name1"))
+        row["current_keyid"] = self._relay_keyid(elem)
+        row["model_linked"] = "YES" if row["current_keyid"] else "NO"
+        row["policy_exempt"] = "YES"
+
+        # Reference state confirmed from the supplied JED-CTL-ADF drawing
+        # (e.g. RMU #5): app/app1/state1/keyid1 empty and p_ReportType1=0.
+        # Never remove attribute keys.  For a previously linked object, clear
+        # only keys that already exist on that exact G object.
+        clear_template = {
+            "app": "",
+            "app1": "",
+            "voltype1": "",
+            "p_ReportType1": "0",
+            "state1": "",
+            "keyid1": "",
+        }
+        row["policy_clear_attributes"] = {
+            key: value
+            for key, value in clear_template.items()
+            if key in elem.attrs
+        }
+
+        if row["current_keyid"]:
+            row.update({
+                "status": "RELINK",
+                "severity": "POLICY_CLEAR",
+                "reason": "SMART_ONLY_CLEAR_NONSMART_EFI",
+                "model_link_correct": "NO",
+                "model_link_status": "仅SMART策略：非智能环网柜已有保护/EFI关联，需要清除",
+                "association_action": "清除非智能环网柜保护/EFI关联（策略强制）",
+                "writeback_needed": "YES",
+                "association_ready": "YES",
+                "policy_clear_link": "YES",
+                "mandatory_policy_change": "YES",
+            })
+        else:
+            row.update({
+                "status": "PASS",
+                "severity": "POLICY_SKIPPED",
+                "reason": "SMART_ONLY_NONSMART_EFI_ALREADY_UNLINKED",
+                "model_link_correct": "YES",
+                "model_link_status": "仅SMART策略：非智能环网柜保护/EFI保持未关联",
+                "association_action": "无需处理",
+                "writeback_needed": "NO",
+                "association_ready": "NO",
+                "policy_clear_link": "NO",
+                "mandatory_policy_change": "NO",
+            })
+
+    @staticmethod
+    def _filter_rmu_records_by_feeder(records, required_feeder_id):
+        """Return RMU rows eligible for the current drawing feeder.
+
+        When no feeder constraint is supplied the historical RMU behavior is
+        preserved exactly.  For a single-line drawing, duplicate RMU names in
+        13501 are resolved *within* the already-resolved drawing FEEDER_ID:
+        records on other feeders are ignored instead of making the name
+        globally ambiguous.
+        """
+        rows = list(records or [])
+        feeder_id = int_or_none(required_feeder_id)
+        if feeder_id is None:
+            return rows
+        return [
+            row for row in rows
+            if int_or_none((row or {}).get("feeder_id")) == feeder_id
+        ]
 
     def _resolve_rmu_name(
         self,
@@ -69,6 +171,7 @@ class RmuValidator:
         frame: RmuFrame,
         positions: Sequence[str],
         preassigned_candidates=None,
+        required_feeder_id=None,
     ):
         frame_key = (frame.frame.xml_index, frame.frame.xml_id)
         if preassigned_candidates is None:
@@ -88,7 +191,7 @@ class RmuValidator:
                 "status": "FAIL",
                 "reason": (
                     "RMU_NAME_NOT_PARSED: "
-                    "在指定的环网柜名称方向内未解析到有效名称文字"
+                    "环网柜名称固定只识别矩形框上方 Text；上方未找到有效名称，环网柜名称识别失败"
                 ),
                 "candidate_rows": [],
                 "selected": None,
@@ -113,7 +216,7 @@ class RmuValidator:
         )
 
         chosen = ordered[0]
-        selection_reason = "SINGLE_NEAREST_DIRECTION_LABEL"
+        selection_reason = "JEDDAH_OUTSIDE_FRAME_TOP_ONLY"
 
         chosen_name = norm(getattr(chosen, "text", ""))
         if not chosen_name:
@@ -131,7 +234,10 @@ class RmuValidator:
         selected_row = None
 
         for c in all_candidates:
-            records = self.db.get_rmu_records(c.text)
+            all_records = self.db.get_rmu_records(c.text)
+            records = self._filter_rmu_records_by_feeder(
+                all_records, required_feeder_id
+            )
             row = {
                 "name": c.text,
                 "directions": c.direction,
@@ -141,7 +247,11 @@ class RmuValidator:
                 "is_green": "YES" if c.is_green else "NO",
                 "xml_id": c.obj.xml_id,
                 "db_count": len(records),
+                "db_total_count": len(all_records),
+                "feeder_match_count": len(records),
+                "required_feeder_id": int_or_none(required_feeder_id) or "",
                 "db_records": records,
+                "db_all_records": all_records,
                 "selected_by_rule": "YES" if c is chosen else "NO",
                 "selection_reason": (
                     selection_reason if c is chosen else ""
@@ -152,7 +262,10 @@ class RmuValidator:
             if c is chosen:
                 selected_row = row
 
-        records = self.db.get_rmu_records(chosen_name)
+        all_records = self.db.get_rmu_records(chosen_name)
+        records = self._filter_rmu_records_by_feeder(
+            all_records, required_feeder_id
+        )
 
         if len(records) == 1:
             return {
@@ -173,7 +286,19 @@ class RmuValidator:
         if len(records) > 1:
             return {
                 "status": "FAIL",
-                "reason": "RMU_DUPLICATE_IN_DATABASE",
+                "reason": (
+                    "RMU_DUPLICATE_IN_FEEDER"
+                    if int_or_none(required_feeder_id) is not None
+                    else "RMU_DUPLICATE_IN_DATABASE"
+                ),
+                "candidate_rows": candidate_rows,
+                "selected": selected_row,
+            }
+
+        if int_or_none(required_feeder_id) is not None and all_records:
+            return {
+                "status": "FAIL",
+                "reason": "RMU_NOT_FOUND_IN_CURRENT_FEEDER",
                 "candidate_rows": candidate_rows,
                 "selected": selected_row,
             }
@@ -207,6 +332,9 @@ class RmuValidator:
             "db_name": "",
             "db_combined_id": "",
             "db_bv_id": "",
+            "db_feeder_id": "",
+            "db_match_field": "",
+            "required_feeder_id": "",
             "expected_keyid": "",
             "expected_keyid_verified": "",
             "current_keyid": elem.keyid,
@@ -234,6 +362,28 @@ class RmuValidator:
     @staticmethod
     def _find_by_code(rows, code: str):
         return [r for r in rows if norm(r.get("code")) == norm(code)]
+
+    @staticmethod
+    def _find_by_name(rows, name: str):
+        return [r for r in rows if norm(r.get("name")) == norm(name)]
+
+    @staticmethod
+    def _filter_device_rows_by_feeder(rows, required_feeder_id):
+        """Keep only child-device rows that belong to the filename feeder.
+
+        RMU child tables are queried by COMBINED_ID first, so every row in
+        ``rows`` is expected to belong to the current cabinet.  Jeddah adds a
+        second hard boundary: the child device must also carry the same
+        FEEDER_ID that was resolved from the G filename.  Rows with an empty
+        FEEDER_ID are intentionally excluded rather than guessed.
+        """
+        feeder_id = int_or_none(required_feeder_id)
+        if feeder_id is None:
+            return []
+        return [
+            row for row in (rows or [])
+            if int_or_none((row or {}).get("feeder_id")) == feeder_id
+        ]
 
     @staticmethod
     def _set_fail(row, reason):
@@ -381,6 +531,39 @@ class RmuValidator:
 
         return True
 
+    def _validate_expected_device_feeder(self, row, dev, required_feeder_id):
+        """Hard rule: a child device must belong to the filename feeder."""
+        expected_feeder_id = int_or_none(required_feeder_id)
+        actual_feeder_id = int_or_none((dev or {}).get("feeder_id"))
+        row["required_feeder_id"] = expected_feeder_id or ""
+        row["db_feeder_id"] = actual_feeder_id or ""
+
+        if expected_feeder_id is None:
+            self._set_fail(
+                row,
+                "DRAWING_FEEDER_NOT_RESOLVED: 文件名未能唯一确定图级馈线，禁止设备关联",
+            )
+            return False
+
+        if actual_feeder_id is None:
+            self._set_fail(
+                row,
+                "DEVICE_FEEDER_ID_EMPTY: 数据库设备 FEEDER_ID 为空，禁止关联",
+            )
+            return False
+
+        if actual_feeder_id != expected_feeder_id:
+            row["model_link_correct"] = "NO"
+            row["association_action"] = "禁止自动关联，请检查设备馈线归属"
+            self._set_fail(
+                row,
+                "DATABASE_DEVICE_FEEDER_MISMATCH: "
+                f"设备FEEDER_ID={actual_feeder_id}；"
+                f"文件名馈线FEEDER_ID={expected_feeder_id}",
+            )
+            return False
+        return True
+
     def _validate_one_to_one_device_mapping(self, rmu_result):
         """
         Hard one-to-one rule inside one G-file RMU.
@@ -394,7 +577,7 @@ class RmuValidator:
         """
         rows = [
             row for row in rmu_result.get("device_rows", [])
-            if row.get("xml_id")
+            if row.get("xml_id") and row.get("policy_exempt") != "YES"
         ]
 
         by_logical_name = defaultdict(list)
@@ -1196,12 +1379,12 @@ class RmuValidator:
         for elem in elements:
             elements_by_tag[elem.tag].append(elem)
 
-        # The relay-signal rule is exact: other pwbh symbols are not RMU
-        # devices and must not enter the association report.
+        # The relay-signal rule is classification-driven: only pwbh objects whose
+        # element definition is marked RMU_PWBH_EFI may enter the RMU report.
         elements_by_tag[RMU_RELAY_SIGNAL_TAG] = [
             elem
             for elem in elements_by_tag.get(RMU_RELAY_SIGNAL_TAG, [])
-            if self._is_normal_relay_signal(elem)
+            if self._is_efi_relay_signal(elem)
         ]
 
         breakers = elements_by_tag.get("CBreakerDis", [])
@@ -1344,10 +1527,11 @@ class RmuValidator:
             "db_name": norm(dev.get("name")),
             "db_combined_id": dev.get("combined_id", ""),
             "db_bv_id": dev.get("bv_id", ""),
+            "db_feeder_id": dev.get("feeder_id", ""),
         })
 
     def _validate_relay_signal(self, row, elem, db_set, rule):
-        """Validate NariPd_Normal against dms_relay_sig.CODE exactly."""
+        """Validate a classification-marked RMU EFI signal against dms_relay_sig.CODE."""
         row["selected_name_source"] = "FIXED_EFI_INDICATOR"
         row["logical_code"] = RMU_RELAY_SIGNAL_CODE
         row["selected_device_name"] = RMU_RELAY_SIGNAL_CODE
@@ -1403,11 +1587,7 @@ class RmuValidator:
         row["graphical_name"] = graphical_name
         row["selected_name_source"] = self.breaker_name_source
         row["selected_device_name"] = selected_name
-
-        # In graphical-name mode, the visible G-file text becomes the logical
-        # logical CODE used by every downstream comparison. The raw XML naming attribute is intentionally ignored.
-        logical_code = selected_name
-        row["logical_code"] = logical_code
+        row["logical_code"] = selected_name
 
         if not selected_name:
             self._set_fail(
@@ -1417,106 +1597,151 @@ class RmuValidator:
             )
             return
 
-        matches = self._find_by_code(db_set["rows"], selected_name)
-        row["db_match_count"] = len(matches)
-        if len(matches) == 0:
+        feeder_rows = self._filter_device_rows_by_feeder(
+            db_set.get("rows", []), row.get("required_feeder_id")
+        )
+        if not feeder_rows:
             self._set_fail(
                 row,
-                f"BREAKER_GRAPHICAL_NAME_DB_CODE_NOT_FOUND: "
-                f"图上名称={selected_name}；数据库中不存在对应 CODE；"
-                "请检查该环网柜开关命名方式",
-            )
-            return
-        if len(matches) > 1:
-            self._set_fail(
-                row,
-                f"BREAKER_GRAPHICAL_NAME_DB_CODE_DUPLICATE: "
-                f"图上名称={row.get('selected_device_name')}；"
-                "数据库存在多条相同 CODE，请检查该环网柜命名方式或数据库设备",
+                "BREAKER_NOT_FOUND_IN_CURRENT_FEEDER: "
+                f"图上名称={selected_name}；当前环网柜内没有属于文件名馈线的可用开关设备",
             )
             return
 
+        # Jeddah rule: NAME is authoritative when it exists; CODE is only a
+        # fallback when no NAME match exists.  Never let a CODE match override
+        # an existing NAME match.
+        name_matches = self._find_by_name(feeder_rows, selected_name)
+        if len(name_matches) > 1:
+            row["db_match_count"] = len(name_matches)
+            self._set_fail(
+                row,
+                "BREAKER_DB_NAME_DUPLICATE: "
+                f"NAME={selected_name}；当前环网柜且当前馈线下存在多条同名设备",
+            )
+            return
+        if len(name_matches) == 1:
+            matches = name_matches
+            row["db_match_field"] = "NAME"
+        else:
+            code_matches = self._find_by_code(feeder_rows, selected_name)
+            if len(code_matches) > 1:
+                row["db_match_count"] = len(code_matches)
+                self._set_fail(
+                    row,
+                    "BREAKER_DB_CODE_DUPLICATE: "
+                    f"CODE={selected_name}；NAME 未匹配，CODE 兜底存在多条设备",
+                )
+                return
+            if len(code_matches) == 0:
+                row["db_match_count"] = 0
+                self._set_fail(
+                    row,
+                    "BREAKER_NAME_AND_CODE_NOT_FOUND: "
+                    f"NAME={selected_name} 未找到；CODE={selected_name} 兜底也未找到",
+                )
+                return
+            matches = code_matches
+            row["db_match_field"] = "CODE"
+
+        row["db_match_count"] = 1
         dev = matches[0]
         self._fill_db_fields(row, dev)
-        code = norm(dev.get("code"))
-
-        if not code:
-            self._set_fail(row, "DB_CODE_EMPTY")
-            return
-        if not logical_code:
-            self._set_fail(row, "LOGICAL_CODE_EMPTY")
-            return
-        if code != logical_code:
-            self._set_fail(row, f"CBREAKER_CODE_LOGICAL_MISMATCH (CODE={code}, LOGICAL_CODE={logical_code})")
-            return
 
         device_id = int_or_none(dev.get("id"))
         if device_id is None:
             self._set_fail(row, "DEVICE_ID_INVALID")
             return
 
-        if not self._validate_expected_device_ownership(
-            row,
-            dev,
-            row.get("rmu_id"),
+        if not self._validate_expected_device_ownership(row, dev, row.get("rmu_id")):
+            return
+        if not self._validate_expected_device_feeder(
+            row, dev, row.get("required_feeder_id")
         ):
             return
-
         if not self._verify_expected_keyid(row, device_id, rule):
             return
 
         self._evaluate_current_model(row, elem, device_id, rule, row.get("rmu_id"))
 
     def _validate_ground(self, row, elem, db_set, rule, breaker_name):
-        row["selected_name_source"] = "PAIRED_CBREAKER_PLUS_D"
         row["paired_breaker_name"] = breaker_name
-        expected_code = (breaker_name + "D") if breaker_name else ""
-        row["selected_device_name"] = expected_code
-
-        # When graphical-name mode is selected, the logical CODE of a
-        # ground disconnector is derived only from its paired breaker: breaker+D.
-        # The raw G XML naming attribute is not used for validation.
-        logical_code = expected_code
-        row["logical_code"] = logical_code
-
         if not breaker_name:
             self._set_fail(row, "GROUND_BREAKER_PAIR_NOT_RESOLVED")
             return
 
-        matches = self._find_by_code(db_set["rows"], expected_code)
-        row["db_match_count"] = len(matches)
-        if len(matches) == 0:
-            self._set_fail(row, f"DEVICE_NOT_FOUND: CODE={expected_code}; 数据库中不存在该设备")
-            return
-        if len(matches) > 1:
-            self._set_fail(row, f"DEVICE_CODE_DUPLICATE: CODE={row.get('selected_device_name')}; 数据库中存在多条匹配设备")
+        # Preferred database NAME: Y1 -> KY1, Q1 -> KQ1.  If the graphical
+        # breaker name already starts with KY/KQ, do not add a second K.
+        breaker_norm = norm(breaker_name)
+        expected_name = (
+            breaker_norm
+            if breaker_norm.startswith(("KY", "KQ"))
+            else f"K{breaker_norm}"
+        )
+        expected_code = f"{breaker_norm}D"
+        row["selected_name_source"] = "PAIRED_CBREAKER_NAME_THEN_CODE"
+        row["selected_device_name"] = expected_name
+        row["logical_code"] = expected_code
+
+        feeder_rows = self._filter_device_rows_by_feeder(
+            db_set.get("rows", []), row.get("required_feeder_id")
+        )
+        if not feeder_rows:
+            self._set_fail(
+                row,
+                "GROUND_NOT_FOUND_IN_CURRENT_FEEDER: "
+                f"NAME={expected_name}；当前环网柜内没有属于文件名馈线的接地刀闸",
+            )
             return
 
+        name_matches = self._find_by_name(feeder_rows, expected_name)
+        if len(name_matches) > 1:
+            row["db_match_count"] = len(name_matches)
+            self._set_fail(
+                row,
+                "GROUND_DB_NAME_DUPLICATE: "
+                f"NAME={expected_name}；当前环网柜且当前馈线下存在多条同名设备",
+            )
+            return
+        if len(name_matches) == 1:
+            matches = name_matches
+            row["db_match_field"] = "NAME"
+            row["selected_device_name"] = expected_name
+        else:
+            code_matches = self._find_by_code(feeder_rows, expected_code)
+            if len(code_matches) > 1:
+                row["db_match_count"] = len(code_matches)
+                self._set_fail(
+                    row,
+                    "GROUND_DB_CODE_DUPLICATE: "
+                    f"NAME={expected_name} 未匹配；CODE={expected_code} 兜底存在多条设备",
+                )
+                return
+            if len(code_matches) == 0:
+                row["db_match_count"] = 0
+                self._set_fail(
+                    row,
+                    "GROUND_NAME_AND_CODE_NOT_FOUND: "
+                    f"NAME={expected_name} 未找到；CODE={expected_code} 兜底也未找到",
+                )
+                return
+            matches = code_matches
+            row["db_match_field"] = "CODE"
+            row["selected_device_name"] = expected_code
+
+        row["db_match_count"] = 1
         dev = matches[0]
         self._fill_db_fields(row, dev)
-        code = norm(dev.get("code"))
-        if not code:
-            self._set_fail(row, "DB_CODE_EMPTY")
-            return
-        if code != expected_code:
-            self._set_fail(row, f"GROUND_CODE_EXPECTED_MISMATCH (CODE={code}, EXPECTED={expected_code})")
-            return
-        if not logical_code:
-            self._set_fail(row, "LOGICAL_CODE_EMPTY")
-            return
-        if code != logical_code:
-            self._set_fail(row, f"GROUND_CODE_LOGICAL_MISMATCH (CODE={code}, LOGICAL_CODE={logical_code})")
-            return
 
         device_id = int_or_none(dev.get("id"))
         if device_id is None:
             self._set_fail(row, "DEVICE_ID_INVALID")
             return
 
-        if not self._validate_expected_device_ownership(
-            row,
-            dev,
-            row.get("rmu_id"),
+        if not self._validate_expected_device_ownership(row, dev, row.get("rmu_id")):
+            return
+        if not self._validate_expected_device_feeder(
+            row, dev, row.get("required_feeder_id")
         ):
             return
         if not self._verify_expected_keyid(row, device_id, rule):
@@ -1536,7 +1761,10 @@ class RmuValidator:
             self._set_fail(row, "LOGICAL_CODE_EMPTY")
             return
 
-        matches = self._find_by_code(db_set["rows"], logical_code)
+        feeder_rows = self._filter_device_rows_by_feeder(
+            db_set.get("rows", []), row.get("required_feeder_id")
+        )
+        matches = self._find_by_code(feeder_rows, logical_code)
         row["db_match_count"] = len(matches)
         if len(matches) == 0:
             self._set_fail(row, f"DEVICE_NOT_FOUND: CODE={logical_code}; 数据库中不存在该设备")
@@ -1564,6 +1792,10 @@ class RmuValidator:
             row,
             dev,
             row.get("rmu_id"),
+        ):
+            return
+        if not self._validate_expected_device_feeder(
+            row, dev, row.get("required_feeder_id")
         ):
             return
         if not self._verify_expected_keyid(row, device_id, rule):
@@ -1602,6 +1834,20 @@ class RmuValidator:
                 "环网柜必须唯一，禁止自动关联。"
             )
 
+        if code == "RMU_DUPLICATE_IN_FEEDER":
+            return (
+                "RMU_DUPLICATE_IN_FEEDER: "
+                f"已解析环网柜名称={name_ref or '-'}，但当前图级馈线内仍存在多条同名环网柜；"
+                "无法唯一确定目标环网柜，禁止自动关联。"
+            )
+
+        if code == "RMU_NOT_FOUND_IN_CURRENT_FEEDER":
+            return (
+                "RMU_NOT_FOUND_IN_CURRENT_FEEDER: "
+                f"已解析环网柜名称={name_ref or '-'}，数据库存在同名记录，"
+                "但没有任何一条属于当前图级馈线；禁止自动关联。"
+            )
+
         if code == "RMU_NOT_FOUND_IN_DATABASE":
             return (
                 "RMU_NOT_FOUND_IN_DATABASE: "
@@ -1615,7 +1861,16 @@ class RmuValidator:
             "环网柜身份无法可靠确定，禁止该RMU及柜内设备自动关联。"
         )
 
-    def validate_file(self, g_path: str | Path, positions: Sequence[str], progress_callback=None) -> Dict[str, Any]:
+    def validate_file(
+        self,
+        g_path: str | Path,
+        positions: Sequence[str],
+        progress_callback=None,
+        required_feeder_id=None,
+    ) -> Dict[str, Any]:
+        # Jeddah production hard rule: RMU name recognition is TOP-only.
+        # Ignore any legacy/cached/configured direction passed by callers.
+        positions = ("top",)
         parsed = self.parser.parse(g_path)
         frames = self.parser.find_rmu_frames(parsed)
         name_assignment_error = ""
@@ -1649,6 +1904,7 @@ class RmuValidator:
             "g_file": str(parsed.path),
             "file_name": parsed.path.name,
             "breaker_name_source": self.breaker_name_source,
+            "required_feeder_id": int_or_none(required_feeder_id) or "",
             "rmu_frame_count": len(frames),
             "rmu_results": [],
             "summary": {},
@@ -1742,10 +1998,14 @@ class RmuValidator:
                     smart_info.get("marker_types", [])
                 ),
                 "rmu_smart_markers": smart_info.get("markers", []),
+                "rmu_protection_scope": self.protection_scope,
                 "rmu_status": "",
                 "rmu_severity": "",
                 "rmu_reason": "",
                 "rmu_db_count": 0,
+                "rmu_db_total_count": 0,
+                "rmu_feeder_match_count": 0,
+                "required_feeder_id": int_or_none(required_feeder_id) or "",
                 "rmu_records": [],
                 "rmu_ids": [],
                 "device_rows": [],
@@ -1775,6 +2035,7 @@ class RmuValidator:
                         frame,
                         positions,
                         preassigned_candidates=preassigned_name_candidates,
+                        required_feeder_id=required_feeder_id,
                     )
                 except Exception as exc:
                     resolved = {
@@ -1813,6 +2074,12 @@ class RmuValidator:
                         + rmu_result["rmu_type_check_reason"]
                     )
                 rmu_result["rmu_db_count"] = display_candidate["db_count"]
+                rmu_result["rmu_db_total_count"] = display_candidate.get(
+                    "db_total_count", display_candidate["db_count"]
+                )
+                rmu_result["rmu_feeder_match_count"] = display_candidate.get(
+                    "feeder_match_count", display_candidate["db_count"]
+                )
                 rmu_result["rmu_records"] = display_candidate["db_records"]
                 rmu_result["rmu_ids"] = [
                     int_or_none(rec.get("id"))
@@ -1899,6 +2166,29 @@ class RmuValidator:
             # Query all configured DB device sets for the RMU.
             db_sets = {}
             for tag, rule in self.device_rules.items():
+                if (
+                    tag == RMU_RELAY_SIGNAL_TAG
+                    and self.protection_scope == "SMART_ONLY"
+                    and str(rmu_result.get("rmu_is_smart", "NO")).upper() != "YES"
+                ):
+                    # In SMART_ONLY mode NORMAL RMUs must not acquire an EFI
+                    # link. No relay-table query is needed; an existing G link
+                    # is handled below as a mandatory clear operation.
+                    db_sets[tag] = {
+                        "table_id": int(rule["table_id"]),
+                        "table_name": "",
+                        "domain": int(rule["domain"]),
+                        "rows": [],
+                        "policy_skipped": True,
+                    }
+                    rmu_result["db_inventory"][tag] = {
+                        "table_id": int(rule["table_id"]),
+                        "table_name": "",
+                        "domain": int(rule["domain"]),
+                        "count": 0,
+                        "policy": "SMART_ONLY_SKIP_NORMAL_RMU",
+                    }
+                    continue
                 try:
                     if tag == RMU_RELAY_SIGNAL_TAG:
                         table_name, rows = self.db.get_relay_signals_by_combined_id(
@@ -1948,12 +2238,12 @@ class RmuValidator:
             for elem in elements:
                 elements_by_tag[elem.tag].append(elem)
 
-            # Only the explicitly named Normal pwbh object is a relay signal.
-            # Other pwbh objects in the same RMU are unrelated graphics.
+            # Only pwbh objects whose element-definition catalog record is marked
+            # RMU_PWBH_EFI are relay signals. Other pwbh objects are unrelated graphics.
             elements_by_tag[RMU_RELAY_SIGNAL_TAG] = [
                 elem
                 for elem in elements_by_tag.get(RMU_RELAY_SIGNAL_TAG, [])
-                if self._is_normal_relay_signal(elem)
+                if self._is_efi_relay_signal(elem)
             ]
 
             # The G file is authoritative for device validation.
@@ -1994,6 +2284,7 @@ class RmuValidator:
                 rule = self.device_rules[elem.tag]
                 db_set = db_sets[elem.tag]
                 row = self._default_device_row(rmu_result["rmu_name"], rmu_id, elem, rule, db_set)
+                row["required_feeder_id"] = int_or_none(required_feeder_id) or ""
                 graphical_name = norm(graph_names.get(elem.xml_id, {}).get("name"))
                 selected_name = breaker_names.get(elem.xml_id, "")
                 info = graph_names.get(elem.xml_id, {})
@@ -2024,6 +2315,7 @@ class RmuValidator:
                 rule = self.device_rules[elem.tag]
                 db_set = db_sets[elem.tag]
                 row = self._default_device_row(rmu_result["rmu_name"], rmu_id, elem, rule, db_set)
+                row["required_feeder_id"] = int_or_none(required_feeder_id) or ""
                 br_id = ground_to_breaker.get(elem.xml_id, "")
                 breaker_name = breaker_names.get(br_id, "")
                 self._validate_ground(row, elem, db_set, rule, breaker_name)
@@ -2034,10 +2326,11 @@ class RmuValidator:
                 rule = self.device_rules[elem.tag]
                 db_set = db_sets[elem.tag]
                 row = self._default_device_row(rmu_result["rmu_name"], rmu_id, elem, rule, db_set)
+                row["required_feeder_id"] = int_or_none(required_feeder_id) or ""
                 self._validate_bus(row, elem, db_set, rule)
                 rmu_result["device_rows"].append(row)
 
-            # Fixed EFI relay signal inside the RMU.
+            # Classification-marked EFI relay signal inside the RMU.
             for elem in elements_by_tag.get(RMU_RELAY_SIGNAL_TAG, []):
                 rule = self.device_rules[elem.tag]
                 db_set = db_sets[elem.tag]
@@ -2048,11 +2341,22 @@ class RmuValidator:
                     rule,
                     db_set,
                 )
-                row["current_keyid"] = self._relay_keyid(elem)
-                row["model_linked"] = (
-                    "YES" if row["current_keyid"] else "NO"
-                )
-                self._validate_relay_signal(row, elem, db_set, rule)
+                row["required_feeder_id"] = int_or_none(required_feeder_id) or ""
+                row["rmu_is_smart"] = rmu_result.get("rmu_is_smart", "NO")
+                row["rmu_smart_marker_types"] = rmu_result.get("rmu_smart_marker_types", "")
+                row["rmu_protection_scope"] = self.protection_scope
+
+                if (
+                    self.protection_scope == "SMART_ONLY"
+                    and str(rmu_result.get("rmu_is_smart", "NO")).upper() != "YES"
+                ):
+                    self._apply_non_smart_relay_policy(row, elem)
+                else:
+                    row["current_keyid"] = self._relay_keyid(elem)
+                    row["model_linked"] = (
+                        "YES" if row["current_keyid"] else "NO"
+                    )
+                    self._validate_relay_signal(row, elem, db_set, rule)
                 rmu_result["device_rows"].append(row)
 
             # Enforce hard one-to-one mapping after all G target rows have
@@ -2072,7 +2376,9 @@ class RmuValidator:
             for tag in self.device_rules:
                 typed_rows = [
                     row for row in rmu_result["device_rows"]
-                    if row.get("xml_id") and row.get("object_type") == tag
+                    if row.get("xml_id")
+                    and row.get("object_type") == tag
+                    and row.get("policy_exempt") != "YES"
                 ]
                 matched_ids = [
                     int_or_none(row.get("db_device_id"))
@@ -2114,6 +2420,7 @@ class RmuValidator:
             row_blocks = [
                 r for r in g_rows
                 if r.get("association_ready") != "YES"
+                and r.get("policy_exempt") != "YES"
             ]
             for r in row_blocks:
                 rmu_result["device_block_reasons"].append(

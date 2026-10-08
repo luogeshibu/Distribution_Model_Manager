@@ -148,6 +148,71 @@ class GWriteBackService:
             "after": {k: str(v) for k, v in dict(attributes or {}).items()},
         }
 
+
+    def verify_attribute_changes(
+        self,
+        g_path,
+        changes,
+        required_attributes=None,
+    ):
+        """Read the written G file back and verify exact attribute values.
+
+        ``required_attributes`` can restrict verification to safety-critical
+        fields such as TransformerDis keyid1/keyid2.  Missing attributes and
+        value mismatches are both treated as verification failures.
+        """
+        g_path = Path(g_path)
+        if not g_path.exists():
+            return {
+                "ok": False,
+                "errors": [f"输出 G 文件不存在：{g_path}"],
+            }
+
+        raw = g_path.read_bytes().decode("utf-8-sig")
+        normalized = []
+        required = set(required_attributes or ())
+        for change in changes or []:
+            tag = str(change.get("tag", "")).strip()
+            xml_id = str(change.get("xml_id", "")).strip()
+            attrs = dict(change.get("attributes", {}) or {})
+            if required:
+                attrs = {k: v for k, v in attrs.items() if k in required}
+            normalized.append((tag, xml_id, attrs))
+
+        target_keys = {(tag, xml_id) for tag, xml_id, _ in normalized}
+        indexed = self._index_target_open_tags(raw, target_keys)
+        errors = []
+        for tag, xml_id, attrs in normalized:
+            matches = indexed.get((tag, xml_id), [])
+            if len(matches) != 1:
+                errors.append(
+                    f"tag={tag}, XML ID={xml_id}, 输出匹配数={len(matches)}"
+                )
+                continue
+            opening = matches[0].group(0)
+            for attr_key, expected in attrs.items():
+                attr_re = re.compile(
+                    rf'\b{re.escape(attr_key)}\s*=\s*(["\'])(.*?)\1',
+                    re.DOTALL,
+                )
+                match = attr_re.search(opening)
+                if not match:
+                    errors.append(
+                        f"tag={tag}, XML ID={xml_id}, 缺少属性 {attr_key}"
+                    )
+                    continue
+                actual = match.group(2)
+                if actual != str(expected):
+                    errors.append(
+                        f"tag={tag}, XML ID={xml_id}, {attr_key}="
+                        f"{actual!r}，期望={str(expected)!r}"
+                    )
+
+        return {
+            "ok": not errors,
+            "errors": errors,
+        }
+
     def apply_attribute_changes(
         self,
         g_path,

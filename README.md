@@ -1,5 +1,694 @@
-# 配网模型管理工具 / Distribution Model Manager v4.1.40
+# Distribution Model Manager - Jeddah v4.2.23
 
+## v4.2.23 Full G-file before/after visual reports
+
+- The before/after report diagrams are no longer simplified topology sketches. They redraw the complete source G using its original canvas, coordinates, XML order, line geometry, Text/DText, RMU frames, visible poke boxes, status icons, switch/ground/protection symbols, NOP images and drawing-frame content.
+- White/yellow objects that were designed for a black runtime canvas are only remapped for readability on the report's white canvas; geometry and object placement remain source-authoritative.
+- Every rendered SVG object carries the source G metadata in an SVG title tooltip (id/name/devref/key_name/link/node_area when present). External icon-library geometry is not embedded in business G files, so those GIcon objects use deterministic vector surrogates inside their exact source x/y/w/h/rotate footprint.
+- The before view overlays numbered red/orange problem markers directly on the complete original G. The after view redraws the repaired complete G and overlays green repair markers, including a translucent highlight on modified line objects.
+- Directory/SSH batch behavior from v4.2.22 is retained: one independent report set per G plus one total HTML/CSV summary, and one failed file does not stop the rest.
+- Connectivity business rules remain unchanged: no feeder ownership, no NOP topology semantics, no Bus feeder-name lookup and no Oracle/model-database access.
+
+## v4.2.20 Connectivity-only whole-graph topology repair
+
+- Graphics Workspace now exposes **整图拓扑连接检查/修复** for Jeddah.
+- This page no longer determines feeder ownership, recognizes NOP, reads the feeder name above Bus, or queries Oracle/model databases.
+- It scans G-file line endpoints directly. Unique ConnectLine↔FeedLine gaps up to 25G are repaired by extending FeedLine orthogonally and adding reciprocal `link` / `node_area`.
+- Tiny collinear ConnectLine↔ConnectLine splits are repaired only up to 3G. Larger symbol/open-switch gaps (commonly about 18G) are intentionally protected from auto-repair.
+- Large feeder-propagation/RMU/NOP/SVG analysis is no longer run from this Jeddah page, so large G files are substantially faster.
+- Source G files are never overwritten; the tool emits a validated `*.topology-fixed.sln.pic.g` plus compact HTML/CSV repair details.
+
+## v4.2.18 Whole-graph feeder topology in Graphics Workspace (superseded on the Jeddah page)
+
+- v4.2.18 originally added feeder/NOP-aware whole-graph analysis. v4.2.20 keeps the legacy engine in source for compatibility/regression coverage but the Jeddah page no longer calls it.
+
+## v4.2.17 Jeddah graphics batch workflow cleanup
+
+This release removes the former Jeddah graphics-batch step that forced every `<FeedLine>` to `ls=1`. FeedLine line style is now preserved exactly as it is in the input G file. All other Jeddah graphics-batch steps keep their v4.2.16 behavior, including the large-run performance optimizations.
+
+## v4.2.16 Jeddah graphics batch performance
+
+This release optimizes only the **Graphics Workspace → Jeddah Graphics Batch Processing** orchestration for large 100~300+ file runs. Standalone graphics modules keep their existing business logic. The batch now buffers high-volume UI logs, reuses RMU identification results within one unchanged XML state, combines the RMU-name presentation pass with the following in-memory visual pass, avoids redundant intermediate pretty-print/self-parse cycles, skips the redundant post-ID margin recheck, and records per-stage timings for field diagnosis. SSH remains read-only and remote snapshots are still downloaded/validated before processing.
+
+
+## v4.2.15 one-click multi-model batch stability
+
+This release changes only the one-click multi-model orchestration layer. Individual model association rules remain unchanged. Large SSH batches now prepare their stable snapshot in the worker thread; candidate filtering also runs in the worker; batch log pressure and candidate-table population are reduced; cumulative report paths are rebased so the final Feeder stage can reuse its validated topology report after earlier modules have generated staged G files; and final G publication shows per-file progress.
+
+
+## v4.2.15 bilingual switch stability
+
+- Simplified Chinese remains the canonical UI and is fully restored after switching from English.
+- English-mode completeness from v4.2.13 is retained.
+- Dynamic labels, status banners, model help cards, table states, and late-created pages can switch EN -> ZH -> EN without contaminating the source language.
+- Business logic is unchanged.
+
+# Distribution Model Manager - Jeddah v4.2.13
+
+## v4.2.13 English UI full audit
+
+- English mode is audited across Settings, Help, Element Management, Graphics Workspace, and Model Workspace.
+- Dynamic Admin/status/cache text is retranslated after runtime refreshes instead of reverting to Chinese.
+- Embedded GFileStudio runtime translation is active inside the unified application, including lazy dialogs/pages.
+- Engineering data such as IDs, XML names, database values, file names, PASS/FAIL codes, KeyID and FEEDER_ID remain unchanged.
+- Business logic is unchanged; this release is presentation/i18n hardening only.
+
+## v4.2.11：图形工作区统一浅色选中高亮
+
+## v4.2.12 图形工作区表格选中样式统一
+
+- 图形工作区所有表格选中行统一使用浅绿色高亮，不再出现 Windows 默认深蓝色导致文字看不清。
+- 覆盖馈线合并顺序、查询并导入 G 文件、主母线人工分组、SSH 文件列表、ID/图元相关表格以及后续懒加载弹窗。
+- 仅调整 UI 展示，不改变任何图形处理或模型业务规则。
+
+
+- 图形工作区所有表格的选中行统一使用浅绿色高亮和深色文字，避免 Windows 默认深蓝选中背景遮挡文件名、状态等内容。
+- “查询并导入 G 文件”、馈线合并顺序、主母线人工分组、SSH G 文件列表、图元表、ID/图元升级表等统一视觉规则。
+- 仅修改 UI 选中状态显示，不改变任何图形处理业务逻辑。
+
+
+## v4.2.8 - English UI completeness
+
+- Completed an English-mode audit of the merged Jeddah application after the DMM + GFileStudio integration.
+- Added English translations for the shared-central-configuration Settings section, Safety Policy, Graphics Workspace, Element Management, multi-model association controls, and model logic section headings.
+- The DMM language switch now propagates into every embedded GFileStudio graphics page, including pages created lazily after the switch.
+- Embedded GFileStudio runtime translation can resolve the Graphics Workspace ancestor language manager, so dynamically updated graphics-page labels use the same language as the main application.
+- Dynamic Admin/central-repository status text is rebuilt in the active language.
+- No model recognition, Oracle query/write, SSH read-only, G-file write-back, feeder, RMU, or graphics-processing business rule was changed.
+
+# Distribution Model Manager - Jeddah v4.2.7
+
+## v4.2.7 失效历史路径静默清理
+
+- 上次保存的输入/输出/最近浏览/模板导出目录已经不存在时，不再弹出“上次路径不存在”或“上次目录不存在”告警。
+- 失效记录自动从本机设置中清除，并回退到当前模块默认目录或最近可用父目录。
+- 特别解决旧 GFileStudio workspace/runs 目录被清理、程序移动盘符后启动被历史路径弹窗打断的问题。
+
+
+## v4.2.6 馈线完整层级按 405 -> 404 -> 13500 显式解析
+
+- 文件名解析规则保持不变：`JED-<AREA>-<STATION>-NN` 使用 `NN -> AH3NN`；`JED-<AREA>-<STATION>-AGNN` 使用 `AGNN -> AG4NN`。例如 `ABH-03 -> AH303`，`MDN-AG04 -> AG404`。
+- 先用文件名站名精确唯一查询 `405/substation.NAME`，取得 `substation.ID` 与 `SUBAREA_ID`。
+- 再用 `SUBAREA_ID -> 404/subcontrolarea.ID` 解析真实调控区域。若 `subcontrolarea.CODE` 为空，则自动使用 `NAME`（例如 `JED-CTL`）并与父级 `JED` 组装为 `JED CTL`。
+- 最后仅在 `13500/dms_feeder_device.ST_ID = substation.ID` 范围内按文件名规则生成的 NAME 精确唯一锁定馈线。
+- RMU HTML“文件名馈线概览”现在显示：G文件、调控区域、所属站/厂站、13500馈线NAME、数据库验证馈线全名；CSV 同步写入同一套数据库验证结果。
+- 例如：`JED-CTL-ADF-34.sln.pic.g -> JED CTL / ADF / AH334 -> JED CTL ADF AH334`。
+- 调控区域层级仅用于报告完善；若旧库缺失 404 层级数据，不会改变已唯一确认的 405 + 13500 馈线关联结果，报告退回 `厂站 + 馈线`。
+
+## v4.2.5 RMU 报告写入数据库验证馈线全名
+
+- RMU 文件名馈线仍严格按 `G 文件名 -> 405/substation -> 13500/dms_feeder_device` 唯一确认，不改变任何模型关联规则。
+- 13500 唯一馈线确认后，使用数据库关系 `13500.ST_ID -> 405/substation.SUBAREA_ID -> subcontrolarea` 生成完整馈线路径。
+- RMU 汇总、设备明细、失败明细以及 HTML 的“文件名馈线概览”优先显示完整数据库馈线名，例如 `JED CTL ADF AH334`。
+- CSV 同时保留 `调控区域路径`、`厂站名称`、`13500馈线NAME`、`数据库验证馈线全名`、`图级馈线ID`，便于现场核对；中文界面仍同步输出 CN / EN 两份且业务数据一致。
+- 当旧数据库接口没有完整层级字段时自动退回原有馈线 NAME（例如 `AH334`），不影响既有流程。
+
+## v4.2.4 模型工作区 CSV 双语交付
+
+中文界面下，模型工作区生成的每一种 CSV 都同时输出 CN 和 EN 两个版本。两个版本来自同一份校验/关联结果、行数与业务数据一致，仅列名和既有说明类文本按语言展示。批量模式、失败明细和模型修改记录同样遵守该规则。
+
+## v4.2.3 统一中央仓库、Admin 与图元分类
+
+- 一体化程序只使用一个中央配置根目录：`/home/up8000/nari-international/distribution-model-manager/config`。
+- 图形工作区不再保留/继承独立 GFileStudio 中央目录；`id_rules.json` 与主程序 `instance.json`、`database.json`、`file_server.json`、`element_marks.json` 位于同一目录。
+- 图形工作区复用主程序 `machine_id` 和当前 Admin epoch；主程序成为/失去 Admin 后，已打开及后续懒加载的 ID 页面会同步启用/禁用“发布到中央”。
+- 图元分类仍以主程序“图元管理”保存的 `element_marks.json` 为唯一权威来源；模型工作区与图形工作区共享同一份分类。
+- 旧独立 GFileStudio AppData 仅保留处理参数/缓存兼容，不再决定中央仓库路径或 Admin 身份。
+
+
+> **一体化版本**：以 Jeddah Distribution Model Manager v4.1.111 为模型业务基线，内嵌 G File Studio v2.18.257 图形处理能力；Jazan v4.1.131 仅作为“模型工作区 + 图形工作区”集成形态参考。
+
+## v4.2.2 图形工作区图元管理收口
+
+- 删除图形工作区下拉框中的“服务器图元同步管理”；统一只使用主程序一级菜单“图元管理”。
+- 主程序“图元管理”保存后，图元定义元数据与分类标记会本地桥接到图形处理引擎缓存；图形模块不再要求用户进入第二套图元同步页面。
+- 吉达批处理、柱上变压器+熔断器、Poke、正交化等提示统一改为指向主程序“图元管理”。
+- 修正图形工作区顶部“主程序图元管理 / 主程序数据库/连接”两个快捷按钮的页面索引。
+- 服务器图元文件仍严格只读；桥接动作只转换本机已保存的图元目录信息，不自动访问 SSH。
+- 验证：图形/集成专项 34 passed；完整回归 `447 passed / 1 skipped / 32 failed`，32 个历史失败与 v4.2.1 基线一致。
+
+## v4.2.1 模型工作区整合
+
+- “批量关联”不再作为独立一级菜单；已并入“模型工作区”的“模型类型”下拉框，名称为“一键多模型关联”。
+- 一键模式和独立模型共用同一文件来源、Workspace、进度、Console 日志和报告入口；批量候选在模型工作区内统一确认。
+- 业务规则仍由 RMU / 柱上开关 / 柱上变压器 / 熔断器 / 配网主站设备 / 馈线独立模块负责，一键模式只负责编排。
+
+## v4.2.0 一体化入口
+
+左侧新增 **图形工作区**。模型关联继续由原吉达 DMM 规则执行，图形处理在同一个程序内提供异常小图元、ID、RMU、Poke、通用处理、合并、边距、图框、线路正交化、吉达图形批处理、柱上变压器+熔断器替换、RMU EFI 添加等模块；服务器图元定义与分类统一由主程序“图元管理”维护。
+
+- 原始 G 文件不覆盖；所有模型/图形操作仍输出到 Workspace/运行目录。
+- 图形工作区延迟加载，启动阶段不自动连接 Oracle/SSH/中央仓库。
+- 主程序的 Oracle、业务 G 文件 SSH、图元目录会投影到图形工作区本机缓存；图元分类标记也会本地桥接。
+- 为避免配置格式冲突，v4.2.0 保留现有 GFileStudio 的图形专用 ID/服务器图元缓存与中央分类文件格式；后续可以在不改变业务规则的前提下继续收口配置存储。
+- 现场批处理继续遵守“**只有实际修改过的 G 才输出**”的规则。
+
+> 当前版本：v4.1.111。吉达 RMU 名称严格只识别环网柜矩形框完整外部、且位于矩形框正上方的 Text；Text 框与任意 RMU 框有几何重叠即排除，上方无有效名称直接 FAIL。
+
+# 配网模型管理工具 / Distribution Model Manager v4.1.111
+
+
+
+
+## v4.1.111：配网主站设备改为文件名直接确定馈线
+
+- 主站模型不再通过附近 CBreaker、RMU 框、RMU 内已有 KeyID 或 13501.FEEDER_ID 反查所属馈线。
+- 所属厂站/馈线统一走现有吉达文件名链路：文件名 → 405/substation.NAME → 13500/dms_feeder_device(ST_ID+NAME) → 唯一 FEEDER_ID。
+- 普通两位编号仍为 `NN → AH3NN`；`AGNN` 仍为 `AG4NN`，例如 `JED-XXX-MDN-AG06.sln.pic.g → MDN / AG406`。
+- 得到文件名馈线后，原主站逻辑继续：使用厂站与馈线名称/代码在 406/Bay 中定位唯一 BAY_ID，再按 BAY_ID 查询 407/408/409。
+- 目标设备馈线归属校验、Disconnector 一对一排序、Domain、Expected KeyID、Preview/Apply、执行前重新校验和安全副本回写规则均保持不变。
+- 专项测试 5 passed；完整回归 `438 passed / 1 skipped / 32 failed`，失败节点与 v4.1.110 完全一致。
+
+
+## v4.1.110：吉达 AGNN 文件名馈线规则
+
+- 在原有 `JED-<区域>-<站名>-NN.sln.pic.g` → `AH3NN` 规则基础上，新增 `AGNN` 文件名分支。
+- `JED-XXX-MDN-AG06.sln.pic.g` 解析站名为 `MDN`，文件馈线 token 为 `AG06`，程序插入固定数字 `4` 后得到数据库馈线名 `AG406`。
+- 查询链保持不变：`405/substation.NAME=MDN` 必须唯一 → 获取站 ID → `13500/dms_feeder_device.ST_ID=站ID AND NAME=AG406` 必须唯一 → 该记录 ID 即图级 `FEEDER_ID`。
+- 原有两位编号文件名仍保持 `03 → AH303`、`16 → AH316`，没有改变。
+- 数据库找不到目标 `AG4NN` 馈线时仍直接阻断，并提示“馈线不存在，请检查该图的馈线是否已创建”。
+
+
+## v4.1.109：吉达 RMU 名称严格“框外 + 上方”
+
+- RMU 名称候选必须是完整位于 RMU 矩形框外部的 Text；Text 矩形框与任意已识别 RMU 矩形框发生几何重叠时直接排除。
+- 只允许目标 RMU 正上方 Text；Text 整体必须结束在 RMU 顶边之前/顶边处，右侧、左侧、下方、GLOBAL 全部禁止。
+- 仍保持最大 200 G 单位、一对一 Text 归属、名称排除字符串和数据库/馈线安全校验。
+- 上方没有符合“完整框外 + 正上方”的有效 Text 时，直接判定 `RMU_NAME_NOT_PARSED`，禁止该 RMU 自动关联。
+
+## v4.1.108：吉达 RMU 名称固定为 TOP ONLY
+
+- RMU 名称以识别出的 RMU 矩形框为唯一几何基准，只允许使用矩形框**上方**的框外 `Text`。
+- 右侧、左侧、下方以及 `GLOBAL` 全局兜底全部禁用；上方找不到距离不超过 200 G 单位的有效名称时，直接 `RMU_NAME_NOT_PARSED / FAIL`。
+- 柜内 Text 仍严格禁止作为任何 RMU 的名称；同一 Text 仍只允许分配给一个 RMU。
+- RMU 模块、馈线侧共享 RMU 解析、拓扑辅助解析统一使用 TOP-only 规则。
+- 其它 RMU 结构识别、文件名馈线、数据库精确匹配、柜内设备归属/馈线校验、KeyID 和安全回写规则不变。
+
+## v4.1.107：吉达 RMU 名称改为框外 TOP → RIGHT → GLOBAL
+
+- 环网柜结构识别仍以 RMU 矩形框为准：框内必须同时存在 `CBreakerDis + ZhaiWaiJieDiDaoZha + BusDis`。
+- 环网柜名称只允许来自 **RMU 框外 Text**。Text 中心位于任意 RMU 框内时，直接排除，绝不会拿柜内设备文字当柜名，也不会借给旁边 RMU。
+- 名称固定优先级：**上方 → 右侧 → 全局兜底**。当前 RMU 有上方候选时只取上方最近候选；没有上方才找右侧；两者都没有才在其它框外方向全局兜底。
+- “全局兜底”仍受 RMU 名称最大距离 **200 G 单位**约束，并继续保持同一 Text 只归属最近的一个 RMU。
+- 大字体 Text 的矩形可以轻微压到 RMU 边缘；只要 Text 中心仍在所有 RMU 框外，就可以按框外候选参与。
+- RMU 名称排除字符串、数据库名称精确匹配、同图重名阻断、文件名确定 FEEDER_ID、RMU/柜内设备馈线硬校验均保持 v4.1.106 逻辑不变。
+- 新规则专项 5 条；RMU 相关组合专项 18 passed；完整回归 421 passed / 1 skipped / 32 failed，失败节点与 v4.1.106 完全一致。
+
+
+## v4.1.106：所有模型新增关联失败 CSV
+
+- 在 v4.1.105 基线上新增统一失败导出：每次模型校验/关联生成原有 CSV 的同时，额外生成 `report_关联失败.csv`；英文模式生成 `report_association_failures.csv`。
+- 失败 CSV 严格跟随 HTML 报告颜色规则，只收集报告中显示为红色的行，不把黄色 UNLINKED/WARN、橙色 RELINK/CREATE、蓝色 BLOCKED 等混入。
+- RMU 模块同时收集【环网柜汇总】和【设备明细】中的红色行；馈线模块同时收集【馈线汇总】和【馈线段明细】中的红色行；柱上开关、柱上变压器、熔断器、配网主站设备分别收集自身明细中的红色行。
+- 新 CSV 增加【报告分类】列，便于区分失败来源；原报告字段完整保留。即使当前没有红色失败，也仍会生成带表头的空失败 CSV，保证所有模型模块产物一致。
+- `RMU_LINK` 等在 HTML 中按红色显示的历史硬错误状态也会进入失败 CSV，导出规则与页面颜色保持一致。
+- 验证/关联运行产物中新增 `failure_csv` 路径，并在 Console 中输出失败 CSV 文件位置。
+- 新增 v4.1.106 专项测试；完整回归 416 passed / 1 skipped / 32 failed，32 个失败节点与 v4.1.105 基线完全一致，无新增失败。
+
+
+## v4.1.105：柱上变压器标准图元优先识别
+
+- 柱上变压器设备类型识别第一优先级改为 G 图元 devref 精确指向 `Transformer_OH.pb.icn.g`；命中后直接认定为柱上变压器，不依赖图元管理分类。
+- 未命中标准图元时，再使用【图元管理】中的 `TRANSFORMER_OH` 分类标记作为第二级兜底，可继续支持现场自定义/替代图元。
+- 标准图元匹配为精确文件名匹配（大小写归一化），支持 devref 的目录路径与 `:root_id` 后缀，不做模糊包含。
+- 柱上变压器后续名称识别规则保持不变：纯数字 + 白色 + 无背景，TOP → RIGHT → GLOBAL，矩形最小边缘距离 ≤300，Text 一对一。
+- 数据库与馈线规则保持不变：图级馈线仍只由严格 JED 文件名确定，13505 / dms_tr_device 的目标设备 FEEDER_ID 必须等于图级 FEEDER_ID。
+- 双 KeyID 校验、Preview/Apply、安全副本回写逻辑保持不变。
+- 柱上变压器/FUSE 相关专项回归 45 passed；完整回归 407 passed / 1 skipped / 32 failed，32 个失败节点与 v4.1.104 基线完全一致。
+
+## v4.1.104：RMU 设备 NAME 优先 + CODE 兜底，并强制馈线归属
+
+- RMU 图级馈线对所有图统一由严格 G 文件名 → 405/substation → 13500/dms_feeder_device 唯一确定；不再只对单线图启用馈线约束。
+- RMU 本身必须属于该文件名馈线；当前馈线下没有同名 RMU 或存在多条同名 RMU 时禁止关联。
+- CBreakerDis：在“当前 RMU + 当前文件名 FEEDER_ID”范围内先按 `NAME=Y1/Y2/Y3/Q1/Q2/Q3...` 精确匹配；NAME 为 0 条时才使用同值 `CODE` 兜底；NAME/CODE 多条均阻断。
+- ZhaiWaiJieDiDaoZha：与柜内开关保持原一对一空间配对；Y* 优先 `NAME=KY*`，Q* 优先 `NAME=KQ*`；NAME 为 0 条时继续使用原 `CODE=Y*D/Q*D` 兜底。
+- BusDis 保持 `CODE=BUS` 原规则，但新增设备 FEEDER_ID 必须等于文件名馈线的硬校验。
+- 柜内目标设备必须同时满足 `COMBINED_ID = 当前 RMU.ID` 且 `FEEDER_ID = 文件名确定的 FEEDER_ID`；任一不满足均禁止关联。
+- 执行模型关联阶段同步采用同一 NAME→CODE 优先级和 RMU/FEEDER 双重归属复核，避免校验与实际写回规则不一致。
+- 报告设备明细新增最终匹配字段、数据库设备 FEEDER_ID、文件名目标 FEEDER_ID，便于现场核对。
+- 专项回归 33 passed；完整回归 402 passed / 1 skipped / 32 failed，失败节点与 v4.1.103 基线完全一致。
+
+## v4.1.103：文件名馈线概览增加所属站
+
+- 概览改为 `G文件 / 所属站 / 馈线` 三列。
+- 例如 `JED-NTH-ABH-16.sln.pic.g | ABH | AH316`。
+- 馈线不存在时仍显示文件名中的所属站，并提示检查该图馈线是否已创建。
+- 不改变文件名唯一权威的馈线判定逻辑。
+
+
+## v4.1.103：文件名馈线概览简化
+
+- “文件名馈线概览”只保留 G 文件名与最终馈线结果。
+- 数据库找到时直接显示：`数据库已找到，馈线：AH3xx`。
+- 数据库未找到时直接显示：`数据库未找到馈线，请检查该图的馈线是否已创建。`
+- 不再向现场用户展示馈线来源、405/13500 内部判定路径、FEEDER_ID 等实现细节。
+- v4.1.101 的文件名唯一馈线判定、数据库只读查询和设备 FEEDER_ID 归属校验逻辑保持不变。
+
+## v4.1.101：吉达馈线仅按文件名确定
+
+- G 文件名是图级馈线唯一来源；严格支持两种格式：`JED-<三位区域代码>-<站名>-<两位馈线号>.sln.pic.g`（例如 `JED-NTH-ABH-03.sln.pic.g` → `AH303`），以及新增的 `JED-<三位区域代码>-<站名>-AG<两位馈线号>.sln.pic.g`（例如 `JED-XXX-MDN-AG06.sln.pic.g` → 站 `MDN`、馈线 `AG406`）。其它格式直接 FAIL，并提示用户先修改文件名。
+- 从文件名取得站名 `ABH`，精确查询 `405 / substation.NAME=ABH`；必须恰好 1 条并取得 `405.ID`。
+- 程序固定拼接 `AH3 + 两位编号`：`03 -> AH303`、`16 -> AH316`。
+- 最终只按 `13500 / dms_feeder_device.ST_ID=<405.ID> AND NAME=AH3xx` 精确查询；恰好 1 条时，其 `13500.ID` 即本图唯一 `FEEDER_ID`。
+- `13500` 中找不到目标馈线时直接阻断，并提示：**“馈线不存在，请检查该图的馈线是否已创建。”** 多条时按数据库馈线不唯一阻断。
+- RMU、柱上开关、柱上变压器、G 根 `facID`、源侧 CBreaker、人工输入都不再参与馈线判定，也不能覆盖文件名确定的馈线。
+- 后续所有设备关联都必须校验其数据库 `FEEDER_ID` 等于文件名确定的图级 `FEEDER_ID`；不属于该馈线的设备单独阻断。
+- 报告中的“图级馈线概览”改为“文件名馈线概览”，不再用图中设备 FEEDER_ID 数量决定本图馈线。
+- 数据库查询仍为只读 `SELECT`；现有 13503 缺失馈线段补齐与 Workspace 安全副本回写规则保持不变。
+
+## v4.1.99：完整逻辑说明卡片统一背景
+
+- RMU、柱上开关、柱上变压器、熔断器、配网主站设备、馈线六个模型页面的逻辑步骤卡片统一使用相同浅色背景、文字颜色和边框。
+- 取消第 1 条逻辑说明的单独绿色强调背景；所有步骤属于同一说明层级，视觉保持一致。
+- 继续保持 v4.1.98 的紧凑间距和自然高度，不恢复纵向拉伸。
+- 仅修改 UI 样式与版本说明；识别、数据库查询、FEEDER_ID、KeyID、关联判断和 G 文件安全回写逻辑全部保持不变。
+
+## v4.1.98：RMU 完整逻辑说明紧凑布局
+
+- 右侧五个逻辑步骤卡片统一靠上连续排列，不再把工作区剩余高度平均分散到步骤之间。
+- 逻辑说明外框按内容自然高度显示，并在左右布局中顶部对齐；多余纵向空间只留在列表底部。
+- 仅修改 UI 布局；RMU 名称识别、柜内设备命名、数据库表/域、FEEDER_ID 校验、KeyID 判断和安全回写逻辑全部保持 v4.1.97。
+
+## v4.1.97：设备名称识别统一为“矩形最小边缘距离”
+
+- 统一距离定义：先计算两个矩形在 X/Y 方向不重叠部分的间距 `dx`、`dy`；若某一轴投影重叠，该轴间距为 0；最终距离为 `sqrt(dx² + dy²)`。水平相邻时自然等于 `dx`，垂直相邻时自然等于 `dy`，斜向时取两矩形最近边之间的欧氏距离。
+- **彻底移除设备名称识别中的中心点距离**：长文字（例如 `LBS973248-972459`）不会再因为 Text 中心离设备很远而被误判；只要文字矩形最近边实际靠近设备，就按真实最小边缘距离参与识别。
+- 统一覆盖：RMU 环网柜名称、RMU 柜内开关图上名称、柱上开关名称、柱上变压器名称、FUSE 继承的柱上变压器名称，以及馈线模块中 Bus/源侧设备附近的名称 Text 识别。
+- 方向判定同样只依据矩形相对位置，不使用中心点向量；原有业务优先级和过滤规则保持不变。
+- 原有阈值保持：RMU 名称 200、柱上开关 200、柱上变压器/FUSE 名称 300；馈线名称识别原有范围限制保持不变。
+- FUSE → 最近 `TRANSFORMER_OH` 本身此前已经使用矩形到矩形的最短距离，本版继续保持。
+- 仅改变“设备与名字 Text 的几何距离/方向判定”；数据库查询、FEEDER_ID、KeyID、安全回写和各模块其它业务规则保持原逻辑。
+
+## v4.1.88：柱上变压器同样改为“分类标记唯一权威”
+
+- 柱上变压器只认【图元管理】中的 `TRANSFORMER_OH` 分类标记，不再把 `TransformerDis` 当作设备类型限制。
+- 被标记图元无论实际 XML 元素名称是什么，都进入原有柱上变压器名称、13505、馈线、双 KeyID 校验与回写流程。
+- 写回使用识别到的真实 XML tag；FUSE 复用的最近柱上变压器链路也自动继承该规则。
+- 原有名称规则保持不变：纯数字 + 白色 + 无背景、TOP → RIGHT → GLOBAL、最大距离 300、Text 一对一。
+
+
+## v4.1.87：柱上开关识别改为“分类标记唯一权威”
+
+- 柱上开关不再要求 G XML 元素必须是 `CBreakerDis`。
+- 只要图元的 `devref` 在【图元管理】中对应的分类标记为 `LBS`、`SEC` 或 `AR`，该图元就作为柱上开关处理，XML 元素类型完全不参与过滤。
+- 名称规则、200 距离、非白色显式颜色、TOP→RIGHT→GLOBAL、一对一 Text、数据库查询名前去点号/横杠/空格、13501→13502、馈线校验与回写字段全部保持不变。
+- 回写时保留并使用该目标在 G 文件中的真实 XML tag，确保未来分类到其它元素类型时仍能准确修改对应图元。
+
+## v4.1.86：模型页面改为“完整关联逻辑说明”
+
+模型工作区不再展示“数据库表号 / 域号定义”表格，而是把每个独立模块实际执行的完整逻辑直接写在模块页面中：
+
+- **RMU**：RMU 矩形框识别、上方名称、柜内 CBreakerDis / 接地刀闸 / BusDis / RMU_PWBH_EFI 命名与数据库校验、PASS/RELINK/RMU_RELINK 判断、各对象实际回写字段。
+- **柱上开关**：LBS / SEC / AR 分类、非白色有颜色 Text、200 距离、TOP→RIGHT→GLOBAL、数据库查询前去 `. - 空格`、13501→13502、图级馈线校验、实际回写字段。
+- **柱上变压器**：TRANSFORMER_OH、纯数字白色无背景 Text、中心点→Text 锚点 300、TOP→RIGHT→GLOBAL、13505、图级馈线、双槽位 keyid1/keyid2 回写。
+- **FUSE**：最近 Transformer_OH 独占分配、复用柱上变压器名称、FUSE+变压器名称、13513 + 图级馈线、实际回写字段。
+- **配网主站设备**：CBreaker 锚点→最近 RMU→框内已有 KeyID→13501→FEEDER_ID/BAY_ID→407/408/409，及 CBreaker / Disconnector / GroundDisconnector 的回写字段。
+- **馈线**：RMU→柱上开关→柱上变压器首个唯一 FEEDER_ID、13500 确认、FeedLine/13503 分配、仅 INSERT 缺失馈线段、根 facID 与 FeedLine 回写。
+
+本版**不修改任何独立模块业务实现**：`src/dmm/application/modules/*.py` 与 v4.1.85 文件哈希完全一致。模型页面仅从“数据库定义表格”改成“业务流程说明”，避免用户误以为固定工程规则是可调整参数。
+
+本环境完整回归：345 passed / 1 skipped / 38 failed；v4.1.85 基线为 342 passed / 1 skipped / 38 failed，历史失败数量未增加。
+
+
+## v4.1.85：配网主站设备数据库定义改为固定只读
+
+配网主站设备模块不再允许用户编辑表号和域号，固定工程定义为：
+
+- `CBreaker`：Table ID `407`，Domain `40`，数据库表 `breaker`
+- `Disconnector`：Table ID `408`，Domain `30`，数据库表 `disconnector`
+- `GroundDisconnector`：Table ID `409`，Domain `30`，数据库表 `grounddisconnector`
+
+界面只读展示这些定义；旧版本缓存中过去保存的自定义值会在配置层被忽略。独立模块业务实现文件保持不变，识别、数据库查询、KeyID、安全写回等逻辑均未重写。
+
+本环境完整回归：342 passed / 1 skipped / 38 failed；v4.1.84 基线为 338 passed / 1 skipped / 38 failed，失败节点完全一致。
+
+## v4.1.84：RMU 数据库表号 / 域号改为固定工程定义
+
+RMU 模型工作区右侧不再提供表号、域号编辑框，而是以只读说明展示固定工程映射：
+
+- `CBreakerDis`：Table ID `13502`，Domain `40`
+- `ZhaiWaiJieDiDaoZha`：Table ID `13514`，Domain `40`
+- `BusDis`：Table ID `13506`，Domain `1`
+- `RMU_PWBH_EFI / pwbh`：Table ID `13533`，Domain `40`，`dms_relay_sig.CODE=EFI INDICATOR`，回写 `value.keyid1`
+
+这些值属于吉达项目固定模型规则，界面不可编辑；旧版本本地缓存里的自定义值也不会再参与运行。RMU 识别、数据库查询、KeyID、安全回写及其它独立模块业务代码保持不变。
+
+本环境回归：338 passed / 1 skipped / 38 failed；v4.1.83 基线为 336 passed / 1 skipped / 38 failed，失败节点集合一致。
+
+## v4.1.83：批量校验后增加待关联设备确认层
+
+- 独立模块代码逻辑完全不改；批量功能仍只做外层调度。
+- 批量校验完成后新增“待关联设备”列表，逐项展示模块、G 文件、XML ID、图上名称、数据库目标、状态和说明。
+- 所有通过现有独立模块校验的安全对象默认勾选，用户可在真正写 G 文件前取消任意对象。
+- 跨模块写回冲突对象继续显示，但在确认列表中禁用，不能进入批量写回。
+- “执行批量关联”按钮会动态显示本次实际勾选数量；未勾选对象不会写回。
+- 过滤动作只裁剪各模块已经生成的 `changes_by_file`，不复制、不重写、不修改 RMU / 柱上开关 / 柱上变压器 / FUSE / 配网主站设备 / 馈线的任何业务规则。
+
+## v4.1.82：批量关联操作按钮视觉优化
+
+批量关联页面的核心按钮改为独立操作面板：批量校验为轻量描边绿色按钮，执行批量关联为主品牌绿色按钮；增大点击区域并补充 Hover/Pressed/Disabled 状态。业务逻辑、执行顺序和安全写回规则均未改变。
+
+
+## v4.1.81：批量关联页面直接管理完整文件来源
+
+- 【批量关联】不再只显示“当前来源摘要”，而是直接提供与【模型工作区】相同风格的完整文件来源区域。
+- 本地模式可直接在批量页面选择 G 文件或目录。
+- SSH 只读模式可直接在批量页面配置 IP、端口、用户名、密码、远程目录，测试/保存连接，刷新、搜索、勾选和下载远程 G 文件。
+- 两个页面共用同一套配置和远程文件选择状态，不会形成两套独立来源；批量校验仍锁定同一份最新稳定快照。
+- 批量页面采用整页滚动，下面继续保留模块勾选、批量校验/关联、进度、Console 和汇总报告入口。
+
+
+## v4.1.80：批量关联独立为左侧一级菜单
+
+- 左侧新增【批量关联】一级菜单，批量功能不再占用模型工作区纵向空间。
+- 【模型工作区】继续保留所有独立模型；【批量关联】只负责统一选择、调度、汇总和安全执行。
+- 批量页显示当前本地/SSH 文件来源摘要，文件选择仍由模型工作区的公共文件源统一维护。
+- 批量页拥有独立进度、Console 日志和批量汇总报告入口。
+
+
+## v4.1.79：新增批量模型关联编排器，独立模块继续保留
+
+- 新增批量模型关联编排器，可一次勾选一个或多个模块：RMU、柱上开关、柱上变压器、FUSE、配网主站设备、馈线。
+- 独立模块不删除、不合并，仍用于专项校验、逐设备选择、排错和规则调试。批量功能只是统一调度现有模块。
+- 批量校验锁定一份共同 G 文件快照；SSH 模式只下载一次，本次所有模块使用同一个 `remote_input`。
+- 批量关联按 **RMU → 柱上开关 → 柱上变压器 → FUSE → 配网主站设备 → 馈线** 的顺序执行；后一个模块基于前一个模块写过的累计安全副本继续处理。
+- 每个模块执行时仍运行自己的执行前数据库/文件复核；不会因为进入批量模式而绕过原来的安全规则。
+- 执行前检查跨模块属性写回冲突；同一个 G 文件、同一个 XML、同一个属性若被两个模块计划写成不同值，则整批阻断。
+- 成功后只在 `batch_g_output` 中发布每个原始 G 文件的一份累计结果；原始 G 文件永不修改。
+- 批量模式会处理每个勾选模块本次校验得到的全部安全候选；如需只选部分设备，继续使用原来的独立模块。
+- 批量校验和批量关联都会生成汇总 HTML/CSV；每个模块仍有自己的详细 HTML/CSV。
+
+## v4.1.78：柱上开关名称改为“有颜色且非白色”
+
+- 柱上开关名称 Text 必须显式设置颜色，且颜色不能是白色；不再限定为红色，也不再区分红色深浅。
+- 红色、深红色、黄色、蓝色、绿色及其他显式非白色颜色都可参与候选；未设置颜色和白色 Text 继续排除。
+- 几何识别保持：距离 ≤ 200、TOP → RIGHT → GLOBAL、同级最近、Text 一对一。
+- 原有几何、Text 一对一及单位/注释过滤保持不变；本版只调整颜色门槛。
+- 图上名称不改写；普通名称只在查询 13501 前删除 `. - 空格`，例如 `SEC-2385` → `SEC2385`。若分类为 AR/LBS/SEC 且名称严格为“设备族+数字-数字”的复合业务格式（如 `LBS96527-21240`），中间横杠保留并按原名查询。
+
+
+## v4.1.77：恢复深红色柱上开关名称 + 明确“图上名称 / 数据库查询名称”
+
+- 图上名称识别仍按原有规则：只认红色 Text、距离 ≤ 200、TOP → RIGHT → GLOBAL、Text 一对一。
+- 吉达图纸中的 `170,0,0 / #aa0000` 属于红色，与 `255,0,0 / #ff0000` 一样允许作为柱上开关名称。
+- `SEC-2385 / SEC 2385 / SEC.2385` 的去点号、横杠、空格只用于查询数据库，图上原名称不修改；`LBS96527-21240` 这类严格复合业务名属于例外，按原名查询。
+- 报告把原始图上名称和数据库查询名称并排显示，并使用更直白的中文说明失败原因。
+
+## v4.1.76：柱上开关数据库查询名称标准化 + 报告说明优化
+
+- 柱上开关仍按现有图形规则识别：仅红色 Text、距离不超过 200、方向优先级 TOP → RIGHT → GLOBAL、Text 一对一。
+- 在查询 13501 / dms_combined_device 前，仅对柱上开关数据库查询值做标准化：普通名称删除点号 `.`、横杠 `-` 和所有空白；若分类与名称前缀一致，且名称严格符合 `AR/ARC/LBS/SEC + 数字-数字` 的复合业务格式，则保留中间横杠。
+  - `SEC-2385` → `SEC2385`
+  - `SEC 2369` → `SEC2369`
+  - `SEC.2270` → `SEC2270`
+- 图上的原始名称仍原样保留在报告中；报告单独显示最终“数据库查询名称”，方便核对普通标准化名称与复合业务原名。
+- 图级馈线判定中的柱上开关候选也使用相同标准化查询规则，避免模型校验与馈线识别不一致。
+- HTML 报告“说明”改为更直白的中文描述；内部诊断码仍保留在程序数据/CSV中，便于排查。
+- 13501 → 13502、FEEDER_ID、Domain=40、Expected KeyID 和 G 文件回写逻辑均未改变。
+
+## v4.1.74：柱上开关名称只允许红色 Text
+
+- 柱上开关名称 Text 现在 **只允许红色**；黄色、蓝色、绿色、橙色、白色、默认白色及其他颜色全部排除。
+- 名称距离上限继续保持 **200**。
+- 方向优先级继续保持 **TOP → RIGHT → GLOBAL**，同一级别按距离最近，Text 一对一。
+- 13501 / 13502、FEEDER_ID、Domain=40、KeyID 与 G 文件回写逻辑不变。
+
+## v4.1.73：柱上开关名称距离上限调整为 200
+
+- 柱上开关模型的设备到名称 Text 最大距离由 **300** 调整为 **200**。
+- 方向优先级仍为 **TOP → RIGHT → GLOBAL**；红色优先、其他非白色兜底、白色排除等现有颜色规则不变。
+- 同一优先级内仍按现有距离算法选择最近候选，Text 一对一、13501/13502、馈线校验、KeyID 与 G 文件回写逻辑均不变。
+
+## v4.1.72：FUSE 保留柱上变压器图形名称，数据库不唯一单独阻断
+
+- FUSE 与柱上变压器模型统一采用同一份图形名称结果。
+- 13505 匹配数不是 1 时，不再清空已经找到的柱上变压器名称；报告仍显示该名称、Text XML ID、方向、距离和 `FUSE+名称`。
+- 13505 不唯一仍然禁止关联和回写，只是错误原因改为数据库不唯一，而不是“名称未找到”。
+
+
+
+
+
+## v4.1.72：柱上开关名称增加固定颜色优先级
+
+- 柱上开关名称 Text **禁止白色/默认白色**；未设置 `lc/lcc` 的 Text 按默认白色处理，因此不参与柱上开关名称判定。
+- 名称颜色优先级固定为：**红色 RED → 其他非白色**。
+- 在同一个颜色级别内继续保持 v4.1.70 的方向优先级：**TOP 上方 → RIGHT 右方 → GLOBAL 全局兜底**。
+- 同一颜色、同一方向优先级内仍按距离最近选择；最大距离仍为 **300**，Text 一对一分配规则不变。
+- 13501/13502、FEEDER_ID 校验、Domain=40、KeyID 与 G 文件回写逻辑均未修改。
+
+## v4.1.70：柱上开关名称方向改为“上 → 右 → 全局”优先级
+
+- 仅调整吉达**柱上开关模型**的名称方向选择顺序；仍只识别图元管理中分类标记为 `LBS / SEC / AR` 的 `CBreakerDis`。
+- 名称候选仍从整张 G 图扫描，原有基础 Text 合法性规则保持不变；不新增纯数字、白色、无背景等柱上变压器专属过滤条件。
+- 名称方向优先级固定为 **上方（TOP）→ 右方（RIGHT）→ 全局兜底（GLOBAL）**；只要存在可分配的 TOP 候选，就不会选择 RIGHT/GLOBAL；无 TOP 时才进入 RIGHT；两者都没有才使用其他方向。
+- 柱上开关原有最大名称距离 **300**、现有距离计算方式、同一优先级内距离最近、一对一 Text 独占规则保持不变；多个柱上开关争用同一 Text 时仍由物理距离更近的设备获得。
+- 13501/13502 数据库链路、图级馈线识别与 FEEDER_ID 校验、Domain=40、Expected KeyID 与 G 文件安全回写逻辑全部不变。
+
+## v4.1.69：柱上变压器名称方向改为“中心点 → Text 锚点”判定，距离上限 300
+
+- 吉达柱上变压器仍全局识别图元管理中分类为 `Transformer_OH` 的全部图元；名称候选仍严格限制为**纯数字 + 白色 + 无背景 Text**。
+- 名称优先级仍为 **上方 → 右方 → 全局兜底**，但方向不再使用 Text 外接框中心判断，改为使用 `TransformerDis` 中心点 → `Text.x/Text.y` 锚点的向量主方向。
+- 同一方向优先级内仍按 `TransformerDis` 中心点 → `Text.x/Text.y` 锚点的欧氏距离最近；名称最大距离由 **200 调整为 300**。
+- 现场 `JED-STH-ADEL-19.sln.pic.g` 回归：`115001120` 中心 `(2582, 4243)`，名称 `96757` 锚点 `(2636, 4239)`，`dx=+54 / dy=-4`，因此方向应为 **RIGHT**，距离约 `54.148`，不应再显示为 bottom/GLOBAL。
+- FUSE 仍先锁定自身最近的 `Transformer_OH`，随后复用上述柱上变压器名称规则，因此 FUSE→Transformer 分配、13505/13513、馈线校验、Domain、KeyID 与安全回写逻辑均不变。
+
+
+## v4.1.68：FUSE 跟随柱上变压器“上 → 右 → 全局”名称规则
+
+- 熔断器模型仍然**先找几何位置最近的 `Transformer_OH`**，这一层设备选择规则不变。
+- 多个 FUSE 争用同一最近柱上变压器时，仍由距离更近的 FUSE 获得；其他 FUSE 只统计、不关联，也不回退到第二近变压器。
+- 锁定最近柱上变压器以后，该变压器名称不再使用 v4.1.65 的“任意方向最近白色 Text”兼容规则，而是与吉达柱上变压器模型完全一致：全图候选必须为**纯数字 + 白色 + 无背景 Text**，方向优先级固定为 **上方 → 右方 → 全局兜底**。
+- 同一优先级内继续按 `TransformerDis` 中心点到 `Text.x/Text.y` 锚点距离最近，最大距离仍为 200；Transformer_OH 之间的 Text 一对一独占规则保持不变。
+- 图形阶段选定柱上变压器名称后，只校验该名称在 `13505 / dms_tr_device` 是否唯一；不会因为数据库不唯一再切换到另一条 Text，避免 FUSE 与柱上变压器模型对同一变压器给出不同名称。
+- 熔断器最终仍按 `FUSE + 柱上变压器名称` 查询 `13513 / dms_disconnector_device`，图级 FEEDER_ID 校验、Domain=40、KeyID 计算与安全回写逻辑不变。
+
+
+## v4.1.67：吉达柱上变压器名称增加“上 → 右 → 全局”优先级
+
+- 仅调整“柱上变压器模型”自身的名称识别；全图继续识别所有图元管理中分类为 `Transformer_OH` 的图元。
+- 名称候选改为严格的 **纯数字 + 白色 + 无背景 Text**，候选 Text 仍从整张 G 图全局扫描。
+- 名称方向优先级固定为：**上方 → 右方 → 全局兜底**。只要有可分配的上方候选，就不使用右方或其他方向；没有上方候选才找右方；两者都没有才使用其余方向。
+- 同一优先级内继续按 `TransformerDis` 中心点到 `Text.x/Text.y` 锚点的距离从近到远，最大距离仍为 200；Text 一对一独占规则保持不变。
+- 13505 唯一匹配、FEEDER_ID 校验、双 KeyID 计算与安全回写逻辑不变。
+- FUSE 保持 v4.1.65/v4.1.66 的既有逻辑，不套用此次柱上变压器“上/右”方向优先级，因此 `117000344 -> 115000015 -> 971765 -> FUSE971765` 的修复不会回退。
+
+## v4.1.66：新增 `setup.ps1` 一键环境初始化脚本
+
+- 项目根目录新增 `setup.ps1`，用于 Windows PowerShell 一键准备运行环境。
+- 运行 `./setup.ps1` 或 `.\setup.ps1`：自动检测 Python 3.11+、创建 `.venv`、升级 pip/setuptools/wheel、安装 `requirements.txt` 并校验核心依赖；完成后默认启动 `app.py`。
+- 仅安装/更新环境、不启动程序：`.\setup.ps1 -NoRun`。
+- 如果 PowerShell 执行策略阻止脚本，可使用：`powershell -ExecutionPolicy Bypass -File .\setup.ps1 -NoRun`。
+- 此版本不改变模型识别、数据库匹配、KeyID、G 文件写回或报告业务逻辑。
+
+## v4.1.65：FUSE 柱上变压器名称改为“变压器中心 → Text 锚点”
+
+- FUSE 仍先锁定自身几何位置最近的 `Transformer_OH`，这一层设备选择逻辑不变。
+- 锁定柱上变压器后，不再用 Text 外接矩形边缘计算名称距离；改为以该 `TransformerDis` GIcon **中心点**为基准，计算到 `Text.x/Text.y` **锚点**的欧氏距离。
+- 候选仍只允许白色 Text、任意方向、最大距离 200，并按距离从近到远做 `13505 / dms_tr_device` 唯一匹配；首个唯一匹配名称就是该柱上变压器名称。
+- 熔断器名称仍严格为 `FUSE + 柱上变压器名称`。现场 `JED-STH-ADEL-04.sln.pic.g` 中，FUSE `117000344` 最近柱上变压器为 `115000015`，其名称应识别为 `971765`，因此熔断器名称为 `FUSE971765`；不再错误取相邻变压器的 `971488`。
+- FUSE 明细报告增加“变压器名称距离基准”，用于明确审计 `TRANSFORMER_CENTER_TO_TEXT_XY_ANCHOR`。
+
+## v4.1.64：HTML 报告勾选行统一蓝色高亮
+
+- 所有带复选框的 HTML 报告在勾选后都会把整行切换为浅蓝色，并显示蓝色边框，便于横向核对长表格。
+- 取消勾选后恢复该行原来的 PASS / WARN / RELINK / BLOCKED / FAIL 等状态颜色。
+- 文字筛选和颜色筛选只控制行的显示/隐藏，不会清除已经勾选的状态；重新显示后仍保持蓝色高亮。
+- 覆盖环网柜、馈线、柱上开关、柱上变压器、熔断器、配网主站设备 HTML 报告。
+- 不修改模型识别、数据库匹配、馈线判定、KeyID 计算或 G 文件回写逻辑。
+
+## v4.1.63：HTML 报告筛选运行脚本修复
+
+- 修复柱上变压器 HTML 报告的颜色筛选和文字筛选下拉/输入框只有界面、没有实际执行脚本的问题。
+- 同步补齐柱上开关、熔断器、配网主站设备报告的表格筛选脚本，避免相同问题。
+- 不修改任何模型识别、数据库匹配、馈线判断或 G 文件回写逻辑。
+
+
+## v4.1.62：柱上变压器 KeyID 回写强制复核
+
+- 柱上变压器执行关联后，立即从输出 G 文件重新读取 `keyid1/keyid2` 并逐个核对 Expected KeyID；缺失或不一致直接报错，不再出现“界面显示执行完成但 G 中没有 KeyID”的静默状态。
+- Console 明确输出每个 TransformerDis XML ID、Expected KeyID、输出 G 路径及回读确认结果。
+- 柱上变压器写回结果纳入 `model_change_log.csv`，可直接检查 `keyid1/keyid2` 的修改前后值。
+- 柱上变压器名称识别、FUSE、RMU、柱上开关、馈线等其他业务逻辑不变。
+
+
+
+## v4.1.61：Release 包名称加入 Jeddah
+
+- `build_exe.ps1` 最终生成的 release ZIP 改为：`Distribution_Model_Manager_Jeddah_v<版本号>.zip`。
+- 本版实际输出示例：`release\Distribution_Model_Manager_Jeddah_v4.1.61.zip`。
+- EXE 与 dist 目录仍保持 `Distribution_Model_Manager_v4.1.61`，仅最终交付 ZIP 增加 Jeddah 标识。
+- 业务功能不变。
+
+
+## v4.1.60：柱上变压器名称距离改为中心点到 Text 锚点
+
+- 仅修改“柱上变压器模型”自身的名称分配流程；FUSE、图级馈线识别及其他模型保持 v4.1.59 逻辑不变。
+- 柱上变压器仍先全图收集 `Transformer_OH`，并只使用白色 Text；方向不限，最大距离仍为 200。
+- 名称距离改为：`TransformerDis GIcon 中心点 -> Text.x/Text.y 锚点` 的欧氏距离，不再使用 Text 外接矩形最近边缘，避免长文字框向相邻设备延伸导致抢名。
+- 候选仍按全局距离做一对一最近分配：一个 Transformer 只分配一个 Text，一个 Text 只归属一个 Transformer；图形名称确定后才查询 13505。
+- 使用现场 `JED-CTL-AJWD-30.sln.pic.g` 验证：`115000667 -> 991890`、`115000672 -> 99969`、`115000814 -> 99964`、`115000820 -> 99963`。
+
+
+## v4.1.59：柱上变压器模型恢复纯图形全局最近名称分配
+
+- 仅修改“柱上变压器模型”自身的名称分配流程；FUSE、图级馈线识别等其他模块逻辑保持 v4.1.58 不变。
+- 先收集整张 G 图内全部 `Transformer_OH` 柱上变压器，再收集任意方向、距离不超过 200 的白色 Text。
+- 在所有柱上变压器与候选白色 Text 之间按几何距离做全局一对一最近分配：一个变压器只取一个 Text，一个 Text 只归属一个变压器。
+- 名称归属阶段不查询 13505；图形名称固定后，才进入 13505 唯一性、FEEDER_ID 和 KeyID 校验。
+
+
+## v4.1.58：柱上变压器名称改为全局任意方向 + 白色 Text
+
+- 柱上变压器仍只识别图元管理中分类为 **`Transformer_OH`** 的 `TransformerDis`。
+- 名称查找不再限制上方/右方，而是在**整张 G 图任意方向**扫描 Text；原有最大距离 **200** 保持不变。
+- 只有**白色 Text**可以作为柱上变压器名称候选；红色、绿色、黄色等非白色文字直接排除。G 文件未显式设置文字颜色时按默认白色处理。
+- 候选仍按几何距离从近到远尝试，并通过 `13505 / dms_tr_device` 唯一匹配确认名称；同一 Text 仍不能被多个目标柱上变压器重复使用。
+- 图级馈线识别中的“柱上变压器兜底”与 FUSE 模块复用同一套新规则，因此三处不会出现名称判断差异。
+- `FUSE -> 最近 Transformer_OH -> 变压器名称 -> FUSE+名称` 的链路不变，只是其中的“变压器名称”改为任意方向、200 距离、白色 Text。
+
+## v4.1.57：RMU 保护/EFI 改为图元分类标记驱动
+
+- RMU 内保护/EFI 信号不再绑定任何具体图元文件名；识别依据固定为图元管理中的分类标记 **`RMU_PWBH_EFI`**。
+- 程序读取本地缓存的 `element_catalog`，检查所有被标记为 `RMU_PWBH_EFI` 的图元定义；同一分类标记可以对应多个图元文件，只要 G 对象的 devref 精确匹配其中任意一个就作为 EFI 信号处理。
+- 后续即使服务器上的 EFI 图元文件改名，只要图元管理同步/保存后的对应记录仍标记为 `RMU_PWBH_EFI`，RMU 关联逻辑无需改代码。
+- 未带 `RMU_PWBH_EFI` 分类标记的 `pwbh` 图元即使文件名历史上叫 `NariPd_Normal` 也不会被当作 RMU EFI；反过来，新文件名只要被正确分类就能参与。
+- EFI 后续数据库规则不变：按当前 RMU 查询 `13533 / dms_relay_sig`，只接受唯一 `CODE=EFI INDICATOR`，默认 Domain=40，回写仍使用 `keyid1`。
+- `ALL / SMART_ONLY` 保护策略、SMART_ONLY 下非智能 RMU 已关联 EFI 的清理逻辑、属性键保留规则均保持不变。
+
+
+## v4.1.56：RMU 名称固定上方 + SMART-only 保护/EFI策略
+
+- RMU 环网柜名称在吉达现场固定只从**矩形框上方**寻找，最大距离仍为 200；右侧、左侧、下方不再作为 RMU 名称候选。
+- 新增“保护 / EFI 关联范围”选项：
+  - **所有环网柜都关联保护 / EFI**：保持原行为。
+  - **仅 SMART 智能环网柜关联保护 / EFI**：只有 SMART/SMR 环网柜关联 `NariPd_Normal / EFI INDICATOR`。
+- 选择“仅 SMART”后，NORMAL 环网柜如果已有 EFI 模型关联，会作为强制策略清理项执行：保留属性键，只清空关联值；`p_ReportType1` 回到 `0`。
+- NORMAL 环网柜若本来就没有 EFI 关联，只统计、不回写，也不会因为策略禁用而被判定为设备缺失。
+- 强制清理不会删除任何 XML 属性键；已存在的 `voltype1` 只将值清空。
+- 保护策略只影响当前固定 EFI 信号，不改变 CBreakerDis、接地刀闸、BusDis 的既有 RMU 关联规则。
+
+
+## v4.1.55：熔断器与柱上变压器改为一对一独占匹配
+
+- 每个 `FUSE` 只提名**几何位置最近的一个** `Transformer_OH` 柱上变压器。
+- 同一个柱上变压器只能被一个 FUSE 使用；如果多个 FUSE 的最近变压器是同一台，则按 FUSE→变压器距离比较，由距离更近的 FUSE 获得该变压器。
+- 竞争失败的 FUSE **不再寻找第二近变压器**，仅进入报告和统计，`association_ready=NO`、`writeback_needed=NO`，不会查询 13513、不会进入关联选择、不会回写 G 文件。
+- 只有成功独占分配柱上变压器的 FUSE 才继续名称链路：`FUSE -> 已分配 Transformer_OH -> 以该变压器为中心查上方/右方 Text -> 首个 13505 唯一名称 -> FUSE+名称`。
+- 柱上变压器名称仍完全复用柱上变压器模块规则：方向只允许上方/右方，距离不超过 200，并使用共享 Text 所有权，避免同一名称 Text 被多个已分配 FUSE 重复消费。
+- 熔断器报告新增“一对一分配统计”，明确展示 FUSE 总数、成功分配柱上变压器数量、仅统计不处理数量和数据库可关联数量；明细增加分配状态、占用 FUSE XML ID 等字段。
+- 使用现场 `JED-STH-ADEL-06.sln.pic.g` 几何数据回归验证：24 个 FUSE、22 个 Transformer_OH，最终 22 个独占匹配、2 个仅统计不处理；重复争用的远端 FUSE 不再错误复用已占用变压器。
+
+## v4.1.54：修正熔断器 → 柱上变压器 → 名称链路
+
+- 熔断器识别顺序固定为：**FUSE 分类标记 → 最近 Transformer_OH 柱上变压器设备 → 以该柱上变压器为中心查名称 → FUSE + 柱上变压器名称**。
+- 找到最近柱上变压器以后，FUSE 不再围绕自身寻找 Text，也不会因为名称候选失败而改找另一台变压器。
+- 柱上变压器名称仍严格只看**上方或右侧**、距离不超过 **200** 的 Text；不恢复名称格式、颜色或背景过滤。
+- 对这些几何合法候选按距离依次检查 `13505 / dms_tr_device`；首个数据库唯一匹配的名称才确认为该柱上变压器名称。这样可跳过附近属于其它设备的文字，例如 `LBS1197`，继续采用真正的右侧变压器名称 `96210`。
+- 派生熔断器名称后仍按 `13513 / dms_disconnector_device` 的 `NAME + 图级 FEEDER_ID` 唯一匹配，并继续使用 Domain=40。
+
+
+## v4.1.53：新增熔断器模型 / Fuse Model
+
+- 只处理图元管理中分类标记为 **FUSE** 的图元，图元类型识别完全以本地/中央图元分类标记为准。
+- 每个熔断器先寻找图形位置最近的 **Transformer_OH 柱上变压器**；柱上变压器名称直接复用现有识别逻辑：只找设备上方或右侧、距离不超过 200 的最近有效 Text。
+- 熔断器数据库名称固定为 **FUSE + 柱上变压器名称**。例如柱上变压器名称 `973360`，熔断器名称就是 `FUSE973360`。
+- 目标表固定为 **13513 / dms_disconnector_device**；使用 `NAME + 图级 FEEDER_ID` 精确查询，必须得到唯一记录。
+- 图级馈线继续使用现有统一规则：**环网柜 → 柱上开关 → 柱上变压器**，逐个设备尝试，首个数据库唯一匹配且带有效 FEEDER_ID 的设备确定单线图馈线。熔断器目标记录的 `13513.FEEDER_ID` 必须与图级馈线完全一致。
+- 熔断器 Domain 固定为 **40**，Expected KeyID 使用 `13513.ID + (40 << 32)` 计算，并在模型校验和真正执行回写前通过数据库再次验证。
+- 安全回写字段固定为 `app`、`voltype`、`p_ReportType`、`state`、`keyid`；原始 G 文件不修改，只写 Workspace/g_output 安全副本。
+- 新增熔断器模型设置页、候选选择表、HTML/CSV 报告和 Console 日志。
+
+
+## v4.1.52：馈线识别改为“逐个设备，首个唯一即采用”
+
+- 图级馈线仍按 **环网柜 → 柱上开关 → 柱上变压器** 的优先级识别，但不再要求高优先级设备“必须全部可用”或“同类唯一设备的 FEEDER_ID 必须全部一致”。
+- 环网柜逐个查询 `13501 / dms_combined_device`：名称匹配 0 条或多条时跳过继续下一个；首个唯一匹配且带有效 `FEEDER_ID` 的 RMU 立即作为馈线判定设备。
+- 如果所有 RMU 都无法唯一判定，继续逐个检查柱上开关；柱上开关同样查询 `13501`，首个唯一记录立即采用。
+- 如果柱上开关也全部无法唯一判定，最后逐个检查柱上变压器；柱上变压器查询 `13505 / dms_tr_device`，首个唯一记录立即采用。
+- 成功取得 `FEEDER_ID` 后仍必须查询 `13500 / dms_feeder_device` 确认最终馈线。若唯一设备给出的 FEEDER_ID 在 13500 不存在，则作为数据库完整性错误阻断，不静默换用其它设备。
+- Console 日志记录每个实际尝试的候选设备及“0 条 / 多条不唯一 / FEEDER_ID 为空 / 最终采用”结果；报告继续只展示最终真正采用的判定设备。
+- RMU 自身关联仍不要求先识别图级馈线；柱上开关、柱上变压器、馈线及其它需要馈线约束的模块仍必须证明目标设备属于最终识别出的图级 FEEDER_ID。
+
+## v4.1.51：报告增加简洁馈线判定说明
+
+- 馈线、柱上开关、柱上变压器以及配网主站设备报告增加简洁的“馈线判定”说明。
+- 报告明确显示本次实际采用的判定设备，例如“环网柜 96680”“柱上开关 LBS1115”或“柱上变压器 973360”。
+- 判定过程只显示短链路：上方/右方最近名称 → 13501/13505 唯一匹配 → 读取 FEEDER_ID → 查询 13500 确认最终馈线；不再展开内部超长证据链。
+- 馈线报告现在同步保存判定锚点设备，便于 HTML 报告展示；馈线识别优先级、设备归属校验和关联逻辑均不变化。
+
+
+## v4.1.50：柱上开关报告精简图级馈线判定依据
+
+- 柱上开关 HTML/CSV/公开 report.json 不再展示“图级馈线判定依据 / Graph Feeder Evidence”字段，避免超长证据链占用明细表宽度。
+- “图级馈线识别方式”“图级馈线 ID/名称”等结果字段继续保留。
+- 馈线判定证据仍保留在程序内部，用于校验、设备归属检查和 Console 日志，不改变任何馈线识别或关联逻辑。
+
+
+
+
+## v4.1.49：柱上开关/柱上变压器取消名称格式、颜色、背景强制过滤
+
+- 柱上开关和柱上变压器设置页删除“设备名称筛选条件（强制过滤）”区域，不再让用户选择名称格式、文字颜色或文字背景。
+- 名称识别继续强制采用吉达规则：只看设备**上方或右侧**的 Text，并保留原距离阈值（柱上开关 300、柱上变压器 200）。
+- 业务逻辑不再读取或应用 `name_format / name_colors / name_has_background`；旧本地缓存中即使仍存在这些字段也会被忽略。
+- 仍保留基础 Text 合法性排除（例如 kV、A、V 等明显单位/注释文字），避免把非设备名称当成目标名称。
+- 馈线识别优先级、设备馈线归属、数据库匹配、KeyID 校验与安全回写逻辑不变。
+
+
+## v4.1.47：图元配置三按钮分离 / Local Save, Admin Publish, Central Pull
+
+- 图元管理页把配置动作明确拆成三个独立按钮：**保存到本地缓存**、**保存并同步到中央仓库**、**同步中央配置仓库配置**。
+- “保存到本地缓存”只保存当前图元服务器设置和图元分类标记到用户本机缓存，不访问中央仓库；共享配置仍仅 Admin 可编辑。
+- “保存并同步到中央仓库”仅 Admin 可用：先落盘本地缓存，再由服务器校验 Admin machine_id/admin_epoch 后发布中央共享配置。
+- “同步中央配置仓库配置”对普通客户端和 Admin 均可用，只有用户手动点击才读取中央仓库，并按既有规则用中央数据库、文件服务器、图元标记覆盖本机共享缓存。
+- 软件启动行为不变：不自动读取中央仓库，不自动测试 Oracle/SSH。
+
+
+## v4.1.46：吉达固定单馈线图、统一上方/右侧名称识别与设备日志
+
+- 馈线模块移除“自动识别 / 强制单馈线图 / 强制组合图”选择，吉达现场固定按单馈线图工作。
+- 环网柜、柱上开关、柱上变压器的名称搜索方向统一硬限制为 **上方或右侧**；原有名称格式、颜色、背景、距离阈值和一对一 Text 分配规则保持不变。
+- 柱上开关继续使用 300 距离上限，柱上变压器继续使用 200 距离上限，RMU 继续使用既有 RMU 距离规则。
+- Console 日志新增发现环网柜、柱上开关、柱上变压器、馈线识别候选和最终馈线信息，便于现场审计。
+- 馈线识别优先级、设备馈线归属校验、13503 分配/创建、KeyID 校验和安全副本写回逻辑不变。
+
+## v4.1.45：Admin 随时抢占与自动降权 / Admin Takeover
+
+- 任意普通客户端都可以手动点击“抢占 Admin 权限”；抢占只更新很小的 `instance.json` 所有权信息，不自动同步或发布数据库、服务器、图元配置。
+- Admin 所有权新增 `admin_epoch`。每次抢占都会递增，发布与释放时服务器同时校验 `machine_id + admin_epoch`，避免旧 Admin 或同机旧进程继续发布。
+- 当前 App 在明确成为 Admin 后，每 10 秒后台只读取一次 `instance.json`。发现 Admin 已被其他客户端抢占时立即自动降权为普通客户端；该检查不读取 `database.json`、`file_server.json`、`element_marks.json`。
+- 软件启动仍然完全本地优先：启动阶段不访问中央仓库，不检查 Oracle/SSH。只有手动同步、抢占、发布/释放或成为 Admin 后的所有权检查才会访问中央服务器。
+- 普通客户端的数据库、G 文件 SSH、图元服务器和图元分类配置均为只读，只能手动同步中央共享配置；抢占 Admin 后才允许修改、保存本地共享配置并手动发布。
+- 中央配置发布继续与本地保存分离；后台 Admin 检查失败不会因临时网络故障自动降权，真正发布时仍由服务器再次强校验所有权。
+
+## v4.1.44：本地配置优先 / Manual Central Sync
+
+- 软件启动严格只读取本机配置缓存，不自动访问中央配置、Oracle 或 SSH/SFTP 服务器。
+- 图元分类标记、数据库配置、G 文件服务器/图元服务器配置及中央仓库连接参数均保存在本机用户缓存；替换程序目录后仍可恢复。
+- 本机用户可以自由修改并保存配置；普通保存不会自动发布到中央仓库。
+- 只有点击“连接并同步中央配置”才读取中央仓库；同步成功后中央数据库、文件服务器和图元标记会覆盖本机对应缓存。
+- “初始化并设为 Admin”“保存并发布全部配置”“发布图元配置”“释放 Admin”均保持为显式人工操作。
+- Oracle/SSH 连通性不在启动阶段检查，仅在用户点击测试或实际执行相关功能时连接并按需报错。
+
+
+## v4.1.43：统一馈线识别优先级 / Unified Feeder Ownership
+
+- 除 RMU 环网柜关联本身外，所有模型关联都必须先识别图级馈线，并证明目标数据库设备属于该馈线。
+- 馈线识别采用固定优先级：**环网柜 → 柱上开关 → 柱上变压器**。只有图内不存在更高优先级设备时，才允许使用下一类设备。
+- 环网柜和柱上开关都使用 `13501 / dms_combined_device` 的唯一数据库记录取得 `FEEDER_ID`；柱上变压器使用 `13505 / dms_tr_device` 的唯一记录。
+- 同一优先级存在多个可唯一匹配设备时，它们的 `FEEDER_ID` 必须全部一致；冲突时直接阻断。
+- 文件名、G 根 `facID`、源侧 `CBreaker` 名称和人工选择均不参与馈线识别。
+- Feeder、Pole Switch、Pole Transformer、Master Station 在执行阶段都会重新识别图级馈线；非馈线模块同时重新验证目标设备的馈线归属。
+
+## v4.1.42：馈线按自身图元自动识别 / Feeder Graphical Recognition
+
+- 馈线识别方式与柱上开关、柱上变压器保持一致：`目标图元 -> 最近有效 Text -> 数据库唯一匹配`。
+- 馈线自己的目标图元为源侧 `CBreaker`；使用现有名称格式、颜色、背景过滤规则，在 400 图形距离内选择最近 Text。
+- 将该图上 Text 作为馈线名称证据，唯一匹配 `13500 / dms_feeder_device` 后得到 `FEEDER_ID`。
+- **不会**读取柱上开关/柱上变压器的 `feeder_id` 来反推馈线。
+- 文件名、G 根 `facID`、人工馈线输入均不再作为馈线识别来源。
+- 13503 分配/补齐、SECTION_TYPE、BV_ID、KeyID 校验、Workspace 安全副本等其它逻辑保持不变。
 
 ## v4.1.39：馈线来源按模式显示 / Mode-specific Feeder Source UI
 
@@ -1367,7 +2056,7 @@ RMU 模块只关注：
 7. 已有关联 KeyID 实际属于哪个环网柜
 ```
 
-不进行任何馈线判断。
+单线图中会进一步校验图级 FEEDER_ID；数据库其它馈线上的同名 RMU 不再阻断，只要求当前馈线内唯一匹配。
 
 ## RMU 名称不唯一 + 已有人为 KeyID
 
@@ -1395,7 +2084,7 @@ Y2 -> ID=200
 
 ## RMU 模块取消全部馈线判断
 
-从 v3.0.24 开始，RMU 模块不再根据馈线进行任何校验或关联决策。
+从 v4.1.97 开始，RMU 在单线图中会进一步校验图级馈线：先沿用现有设备识别规则确定 FEEDER_ID，再只在该馈线下选择同名环网柜。数据库其它馈线上的同名 RMU 不再造成阻断；合成图和环网图保持原 RMU 行为。
 
 以下逻辑全部停用：
 

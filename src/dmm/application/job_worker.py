@@ -96,6 +96,7 @@ class JobWorker(QThread):
             export_html_bundle(reports, html_path, rules, language=self.settings.get("language", self.cfg.get("language", "zh_CN")))
             csv_paths = export_csv_bundle(reports, csv_base, language=self.settings.get("language", self.cfg.get("language", "zh_CN")))
 
+            multi_table_report = str(self.module.module_id).upper() in {"RMU", "FEEDER"}
             artifacts = {
                 "task_type": report_context[0],
                 "report_kind": self.module.module_id,
@@ -104,7 +105,12 @@ class JobWorker(QThread):
                 "report_dir": str(report_dir),
                 "html": str(html_path),
                 "rmu_csv": str(csv_paths[0]) if len(csv_paths) > 0 else "",
-                "device_csv": str(csv_paths[1]) if len(csv_paths) > 1 else "",
+                "device_csv": (
+                    str(csv_paths[1])
+                    if multi_table_report and len(csv_paths) > 1
+                    else ""
+                ),
+                "failure_csv": str(csv_paths[-1]) if csv_paths else "",
                 "g_output_dir": str(self.run_dir / "g_output"),
             }
 

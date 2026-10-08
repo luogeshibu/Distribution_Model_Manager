@@ -38,8 +38,15 @@ if ($BuildScript -notmatch '\$AppName\s*=\s*"Distribution_Model_Manager_v\$AppVe
 if ($BuildScript -match '\$AppName\s*=\s*"Distribution_Model_Manager_v\d+\.\d+\.\d+"') {
     throw "build_exe.ps1 中发现硬编码版本 AppName，请改为从 APP_VERSION 自动派生。"
 }
+if ($BuildScript -notmatch '\$ReleasePackageName\s*=\s*"Distribution_Model_Manager_Jeddah_v\$AppVersion"') {
+    throw "build_exe.ps1 的 release ZIP 名称未包含 Jeddah 或未从 APP_VERSION 自动派生。"
+}
+if ($BuildScript -notmatch '\$ReleaseZip\s*=\s*Join-Path\s+\$ReleaseDir\s+"\$ReleasePackageName\.zip"') {
+    throw "build_exe.ps1 未使用 Jeddah ReleasePackageName 生成 release ZIP。"
+}
 Write-Host "  - smoke test: not found"
 Write-Host "  - packaging version: derived from APP_VERSION"
+Write-Host "  - release ZIP name: Distribution_Model_Manager_Jeddah_v<version>.zip"
 Write-Host "  - source G safety: Workspace copy/write-back architecture enabled"
 
 Write-Host "[5/7] Report/audit feature checks..."

@@ -10,14 +10,14 @@ DEFAULT_DEVICE_RULES = {
     "CBreakerDis": {
         "table_id": 13502,
         "domain": 40,
-        "match_mode": "CODE_EQUALS_LOGICAL_CODE",
-        "description": "配网开关/断路器",
+        "match_mode": "NAME_THEN_CODE_IN_RMU_AND_FEEDER",
+        "description": "配网开关/断路器（当前RMU+当前馈线，NAME优先，CODE兜底）",
     },
     "ZhaiWaiJieDiDaoZha": {
         "table_id": 13514,
         "domain": 40,
-        "match_mode": "GROUND_FROM_BREAKER",
-        "description": "接地刀闸",
+        "match_mode": "GROUND_KNAME_THEN_DCODE_IN_RMU_AND_FEEDER",
+        "description": "接地刀闸（KY/KQ名称优先，Y/Q+D代码兜底）",
     },
     "BusDis": {
         "table_id": 13506,
@@ -57,23 +57,24 @@ DEFAULT_NAME_POSITIONS = {
     "bottom": False,
 }
 
-# RMU name direction remains configurable.  The Jeddah default is top, while
-# operators may enable multiple sides when a drawing family requires it.
+# Jeddah hard rule for RMU cabinet names: use the RMU rectangle as the
+# geometry reference and ONLY accept Text above the RMU frame. Right/left/
+# bottom/global fallback is intentionally forbidden. Cached/user settings
+# can never widen this production rule.
 RMU_NAME_DIRECTIONS = ("top", "right", "left", "bottom")
 DEFAULT_RMU_NAME_DETECTION_MODE = "FIXED"
 
+# Protection / EFI association policy inside RMUs.
+# ALL: associate every pwbh element marked RMU_PWBH_EFI for every RMU.
+# SMART_ONLY: associate it only for SMART/SMR RMUs; already-linked EFI models
+# in NORMAL RMUs are cleared back to an unlinked attribute state.
+DEFAULT_RMU_PROTECTION_SCOPE = "ALL"
+
 
 def resolve_rmu_name_positions(mode="FIXED", configured_positions=None):
-    """Return the configured RMU name directions in stable UI order."""
-    configured_positions = configured_positions or DEFAULT_NAME_POSITIONS
-    selected = [
-        position
-        for position in RMU_NAME_DIRECTIONS
-        if bool(configured_positions.get(position, False))
-    ]
-    # Older Jeddah workspace files may contain the previous all-false value;
-    # migrate that state to the current default instead of disabling naming.
-    return selected or ["top"]
+    """Return the hard-coded Jeddah RMU cabinet-name direction: TOP only."""
+    del mode, configured_positions
+    return ["top"]
 
 DEFAULT_RMU_NAME_EXCLUSIONS = [
     "N.O.P",
@@ -98,8 +99,9 @@ DEFAULT_SETTINGS = {
         "remote_directory": "/home/up8000/data/graph/display/sln",
         "element_directory": "/home/up8000/data/graph/element",
     },
-    # Bootstrap-only connection to the shared NARI configuration directory.
-    # The first-run Admin wizard creates the files on the server.
+    # Connection details for the shared NARI configuration directory.
+    # v4.1.45 never contacts this server during startup. It is used only when
+    # the operator explicitly syncs, initializes, publishes or releases Admin.
     "central_config": {
         "enabled": True,
         "host": "172.16.21.27",
@@ -112,16 +114,9 @@ DEFAULT_SETTINGS = {
     "element_catalog": {
         "records": [],
     },
-    # Name format/color/background settings are hard filters for the global
-    # Text-to-device assignment.
-    "pole_switch_name_numeric": False,
-    "pole_switch_name_format": "ALPHANUMERIC_SPACE",
-    "pole_switch_name_colors": ["WHITE"],
-    "pole_switch_name_has_background": False,
-    "transformer_name_numeric": True,
-    "transformer_name_format": "NUMERIC",
-    "transformer_name_colors": ["WHITE"],
-    "transformer_name_has_background": False,
+    # Pole-switch / pole-transformer names use fixed Jeddah geometry rules
+    # (model-specific direction/color + existing distance limits); no user format/background
+    # preference is stored or applied.
     "last_file_path": "",
     "last_folder_path": "",
     "last_run_dir": "",
@@ -129,16 +124,17 @@ DEFAULT_SETTINGS = {
     "rmu_name_positions": DEFAULT_NAME_POSITIONS,
     "rmu_name_detection_mode": DEFAULT_RMU_NAME_DETECTION_MODE,
     "rmu_name_exclusions": DEFAULT_RMU_NAME_EXCLUSIONS,
+    "rmu_protection_scope": DEFAULT_RMU_PROTECTION_SCOPE,
     "device_rules": {},
     "master_station_rules": {},
     "breaker_name_source": "GRAPHICAL_TEXT",
     "feeder_table_id": 13500,
     "section_table_id": 13503,
     "section_domain": 1,
-    "feeder_resolution_mode": "FACID",
+    "feeder_resolution_mode": "GRAPHICAL_AUTO",
     "manual_feeder_name": "",
     "feeder_station_hint": "",
     "allow_feeder_override": False,
-    "feeder_drawing_mode": "AUTO",
+    "feeder_drawing_mode": "SINGLE",
     "auto_create_missing_sections": True,
 }
